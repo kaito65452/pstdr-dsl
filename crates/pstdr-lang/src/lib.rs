@@ -315,6 +315,16 @@ send "Hi {n}" to player;
         assert_eq!(min[1].as_u64(), Some(26));
         assert_eq!(min[2].as_u64(), Some(60));
 
+        // Verifikasi modules selalu mengandung KEDUA tipe: "data" dan "script" dengan UUID berbeda
+        let modules1 = val["modules"].as_array().expect("modules harus array");
+        let data_mod1 = modules1.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
+        let script_mod1 = modules1.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        let d_uuid1 = data_mod1["uuid"].as_str().unwrap();
+        let s_uuid1 = script_mod1["uuid"].as_str().unwrap();
+        assert!(!d_uuid1.is_empty());
+        assert!(!s_uuid1.is_empty());
+        assert_ne!(d_uuid1, s_uuid1, "UUID data dan script harus berbeda");
+
         // Target lama 1.21.50 → min_engine_version harus [1, 21, 50]
         let dir2 = temp_dir("manifest2");
         crate::wiring::update_manifest(&dir2, "1.21.50", "1.16.0").unwrap();
@@ -324,6 +334,11 @@ send "Hi {n}" to player;
         assert_eq!(min2[0].as_u64(), Some(1));
         assert_eq!(min2[1].as_u64(), Some(21));
         assert_eq!(min2[2].as_u64(), Some(50));
+
+        let modules2 = val2["modules"].as_array().expect("modules harus array");
+        let data_mod2 = modules2.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
+        let script_mod2 = modules2.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        assert_ne!(data_mod2["uuid"], script_mod2["uuid"], "UUID data dan script harus berbeda");
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
@@ -345,6 +360,16 @@ send "Hi {n}" to player;
         let dep_ver = val["dependencies"][0]["version"].as_str().unwrap_or("");
         assert_eq!(dep_ver, "2.11.0",
             "dependency @minecraft/server harus 2.11.0, dapat: '{dep_ver}'");
+
+        // Verifikasi modules selalu mengandung KEDUA tipe: "data" dan "script" dengan UUID berbeda
+        let modules = val["modules"].as_array().expect("modules harus array");
+        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
+        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        let data_uuid = data_mod["uuid"].as_str().unwrap();
+        let script_uuid = script_mod["uuid"].as_str().unwrap();
+        assert!(!data_uuid.is_empty());
+        assert!(!script_uuid.is_empty());
+        assert_ne!(data_uuid, script_uuid, "UUID data dan script harus berbeda");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -629,6 +654,18 @@ on hit target with V2_26_ID by player { damage target by 1 }
             val["header"]["min_engine_version"].as_array().is_none(),
             "v3 manifest tidak boleh berupa array"
         );
+
+        // Verifikasi modules pada v3 mengandung kedua tipe: "data" dan "script" dengan version "1.0.0"
+        let modules = val["modules"].as_array().expect("modules harus array");
+        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
+        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        assert_eq!(data_mod["version"].as_str(), Some("1.0.0"));
+        assert_eq!(script_mod["version"].as_str(), Some("1.0.0"));
+        let data_uuid = data_mod["uuid"].as_str().unwrap();
+        let script_uuid = script_mod["uuid"].as_str().unwrap();
+        assert!(!data_uuid.is_empty());
+        assert!(!script_uuid.is_empty());
+        assert_ne!(data_uuid, script_uuid, "UUID data dan script harus berbeda");
 
         let _ = fs::remove_dir_all(&dir);
     }

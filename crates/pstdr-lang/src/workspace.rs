@@ -499,24 +499,35 @@ pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Resul
     fs::write(root.join("pstdr.toml"), toml_content)
         .map_err(|e| format!("Gagal menulis pstdr.toml: {e}"))?;
 
+    let fmt_ver = 2u64;
+    let mod_ver = if fmt_ver == 3 {
+        json!("1.0.0")
+    } else {
+        json!([1, 0, 0])
+    };
     let min_engine = resolve_min_engine_version(&spec.bedrock_version)
         .unwrap_or([1, 26, 60]);
     let bp_manifest = json!({
-        "format_version": 2,
+        "format_version": fmt_ver,
         "header": {
             "name": format!("{pack_name} BP"),
             "description": "Behavior Pack powered by PackStudio (.pstdr)",
             "uuid": generate_uuid_v4(),
-            "version": [1, 0, 0],
+            "version": mod_ver,
             "min_engine_version": min_engine
         },
         "modules": [
+            {
+                "type": "data",
+                "uuid": generate_uuid_v4(),
+                "version": mod_ver
+            },
             {
                 "type": "script",
                 "language": "javascript",
                 "uuid": generate_uuid_v4(),
                 "entry": "scripts/main.js",
-                "version": [1, 0, 0]
+                "version": mod_ver
             }
         ],
         "dependencies": [

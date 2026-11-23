@@ -247,7 +247,20 @@ pub fn update_manifest(
                 "version": [1, 0, 0],
                 "min_engine_version": min_engine
             },
-            "modules": [],
+            "modules": [
+                {
+                    "type": "data",
+                    "uuid": generate_uuid_v4(),
+                    "version": [1, 0, 0]
+                },
+                {
+                    "type": "script",
+                    "language": "javascript",
+                    "uuid": generate_uuid_v4(),
+                    "entry": "scripts/main.js",
+                    "version": [1, 0, 0]
+                }
+            ],
             "dependencies": []
         })
     };
@@ -256,6 +269,11 @@ pub fn update_manifest(
         .get("format_version")
         .and_then(|v| v.as_u64())
         .unwrap_or(2);
+    let mod_ver = if fmt_ver == 3 {
+        json!("1.0.0")
+    } else {
+        json!([1, 0, 0])
+    };
 
     if let Some(root_obj) = manifest.as_object_mut() {
         root_obj
@@ -269,7 +287,7 @@ pub fn update_manifest(
             h.entry("uuid".to_string())
                 .or_insert_with(|| Value::String(generate_uuid_v4()));
             h.entry("version".to_string())
-                .or_insert_with(|| json!([1, 0, 0]));
+                .or_insert_with(|| mod_ver.clone());
 
             if fmt_ver == 3 {
                 let is_valid = h
@@ -297,6 +315,17 @@ pub fn update_manifest(
             .entry("modules".to_string())
             .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(arr) = modules.as_array_mut() {
+            let has_data = arr
+                .iter()
+                .any(|m| m.get("type").and_then(|t| t.as_str()) == Some("data"));
+            if !has_data {
+                arr.push(json!({
+                    "type": "data",
+                    "uuid": generate_uuid_v4(),
+                    "version": mod_ver
+                }));
+            }
+
             let has_script = arr
                 .iter()
                 .any(|m| m.get("type").and_then(|t| t.as_str()) == Some("script"));
@@ -306,7 +335,7 @@ pub fn update_manifest(
                     "language": "javascript",
                     "uuid": generate_uuid_v4(),
                     "entry": "scripts/main.js",
-                    "version": [1, 0, 0]
+                    "version": mod_ver
                 }));
             }
         }
