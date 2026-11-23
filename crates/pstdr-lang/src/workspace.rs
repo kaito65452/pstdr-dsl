@@ -4,7 +4,7 @@ use crate::formatter::format_source;
 use crate::parser::parse_source;
 use crate::spec::BedrockSpec;
 use crate::validator::{validate_program, ValidationContext};
-use crate::wiring::{generate_uuid_v4, resolve_min_engine_version, update_main_js, update_manifest, wire_bind_targets};
+use crate::wiring::{generate_uuid_v4, is_valid_v3_min_engine, resolve_min_engine_version, update_main_js, update_manifest, wire_bind_targets};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -397,32 +397,53 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
             .map_err(|e| format!("Gagal membaca BP/manifest.json: {e}"))?;
         match serde_json::from_str::<Value>(&raw) {
             Ok(val) => {
+                let fmt_ver = val
+                    .get("format_version")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2);
                 let header = val.get("header");
                 bp_uuid = header
                     .and_then(|h| h.get("uuid"))
                     .and_then(|u| u.as_str())
                     .map(|s| s.to_string());
 
-                let min_ok = header
-                    .and_then(|h| h.get("min_engine_version"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.len() == 3
-                            && arr[0].as_u64() == Some(1)
-                            && arr[1].as_u64().is_some()
-                            && arr[2].as_u64().is_some()
-                    })
-                    .unwrap_or(false);
+                let min_ok = if fmt_ver == 3 {
+                    header
+                        .and_then(|h| h.get("min_engine_version"))
+                        .and_then(|v| v.as_str())
+                        .map(is_valid_v3_min_engine)
+                        .unwrap_or(false)
+                } else {
+                    header
+                        .and_then(|h| h.get("min_engine_version"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.len() == 3
+                                && arr[0].as_u64() == Some(1)
+                                && arr[1].as_u64().is_some()
+                                && arr[2].as_u64().is_some()
+                        })
+                        .unwrap_or(false)
+                };
 
                 if !min_ok {
-                    diags.push(Diagnostic::error(
-                        DiagnosticCode::E015,
-                        &Span::file_only("BP/manifest.json"),
-                        "Audit Gate gagal: 'min_engine_version' harus berformat [1, x, x].",
-                        "Atur \"min_engine_version\": [1, 26, 60] pada header BP/manifest.json. \
-                         Angka pertama wajib 1, meski target game adalah 26.60 (mis. [1, 26, 60]) \
-                         atau versi lama (mis. [1, 21, 50]).",
-                    ));
+                    if fmt_ver == 3 {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E015,
+                            &Span::file_only("BP/manifest.json"),
+                            "Audit Gate gagal: manifest format_version: 3 mewajibkan 'min_engine_version' berupa string SemVer \"1.x.x\".",
+                            "Atur \"min_engine_version\": \"1.26.60\" pada header BP/manifest.json. Angka pertama wajib 1 (contoh: \"1.26.60\").",
+                        ));
+                    } else {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E015,
+                            &Span::file_only("BP/manifest.json"),
+                            "Audit Gate gagal: 'min_engine_version' harus berformat [1, x, x].",
+                            "Atur \"min_engine_version\": [1, 26, 60] pada header BP/manifest.json. \
+                             Angka pertama wajib 1, meski target game adalah 26.60 (mis. [1, 26, 60]) \
+                             atau versi lama (mis. [1, 21, 50]).",
+                        ));
+                    }
                 }
             }
             Err(e) => {

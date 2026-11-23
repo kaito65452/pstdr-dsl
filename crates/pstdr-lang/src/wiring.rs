@@ -117,8 +117,26 @@ pub fn parse_semver_triplet(ver: &str) -> [u64; 3] {
     resolve_min_engine_version(ver).unwrap_or([1, 26, 60])
 }
 
-/// Menyuntikkan `minecraft:custom_components` pada file BP/items/*.json dan BP/blocks/*.json
-/// yang dideklarasikan melalui `bind_target(...)` secara idempoten.
+/// Menentukan apakah format_version file BP menggunakan skema Custom Components V2 (>= 1.21.90).
+pub fn uses_custom_components_v2(format_version: &str) -> bool {
+    let triplet = resolve_min_engine_version(format_version).unwrap_or([1, 0, 0]);
+    triplet >= [1, 21, 90]
+}
+
+/// Helper validasi format min_engine_version string pada manifest format_version: 3 (SemVer "1.x.x").
+pub fn is_valid_v3_min_engine(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let Ok(p0) = parts[0].parse::<u64>() else { return false; };
+    let Ok(_p1) = parts[1].parse::<u64>() else { return false; };
+    let Ok(_p2) = parts[2].parse::<u64>() else { return false; };
+    p0 == 1
+}
+
+/// Menyuntikkan `minecraft:custom_components` (V1) atau key komponen langsung (V2)
+/// pada file BP/items/*.json dan BP/blocks/*.json yang dideklarasikan melalui `bind_target(...)`.
 pub fn wire_bind_targets(
     workspace_root: &Path,
     bind_targets: &[BindTargetStmt],
@@ -139,6 +157,12 @@ pub fn wire_bind_targets(
             continue;
         };
 
+        let fv = val
+            .get("format_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.21.50");
+        let is_v2 = uses_custom_components_v2(fv);
+
         let kind_key = if val.get("minecraft:item").is_some() {
             Some(("minecraft:item", ComponentKind::Item))
         } else if val.get("minecraft:block").is_some() {
@@ -154,16 +178,26 @@ pub fn wire_bind_targets(
                     .entry("components".to_string())
                     .or_insert_with(|| Value::Object(Map::new()));
                 if let Some(comps_obj) = comps.as_object_mut() {
-                    // `minecraft:custom_components` tetap array string sesuai skema resmi
-                    // pada format_version >= 1.21.50 (termasuk 1.21.90 untuk Bedrock 26.60).
-                    let cc = comps_obj
-                        .entry("minecraft:custom_components".to_string())
-                        .or_insert_with(|| Value::Array(Vec::new()));
-                    if let Some(arr) = cc.as_array_mut() {
-                        let exists = arr.iter().any(|v| v.as_str() == Some(comp_id.as_str()));
-                        if !exists {
-                            arr.push(Value::String(comp_id.clone()));
+                    if is_v2 {
+                        // Custom Components V2 (format_version >= 1.21.90):
+                        // JANGAN menulis array "minecraft:custom_components".
+                        // Suntikkan langsung key objek di dalam "components": "pstdr:<stem>": {}.
+                        if !comps_obj.contains_key(&comp_id) {
+                            comps_obj.insert(comp_id.clone(), json!({}));
                             modified = true;
+                        }
+                    } else {
+                        // Custom Components V1 (format_version < 1.21.90):
+                        // Suntikkan ke array "minecraft:custom_components": ["pstdr:<stem>"].
+                        let cc = comps_obj
+                            .entry("minecraft:custom_components".to_string())
+                            .or_insert_with(|| Value::Array(Vec::new()));
+                        if let Some(arr) = cc.as_array_mut() {
+                            let exists = arr.iter().any(|v| v.as_str() == Some(comp_id.as_str()));
+                            if !exists {
+                                arr.push(Value::String(comp_id.clone()));
+                                modified = true;
+                            }
                         }
                     }
                 }
@@ -186,7 +220,7 @@ pub fn wire_bind_targets(
 }
 
 /// Memastikan `BP/manifest.json` memiliki modul `script` (entry `scripts/main.js`),
-/// dependency `@minecraft/server`, dan `min_engine_version` berformat `[1, x, x]`.
+/// dependency `@minecraft/server`, dan `min_engine_version` sesuai format_version (v2: array, v3: SemVer string).
 pub fn update_manifest(
     workspace_root: &Path,
     target_version: &str,
@@ -196,8 +230,7 @@ pub fn update_manifest(
     fs::create_dir_all(&bp_dir)
         .map_err(|e| format!("Gagal membuat folder '{}': {e}", bp_dir.display()))?;
     let manifest_path = bp_dir.join("manifest.json");
-    let min_engine = resolve_min_engine_version(target_version)
-        .unwrap_or([1, 26, 60]);
+    let min_engine = resolve_min_engine_version(target_version)?;
 
     let mut manifest: Value = if manifest_path.is_file() {
         let raw = fs::read_to_string(&manifest_path)
@@ -219,6 +252,11 @@ pub fn update_manifest(
         })
     };
 
+    let fmt_ver = manifest
+        .get("format_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2);
+
     if let Some(root_obj) = manifest.as_object_mut() {
         root_obj
             .entry("format_version".to_string())
@@ -232,12 +270,26 @@ pub fn update_manifest(
                 .or_insert_with(|| Value::String(generate_uuid_v4()));
             h.entry("version".to_string())
                 .or_insert_with(|| json!([1, 0, 0]));
-            let needs_min = !matches!(
-                h.get("min_engine_version").and_then(|v| v.as_array()),
-                Some(arr) if arr.len() == 3 && arr[0].as_u64() == Some(1)
-            );
-            if needs_min {
-                h.insert("min_engine_version".to_string(), json!(min_engine));
+
+            if fmt_ver == 3 {
+                let is_valid = h
+                    .get("min_engine_version")
+                    .and_then(|v| v.as_str())
+                    .map(is_valid_v3_min_engine)
+                    .unwrap_or(false);
+                if !is_valid {
+                    let semver_str =
+                        format!("{}.{}.{}", min_engine[0], min_engine[1], min_engine[2]);
+                    h.insert("min_engine_version".to_string(), json!(semver_str));
+                }
+            } else {
+                let needs_min = !matches!(
+                    h.get("min_engine_version").and_then(|v| v.as_array()),
+                    Some(arr) if arr.len() == 3 && arr[0].as_u64() == Some(1)
+                );
+                if needs_min {
+                    h.insert("min_engine_version".to_string(), json!(min_engine));
+                }
             }
         }
 

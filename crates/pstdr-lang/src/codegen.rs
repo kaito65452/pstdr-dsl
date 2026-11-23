@@ -19,10 +19,6 @@ pub struct CodegenOptions {
     pub source_file: String,
     pub source_map_comments: bool,
     pub custom_components: Vec<(String, ComponentKind)>,
-    /// Versi `@minecraft/server` yang dipakai; menentukan event registrasi custom component.
-    /// - `"1.x.x"` → `world.beforeEvents.worldInitialize` (API v1)
-    /// - `"2.x.x"` atau lebih baru → `system.beforeEvents.startup` (API v2+)
-    pub script_api_version: String,
 }
 
 pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> String {
@@ -62,12 +58,27 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         ));
     }
 
+    let default_api = crate::spec::BedrockSpec::bundled().script_api_version;
+    let api_ver = program
+        .header
+        .as_ref()
+        .map(|h| h.api.as_str())
+        .unwrap_or(&default_api);
+    let api_major: u64 = api_ver
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+
+    let has_components = !opts.custom_components.is_empty();
+    let need_world = cg.needs_world || (has_components && api_major <= 1);
+    let need_system = cg.needs_system || (has_components && api_major >= 2);
+
     let mut imports = Vec::new();
-    if cg.needs_world {
+    if need_world {
         imports.push("world");
     }
-    // `system` sempre necessário para registrar custom components via startup event (API v2+)
-    if cg.needs_system || !opts.custom_components.is_empty() {
+    if need_system {
         imports.push("system");
     }
     if cg.needs_equipment_slot {
@@ -80,18 +91,21 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         ));
     }
 
-    if !opts.custom_components.is_empty() {
-        // @minecraft/server 2.0+ (Bedrock 26.60): registrasi custom component menggunakan
-        // `system.beforeEvents.startup` (menggantikan `world.beforeEvents.worldInitialize`
-        // yang telah dihapus di API v2).
+    if has_components {
         let ev_param = if mode == EmitMode::TypeScript {
             "(initEv: any)"
         } else {
             "(initEv)"
         };
-        out.push_str(&format!(
-            "system.beforeEvents.startup.subscribe({ev_param} => {{\n"
-        ));
+        if api_major <= 1 {
+            out.push_str(&format!(
+                "world.beforeEvents.worldInitialize.subscribe({ev_param} => {{\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "system.beforeEvents.startup.subscribe({ev_param} => {{\n"
+            ));
+        }
         for (comp_id, kind) in &opts.custom_components {
             let reg = match kind {
                 ComponentKind::Item => "itemComponentRegistry",

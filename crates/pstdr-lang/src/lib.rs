@@ -23,7 +23,7 @@ pub use workspace::{
     doctor_report, find_workspace_root, fmt_path, init_workspace, new_script, CompileResult,
     WorkspaceConfig,
 };
-pub use wiring::resolve_min_engine_version;
+pub use wiring::{is_valid_v3_min_engine, resolve_min_engine_version, uses_custom_components_v2};
 
 #[cfg(test)]
 mod tests {
@@ -452,5 +452,252 @@ on hit target with BLADE_ID by player {
         // Event entityHitEntity tetap sama di semua API version
         assert!(js.contains("world.afterEvents.entityHitEntity.subscribe"));
         assert!(js.contains("1.21.50"), "Header harus menyebut 1.21.50:\n{js}");
+    }
+
+    // ─── FASE 2: Tes Tambahan Custom Components V1 vs V2 & Manifest v3 ───────
+
+    #[test]
+    fn fase_2_wiring_custom_components_v1_vs_v2() {
+        let dir = temp_dir("wiring_v1_v2");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // 1. Format lama: 1.21.50 -> array minecraft:custom_components
+        fs::write(
+            dir.join("BP/items/v1_item.json"),
+            r#"{
+  "format_version": "1.21.50",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:v1_item" },
+    "components": {}
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/v1_item.pstdr"),
+            r#"
+@addon(target = "1.21.50", api = "1.16.0")
+bind_target("BP/items/v1_item.json")
+const V1_ID = "my_pack:v1_item"
+on hit target with V1_ID by player { damage target by 1 }
+"#,
+        ).unwrap();
+
+        // 2. Format baru: 1.21.90 -> direct key "pstdr:...": {}
+        fs::write(
+            dir.join("BP/items/v2_item_90.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:v2_item_90" },
+    "components": {}
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/v2_item_90.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/v2_item_90.json")
+const V2_90_ID = "my_pack:v2_item_90"
+on hit target with V2_90_ID by player { damage target by 1 }
+"#,
+        ).unwrap();
+
+        // 3. Format baru: 1.26.60 -> direct key "pstdr:...": {}
+        fs::write(
+            dir.join("BP/items/v2_item_26.json"),
+            r#"{
+  "format_version": "1.26.60",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:v2_item_26" },
+    "components": {}
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/v2_item_26.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/v2_item_26.json")
+const V2_26_ID = "my_pack:v2_item_26"
+on hit target with V2_26_ID by player { damage target by 1 }
+"#,
+        ).unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "diags: {diags:?}");
+
+        // Verifikasi v1_item.json (format 1.21.50): memiliki array minecraft:custom_components
+        let v1_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/items/v1_item.json")).unwrap(),
+        ).unwrap();
+        let comps_v1 = &v1_json["minecraft:item"]["components"];
+        let arr = comps_v1["minecraft:custom_components"]
+            .as_array()
+            .expect("harus ada array minecraft:custom_components");
+        assert!(arr.iter().any(|v| v.as_str() == Some("pstdr:v1_item")));
+
+        // Verifikasi v2_item_90.json (format 1.21.90): key langsung, tanpa array minecraft:custom_components
+        let v2_90_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/items/v2_item_90.json")).unwrap(),
+        ).unwrap();
+        let comps_v2_90 = &v2_90_json["minecraft:item"]["components"];
+        assert!(
+            comps_v2_90.get("minecraft:custom_components").is_none(),
+            "1.21.90 tidak boleh ada array minecraft:custom_components"
+        );
+        assert!(
+            comps_v2_90.get("pstdr:v2_item_90").is_some(),
+            "1.21.90 harus punya key 'pstdr:v2_item_90'"
+        );
+        assert_eq!(comps_v2_90["pstdr:v2_item_90"], serde_json::json!({}));
+
+        // Verifikasi v2_item_26.json (format 1.26.60): key langsung, tanpa array minecraft:custom_components
+        let v2_26_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/items/v2_item_26.json")).unwrap(),
+        ).unwrap();
+        let comps_v2_26 = &v2_26_json["minecraft:item"]["components"];
+        assert!(
+            comps_v2_26.get("minecraft:custom_components").is_none(),
+            "1.26.60 tidak boleh ada array minecraft:custom_components"
+        );
+        assert!(
+            comps_v2_26.get("pstdr:v2_item_26").is_some(),
+            "1.26.60 harus punya key 'pstdr:v2_item_26'"
+        );
+        assert_eq!(comps_v2_26["pstdr:v2_item_26"], serde_json::json!({}));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fase_2_manifest_v3_update_and_audit() {
+        let dir = temp_dir("manifest_v3");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // 1. format_version: 3 dengan "min_engine_version": "1.26.60" -> LULUS
+        fs::write(
+            dir.join("BP/manifest.json"),
+            r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":"1.26.60"},"modules":[],"dependencies":[]}"#,
+        ).unwrap();
+        let diags_ok = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            !diags_ok.iter().any(|d| d.code == "PSTDR-E015"),
+            "Format v3 '1.26.60' harus lulus: {diags_ok:?}"
+        );
+
+        // 2. format_version: 3 dengan "min_engine_version": "26.60.0" -> GAGAL PSTDR-E015
+        fs::write(
+            dir.join("BP/manifest.json"),
+            r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":"26.60.0"},"modules":[],"dependencies":[]}"#,
+        ).unwrap();
+        let diags_err1 = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags_err1.iter().any(|d| d.code == "PSTDR-E015"),
+            "Format v3 '26.60.0' harus gagal: {diags_err1:?}"
+        );
+
+        // 3. format_version: 3 dengan array [1, 26, 60] -> GAGAL PSTDR-E015
+        fs::write(
+            dir.join("BP/manifest.json"),
+            r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":[1,26,60]},"modules":[],"dependencies":[]}"#,
+        ).unwrap();
+        let diags_err2 = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags_err2.iter().any(|d| d.code == "PSTDR-E015"),
+            "Format v3 array [1,26,60] harus gagal: {diags_err2:?}"
+        );
+
+        // 4. update_manifest pada format_version: 3 menulis SemVer string "1.26.60", bukan array
+        fs::write(
+            dir.join("BP/manifest.json"),
+            r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0]},"modules":[],"dependencies":[]}"#,
+        ).unwrap();
+        crate::wiring::update_manifest(&dir, "26.60", "2.11.0").unwrap();
+        let manifest_content = fs::read_to_string(dir.join("BP/manifest.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&manifest_content).unwrap();
+        assert_eq!(
+            val["header"]["min_engine_version"].as_str(),
+            Some("1.26.60"),
+            "v3 manifest harus punya min_engine_version string '1.26.60': {manifest_content}"
+        );
+        assert!(
+            val["header"]["min_engine_version"].as_array().is_none(),
+            "v3 manifest tidak boleh berupa array"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fase_2_codegen_api_v1_uses_world_initialize() {
+        let src = r#"
+@addon(target = "1.21.50", api = "1.16.0")
+
+const SWORD_ID = "my_pack:iron_sword"
+
+on hit target with SWORD_ID by player {
+    damage target by 4
+}
+"#;
+        let (prog, diags) = parse_source(src, "v1.pstdr");
+        assert!(diags.is_empty());
+        let prog = prog.unwrap();
+        let opts = CodegenOptions {
+            source_file: "v1.pstdr".to_string(),
+            source_map_comments: false,
+            custom_components: vec![("pstdr:iron_sword".to_string(), ComponentKind::Item)],
+        };
+        let js = emit_code(&prog, &opts, EmitMode::JavaScript);
+        assert!(
+            js.contains("world.beforeEvents.worldInitialize.subscribe"),
+            "API v1.16.0 harus pakai world.beforeEvents.worldInitialize:\n{js}"
+        );
+        assert!(
+            !js.contains("system.beforeEvents.startup"),
+            "API v1.16.0 tidak boleh pakai startup:\n{js}"
+        );
+        assert!(
+            js.contains("world"),
+            "API v1.16.0 harus mengimpor world:\n{js}"
+        );
+    }
+
+    #[test]
+    fn fase_2_codegen_api_v2_uses_system_startup() {
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+const WAND_ID = "my_pack:ice_wand"
+
+on right click with WAND_ID by player {
+    player.actionbar("§bFreeze!")
+}
+"#;
+        let (prog, diags) = parse_source(src, "v2.pstdr");
+        assert!(diags.is_empty());
+        let prog = prog.unwrap();
+        let opts = CodegenOptions {
+            source_file: "v2.pstdr".to_string(),
+            source_map_comments: false,
+            custom_components: vec![("pstdr:ice_wand".to_string(), ComponentKind::Item)],
+        };
+        let js = emit_code(&prog, &opts, EmitMode::JavaScript);
+        assert!(
+            js.contains("system.beforeEvents.startup.subscribe"),
+            "API v2.11.0 harus pakai system.beforeEvents.startup:\n{js}"
+        );
+        assert!(
+            !js.contains("worldInitialize"),
+            "API v2.11.0 tidak boleh pakai worldInitialize:\n{js}"
+        );
+        assert!(
+            js.contains("import {") && js.contains("system"),
+            "API v2.11.0 harus mengimpor system:\n{js}"
+        );
     }
 }
