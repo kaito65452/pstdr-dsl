@@ -1,0 +1,10 @@
+[package]
+name = "pstdr-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compiler, validator, formatter, and code generator for the .pstdr Bedrock Add-On DSL"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

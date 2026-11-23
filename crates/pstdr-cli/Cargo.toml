@@ -1,0 +1,15 @@
+[package]
+name = "pstdr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI binary (pstdr-c) for the .pstdr Bedrock Add-On DSL"
+
+[[bin]]
+name = "pstdr-c"
+path = "src/main.rs"
+
+[dependencies]
+pstdr-lang = { path = "../pstdr-lang" }
+serde.workspace = true
+serde_json.workspace = true
