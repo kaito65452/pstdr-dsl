@@ -1,6 +1,6 @@
 # Editor Setup (`pstdr-lsp`)
 
-`pstdr-lsp` provides real-time diagnostics, hover information, quick-fix code actions, and document formatting over stdio.
+`pstdr-lsp` provides real-time diagnostics, contextual completions (effects, sounds, `snake_case` helpers, predicates, and event snippets), hover transpilation previews, quick-fix code actions (`PSTDR-E001` / `PSTDR-E002`), and document formatting over stdio.
 
 ---
 
@@ -10,50 +10,63 @@
 command -v pstdr-lsp
 ```
 
-If missing, ensure `$HOME/.local/bin` is in `PATH` (see [Installation](./02-Installation.md)).
+If missing, build and install `pstdr-lsp` and ensure `$HOME/.local/bin` is in `PATH` (see [Installation](./02-Installation.md)).
 
 ---
 
-## Neovim (`~/.config/nvim/init.lua`)
+## Neovim (`editors/nvim/`)
+
+This repository ships a ready-to-use Neovim plugin in `editors/nvim/` containing:
+- `ftdetect/pstdr.lua` — registers `.pstdr` files as filetype `pstdr`
+- `syntax/pstdr.vim` — syntax highlighting for all `.pstdr` keywords, units, string interpolation, and embedded JavaScript inside `unsafe` blocks
+- `ftplugin/pstdr.lua` — starts `pstdr-lsp` automatically via `vim.lsp.start` with root detection (`pstdr.toml`, `BP`, `.git`)
+
+### Option 1: Using `lazy.nvim`
+
+Add a local plugin entry pointing to `editors/nvim`:
 
 ```lua
-vim.filetype.add({
-  extension = {
-    pstdr = "pstdr",
-  },
-})
-
-vim.api.nvim_create_autocmd("FileType", {
-  pattern = "pstdr",
-  callback = function(args)
-    vim.lsp.start({
-      name = "pstdr-lsp",
-      cmd = { "pstdr-lsp" },
-      root_dir = vim.fs.root(args.buf, { "pstdr.toml", "BP", ".git" }),
-    })
-  end,
-})
-
--- Optional: reuse JavaScript Treesitter highlighting for .pstdr
-pcall(vim.treesitter.language.register, "javascript", "pstdr")
+{
+  dir = "/path/to/pstdr-dsl/editors/nvim",
+  ft = "pstdr",
+}
 ```
 
-Format the active buffer with `:lua vim.lsp.buf.format()`.
+### Option 2: Manual `runtimepath` Copy
+
+Copy `editors/nvim/` into your Neovim config directory:
+
+```sh
+cp -r editors/nvim/ftdetect editors/nvim/ftplugin editors/nvim/syntax ~/.config/nvim/
+```
+
+Format the active buffer with `:lua vim.lsp.buf.format()`, trigger quick-fixes with `:lua vim.lsp.buf.code_action()`, and inspect transpilation previews with `K`.
 
 ---
 
-## VS Code / Code - OSS
+## VS Code / Code - OSS (`editors/vscode/`)
 
-1. Ensure `pstdr-lsp` is on your `PATH`.
-2. Add the file association to `settings.json`:
-   ```json
-   {
-     "files.associations": {
-       "*.pstdr": "pstdr"
-     }
-   }
-   ```
-3. Configure a generic LSP client extension to spawn `pstdr-lsp` over stdio for language ID `pstdr`.
+This repository ships a full VS Code extension in `editors/vscode/` with TextMate grammar (including embedded TypeScript/JavaScript inside `unsafe` blocks), language configuration, and a `vscode-languageclient` launcher for `pstdr-lsp`.
+
+### Build and Install the `.vsix`
+
+```sh
+cd editors/vscode
+npm install
+npm run compile
+npm run package
+code --install-extension pstdr-vscode-0.1.0-alpha.1.vsix
+```
+
+### Configuration
+
+If `pstdr-lsp` is not on your `PATH`, set its absolute path in VS Code `settings.json`:
+
+```json
+{
+  "pstdr.serverPath": "/home/user/.local/bin/pstdr-lsp"
+}
+```
 
 ---
 

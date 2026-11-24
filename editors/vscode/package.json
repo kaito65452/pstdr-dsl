@@ -1,0 +1,67 @@
+{
+  "name": "pstdr-vscode",
+  "displayName": "PackStudio DSL (.pstdr)",
+  "description": "Syntax highlighting, diagnostics, completions, hover previews, quick fixes, and formatting for .pstdr (Minecraft Bedrock DSL).",
+  "version": "0.1.0-alpha.1",
+  "publisher": "packstudio",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:pstdr"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pstdr",
+        "aliases": [
+          "PSTDR",
+          "PackStudio DSL",
+          "pstdr"
+        ],
+        "extensions": [
+          ".pstdr"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pstdr",
+        "scopeName": "source.pstdr",
+        "path": "./syntaxes/pstdr.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "PackStudio DSL (.pstdr)",
+      "properties": {
+        "pstdr.serverPath": {
+          "type": "string",
+          "default": "pstdr-lsp",
+          "description": "Path to the pstdr-lsp language server executable."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.26.0",
+    "typescript": "^5.4.5"
+  }
+}

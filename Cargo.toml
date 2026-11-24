@@ -2,6 +2,7 @@
 members = [
     "crates/pstdr-lang",
     "crates/pstdr-cli",
+    "crates/pstdr-lsp",
 ]
 resolver = "2"
 

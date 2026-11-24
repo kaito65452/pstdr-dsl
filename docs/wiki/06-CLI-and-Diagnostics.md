@@ -41,10 +41,10 @@ To disable Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` (default
 | **`PSTDR-E001`** | Forbidden keyword (`let`, `var`, `class`, `function`, `nil`, `~=`, `..`, etc.) in safe mode. | Replace with `.pstdr` syntax (`const`, `mut`, `func`, `null`, `!=`, `"{a}{b}"`) or move into `unsafe`. |
 | **`PSTDR-E002`** | Assignment (`=`, `+=`, `-=`, `*=`, `/=`) to a `const` variable. | Declare with `mut` instead of `const`. |
 | **`PSTDR-E003`** | Reserved `.pstdr` keyword used as an identifier. | Rename the variable, parameter, or function. |
-| **`PSTDR-E004`** | `cancel event` used in `func`, `after`, `every`, `on hit`, or `on join`. | Only use `cancel event` inside `on right click` or `on break`. |
+| **`PSTDR-E004`** | `cancel event` used in a non-cancellable block (`func`, `after`, `every`, `on hit`, `on join`, `on hurt`, `on die`, `on consume`, etc.). | Only use `cancel event` inside `on right click`, `on break`, or `on interact`. |
 | **`PSTDR-E005`** | Context variable (`player`, `target`, etc.) not available in scope. | Declare it or iterate `for p in world.players()` inside `every`/`after`. |
 | **`PSTDR-E006`** | `unsafe` used as an anonymous block or expression value. | Declare `unsafe name() { ... }` at top level. |
-| **`PSTDR-E007`** | File passed to `bind_target()` not found on disk. | Fix the workspace-relative path. |
+| **`PSTDR-E007`** | File passed to `bind_target()` not found on disk, or `on tick` has no matching block JSON. | Fix the workspace-relative path or add a matching block JSON in `BP/blocks/`. |
 | **`PSTDR-E008`** | JSON `"identifier"` differs from the ID used in `.pstdr`. | Match the `"identifier"` in `BP/items/*.json` or `BP/blocks/*.json` with the script ID. |
 | **`PSTDR-E009`** | Path traversal (`..`) or absolute path in `bind_target()`. | Use a relative path inside the workspace root. |
 | **`PSTDR-E010`** | `every` interval `< 50ms` (`1` tick). | Increase interval to at least `50ms` or `1s`. |

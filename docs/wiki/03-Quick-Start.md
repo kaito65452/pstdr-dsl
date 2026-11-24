@@ -123,4 +123,38 @@ import "./generated/welcome.js";
 
 ---
 
+## Multi-Target Partitioning (Single File → Multiple Modules)
+
+You can define logic for multiple custom items, custom blocks, and world events inside a **single** `.pstdr` file (for example, `src/pack_logic.pstdr`). During `pstdr-c convert --workspace`, `pstdr-c` scans `BP/items/**/*.json` and `BP/blocks/**/*.json`, partitions each target into isolated modules, wires every matching JSON file, and cleans up stale orphan `.js` files automatically:
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+const WAND_ID = "example:wand"
+const ALTAR_ID = "example:altar"
+mut uses = 0
+
+on right click with WAND_ID by player {
+    uses += 1
+    player.actionbar("Wand uses: {uses}")
+}
+
+on interact of ALTAR_ID by player {
+    send "Altar activated" to player
+}
+
+on join of player {
+    send "Welcome!" to player
+}
+```
+
+When `BP/items/wand.json` (`example:wand`) and `BP/blocks/altar.json` (`example:altar`) exist in the workspace, `pstdr-c convert --workspace` emits:
+- `BP/scripts/generated/_shared/pack_logic.shared.js` — shared `const`, `state`, `func`, and `export const __pstdr_mut = { uses: 0 };`
+- `BP/scripts/generated/items/wand.js` — merged item custom component (`onUse`, `onHitEntity`, `onConsume`)
+- `BP/scripts/generated/blocks/altar.js` — merged block custom component (`onPlayerInteract`, `onTick`, `onPlayerBreak`)
+- `BP/scripts/generated/world/pack_logic.js` — global events (`on join`, timers, unbound or cancellable `beforeEvents`)
+- `BP/scripts/generated/_registry.js` — single centralized `system.beforeEvents.startup` (or `worldInitialize` for `< 1.21.90`) registration callback imported by `BP/scripts/main.js`
+
+---
+
 > [← Previous: Installation](./02-Installation.md) | [Next: Language Guide →](./04-Language-Guide.md)

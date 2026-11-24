@@ -42,11 +42,10 @@ PSTDR_YES=1 PSTDR_LSP=1 PSTDR_STUDIO=0 curl -fsSL https://raw.githubusercontent.
 ```sh
 git clone https://github.com/kaito65452/pstdr-dsl.git
 cd pstdr-dsl
-cargo build --release -p pstdr-cli
-cargo build --release --manifest-path crates/pstdr-lsp/Cargo.toml
+cargo build --release --workspace
 ```
 
-Binaries are produced at `target/release/pstdr-c` and `crates/pstdr-lsp/target/release/pstdr-lsp`.
+Binaries are produced at `target/release/pstdr-c` and `target/release/pstdr-lsp`.
 
 ---
 

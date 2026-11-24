@@ -1,0 +1,174 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PackStudio DSL (.pstdr)",
+  "scopeName": "source.pstdr",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#unsafe-block"
+    },
+    {
+      "include": "#directives"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#units-and-numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#booleans-and-null"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.pstdr",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.pstdr",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "unsafe-block": {
+      "begin": "\\b(unsafe)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\([^)]*\\))?\\s*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.unsafe.pstdr"
+        },
+        "2": {
+          "name": "entity.name.function.pstdr"
+        },
+        "4": {
+          "name": "punctuation.section.block.begin.pstdr"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.pstdr"
+        }
+      },
+      "contentName": "meta.embedded.block.typescript",
+      "patterns": [
+        {
+          "include": "source.ts"
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.directive.pstdr",
+          "match": "@addon\\b"
+        },
+        {
+          "name": "support.function.directive.pstdr",
+          "match": "\\bbind_target\\b"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.pstdr",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.pstdr",
+          "match": "\\\\."
+        },
+        {
+          "name": "meta.interpolation.pstdr",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.pstdr"
+            }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.pstdr"
+            }
+          },
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
+    },
+    "units-and-numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.duration.pstdr",
+          "match": "\\b\\d+(?:\\.\\d+)?(?:ms|s|m|t)\\b"
+        },
+        {
+          "name": "constant.numeric.distance.pstdr",
+          "match": "\\b\\d+(?:\\.\\d+)?b\\b"
+        },
+        {
+          "name": "constant.numeric.pstdr",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "storage.type.pstdr",
+          "match": "\\b(const|mut|state|func|unsafe)\\b"
+        },
+        {
+          "name": "keyword.control.pstdr",
+          "match": "\\b(if|else|for|while|return|in|after|every)\\b"
+        },
+        {
+          "name": "keyword.control.event.pstdr",
+          "match": "\\b(on|join|right|click|hit|break|hurt|die|consume|interact|tick|projectile|spawn|of|with|by|type)\\b"
+        },
+        {
+          "name": "support.function.action.pstdr",
+          "match": "\\b(cancel|event|damage|ignite|apply|to|send|particle|at)\\b"
+        },
+        {
+          "name": "keyword.operator.word.pstdr",
+          "match": "\\b(and|or|not|is|within)\\b"
+        },
+        {
+          "name": "support.type.predicate.pstdr",
+          "match": "\\b(sneaking|sprinting|swimming|flying|sleeping|on_ground|in_water|holding)\\b"
+        }
+      ]
+    },
+    "booleans-and-null": {
+      "name": "constant.language.pstdr",
+      "match": "\\b(true|false|null)\\b"
+    },
+    "builtins": {
+      "name": "support.variable.builtin.pstdr",
+      "match": "\\b(world|system|console|Math|JSON)\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.pstdr",
+      "match": "(\\?\\.|\\?\\?|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\*=|/=|[=+\\-*/%<>!?:])"
+    }
+  }
+}

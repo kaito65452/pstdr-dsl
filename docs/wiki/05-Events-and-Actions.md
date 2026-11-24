@@ -2,19 +2,30 @@
 
 ## Supported Events
 
-| Event | Syntax | Scope Variables | Bedrock Bus |
+| Event | Syntax | Scope Variables | Bedrock Bus / Component |
 | :--- | :--- | :--- | :--- |
 | **Player Join** | `on join of <actor> { ... }` | `<actor>` | `world.afterEvents.playerSpawn` (`ev.initialSpawn`) |
-| **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` (or `beforeEvents.itemUse` if `cancel event` is present) |
-| **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` |
-| **Break Block** | `on break of <block_id> by <actor> { ... }` | `<actor>`, `block` | `afterEvents.playerBreakBlock` (or `beforeEvents.playerBreakBlock` if `cancel event` is present) |
+| **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
+| **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` (or item component `onHitEntity`) |
+| **Consume Item** | `on consume <item> by <actor> { ... }` | `<actor>` | `world.afterEvents.itemCompleteUse` (or item component `onConsume`) |
+| **Break Block** | `on break of <block_id> by <actor> { ... }` | `<actor>`, `block` | `afterEvents.playerBreakBlock` / `beforeEvents.playerBreakBlock` (or block component `onPlayerBreak`) |
+| **Block Interact** | `on interact of <block_id> by <actor> { ... }` | `<actor>`, `block` | Block component `onPlayerInteract` (or `afterEvents`/`beforeEvents.playerInteractWithBlock`) |
+| **Block Tick** | `on tick of <block_id> { ... }` | `block`, `dimension` | Custom block component `onTick` (requires matching `BP/blocks/*.json`) |
+| **Entity Hurt** | `on hurt <target> [by <attacker>] { ... }` | `<target>`, `[<attacker>]` | `world.afterEvents.entityHurt` |
+| **Entity Die** | `on die of <victim> [by <killer>] { ... }` | `<victim>`, `[<killer>]` | `world.afterEvents.entityDie` |
+| **Projectile Hit** | `on projectile hit <victim> [with <proj_id>] [by <shooter>] { ... }` | `<victim>`, `[<shooter>]`, `projectile` | `world.afterEvents.projectileHitEntity` |
+| **Entity Spawn** | `on spawn of <entity> [type <type_id>] { ... }` | `<entity>` | `world.afterEvents.entitySpawn` |
 
-> **Automatic `beforeEvents` Scheduling:** When `on right click` or `on break` contains `cancel event`, `pstdr-c` subscribes to `beforeEvents` and automatically wraps world-mutating actions (`damage`, `ignite`, `apply`, `send`, `state` writes, expression statements) in `system.run(() => { ... })`.
+> **Automatic `beforeEvents` Scheduling:** When `on right click`, `on break`, or `on interact` contains `cancel event`, `pstdr-c` subscribes to `beforeEvents` and automatically wraps world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `state` writes, expression statements) in `system.run(() => { ... })`.
 
-### Examples
+### Core & Combat Events Example
 
 ```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
 const WAND_ID = "example:wand"
+const POTION_ID = "example:potion"
+const SPEAR_ID = "example:spear"
 const ORE_ID = "example:ore"
 
 on join of player {
@@ -30,9 +41,61 @@ on hit target with WAND_ID by player {
     apply slowness 2 to target for 3s
 }
 
+on consume POTION_ID by player {
+    apply strength 2 to player for 5s
+    spawn particle "minecraft:heart_particle" at player
+}
+
 on break of ORE_ID by player {
     cancel event
     player.actionbar("Protected block")
+}
+
+on interact of "minecraft:tnt" by player {
+    cancel event
+    send "TNT is disabled!" to player
+}
+
+on hurt target by attacker {
+    if attacker != null {
+        spawn particle "minecraft:totem_particle" at target
+    }
+}
+
+on die of victim by killer {
+    if killer != null {
+        killer.play_sound("random.orb")
+    }
+}
+
+on projectile hit victim with SPEAR_ID by shooter {
+    damage victim by 6
+    if shooter != null {
+        send "Direct hit with {projectile.typeId}!" to shooter
+    }
+}
+
+on spawn of mob type "minecraft:zombie" {
+    apply strength 1 to mob for 10s
+}
+```
+
+### Custom Block Events (`on interact` & `on tick`)
+
+When bound via `bind_target("BP/blocks/altar.json")` (or auto-discovered in `BP/blocks/` during `convert --workspace`), non-cancellable `on interact` and `on tick` compile into custom block component callbacks:
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/blocks/altar.json")
+
+const ALTAR_ID = "example:altar"
+
+on interact of ALTAR_ID by player {
+    send "Altar activated!" to player
+}
+
+on tick of ALTAR_ID {
+    spawn particle "minecraft:villager_happy" at block.location in dimension
 }
 ```
 
@@ -64,11 +127,12 @@ every 5s {
 
 | Action | Syntax | Notes |
 | :--- | :--- | :--- |
-| **Cancel Event** | `cancel event` | Valid only in `on right click` and `on break` (`PSTDR-E004` otherwise). |
+| **Cancel Event** | `cancel event` | Valid only in `on right click`, `on break`, and `on interact` (`PSTDR-E004` otherwise). |
 | **Damage** | `damage <target> by <amount>` | Emits `<target>.applyDamage(<amount>)`. |
 | **Ignite** | `ignite <target> for <duration>` | Emits `<target>.setOnFire(<seconds>, true)`. |
 | **Apply Effect** | `apply <effect> <level> to <target> for <duration>` | `<level>` is 1-based (`PSTDR-E011`); `<effect>` is checked against vanilla spec (`PSTDR-E013`). |
 | **Send Message** | `send <message> to <target>` | Emits `<target>.sendMessage(<message>)`. |
+| **Spawn Particle** | `spawn particle <id> at <entity_or_loc> [in <dimension>]` | Emits `<dim>.spawnParticle(<id>, <loc>)`. Accepts an entity (`target`), `.location`, or `{ x = 0, y = 64, z = 0 }`. |
 
 ---
 
@@ -104,7 +168,7 @@ every 5s {
 | `id` / `type_id` | `typeId` |
 | `name_tag` | `nameTag` |
 
-### Entity & Player Methods
+### Entity, Player & Dimension Methods
 
 | `.pstdr` | Bedrock API |
 | :--- | :--- |
@@ -120,6 +184,12 @@ every 5s {
 | `run_command(cmd)` | `runCommand(cmd)` |
 | `add_effect(id, dur, opts)` / `remove_effect(id)` | `addEffect` / `removeEffect` |
 | `set_on_fire(secs, ext)` / `extinguish_fire()` | `setOnFire` / `extinguishFire` |
+| `spawn_particle(id, loc)` | `spawnParticle(id, loc)` |
+| `spawn_entity(id, loc)` | `spawnEntity(id, loc)` |
+| `spawn_item(stack, loc)` | `spawnItem(stack, loc)` |
+| `get_entities(opts)` / `get_players(opts)` | `getEntities(opts)` / `getPlayers(opts)` |
+| `teleport(loc)` | `teleport(loc)` |
+| `kill()` | `kill()` |
 
 ### Global `world` Helpers
 

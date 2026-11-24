@@ -132,10 +132,139 @@ fn format_doc(state: &ServerState, uri: &lsp_types::Uri) -> Option<Vec<TextEdit>
     let text = state.docs.get(uri)?;
     let file = ServerState::uri_to_filename(uri);
     let formatted = pstdr_lang::format_source(text, &file).ok()?;
-    let last_line = text.lines().count() as u32;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last_line_idx = lines.len().saturating_sub(1) as u32;
+    let last_col_u16 = lines
+        .last()
+        .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum())
+        .unwrap_or(0);
     Some(vec![TextEdit {
-        range: Range::new(Position::new(0, 0), Position::new(last_line + 1, 0)),
+        range: Range::new(Position::new(0, 0), Position::new(last_line_idx, last_col_u16)),
         new_text: formatted,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lsp_types::{CodeActionOrCommand, HoverContents, MarkupContent, Uri};
+    use pstdr_lang::spec::BedrockSpec;
+    use std::str::FromStr;
+
+    #[test]
+    fn utf16_column_conversion_with_section_sign_and_emoji() {
+        // '§' is 2 UTF-8 bytes, 1 char, 1 UTF-16 code unit.
+        // '🔥' is 4 UTF-8 bytes, 1 char, 2 UTF-16 code units.
+        let line = "send \"§a🔥 hi\" to player";
+        // char 1='s', ..., char 7='§', char 8='a', char 9='🔥', char 10=' '
+        assert_eq!(diagnostics::char_col_to_utf16(line, 7), 6);
+        assert_eq!(diagnostics::char_col_to_utf16(line, 8), 7);
+        assert_eq!(diagnostics::char_col_to_utf16(line, 10), 10); // +2 for 🔥
+
+        let byte_after_emoji = diagnostics::utf16_col_to_byte_offset(line, 10);
+        assert_eq!(&line[byte_after_emoji..], " hi\" to player");
+    }
+
+    #[test]
+    fn completion_effects_sounds_members_predicates_and_events() {
+        let spec = BedrockSpec::bundled();
+
+        // After `apply `
+        let eff = completion::complete_at("on join of player {\n    apply ", 1, 10, &spec);
+        assert!(eff.iter().any(|i| i.label == "speed"));
+        assert!(eff.iter().any(|i| i.label == "slowness"));
+
+        // Inside `play_sound("`
+        let snd = completion::complete_at("on join of player {\n    player.play_sound(\"", 1, 23, &spec);
+        assert!(snd.iter().any(|i| i.label == "random.orb"));
+
+        // After `.`
+        let mem = completion::complete_at("on join of player {\n    player.", 1, 11, &spec);
+        assert!(mem.iter().any(|i| i.label == "actionbar"));
+        assert!(mem.iter().any(|i| i.label == "spawn_particle"));
+        assert!(mem.iter().any(|i| i.label == "teleport"));
+
+        // After `is `
+        let pred = completion::complete_at("on join of player {\n    if player is ", 1, 17, &spec);
+        assert!(pred.iter().any(|i| i.label == "sneaking"));
+        assert!(pred.iter().any(|i| i.label == "holding"));
+
+        // Top-level snippets include Wave 1 + Wave 2 events
+        let top = completion::complete_at("", 0, 0, &spec);
+        for ev in [
+            "on join",
+            "on hurt",
+            "on die",
+            "on consume",
+            "on interact",
+            "on tick",
+            "on projectile hit",
+            "on spawn",
+            "spawn particle",
+        ] {
+            assert!(
+                top.iter().any(|i| i.label == ev),
+                "Missing top-level completion for '{ev}'"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_duration_ticks_snake_case_and_state() {
+        // Duration literal hover
+        let h_dur = hover::hover_at("after 3s {}", 0, 7).expect("duration hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_dur.contents {
+            assert!(value.contains("60 ticks"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+
+        // snake_case method hover
+        let h_meth = hover::hover_at("player.actionbar(\"hi\")", 0, 10).expect("method hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_meth.contents {
+            assert!(value.contains("onScreenDisplay.setActionBar"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+
+        // state hover
+        let src = "state mana[player] = 100\non join of player {\n    mana[player] -= 5\n}";
+        let h_state = hover::hover_at(src, 2, 5).expect("state hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_state.contents {
+            assert!(value.contains("getDynamicProperty(\"pstdr:mana\")"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+    }
+
+    #[test]
+    fn quick_fixes_for_e001_and_e002() {
+        let spec = BedrockSpec::bundled();
+        let uri = Uri::from_str("file:///test.pstdr").unwrap();
+
+        // E001: `let` -> `mut`
+        let src_e001 = "on join of player {\n    let x = 1\n}\n";
+        let params1 = diagnostics::check_document(&uri, src_e001, "test.pstdr", &spec);
+        let fixes1 = actions::quick_fixes_for(&uri, src_e001, &params1.diagnostics);
+        assert!(
+            fixes1.iter().any(|a| matches!(
+                a,
+                CodeActionOrCommand::CodeAction(ca) if ca.title.contains("Replace 'let' with 'mut'")
+            )),
+            "Expected E001 quick-fix for 'let', got: {fixes1:?}"
+        );
+
+        // E002: `const` -> `mut` at declaration line
+        let src_e002 = "on join of player {\n    const x = 1\n    x = 2\n}\n";
+        let params2 = diagnostics::check_document(&uri, src_e002, "test.pstdr", &spec);
+        let fixes2 = actions::quick_fixes_for(&uri, src_e002, &params2.diagnostics);
+        assert!(
+            fixes2.iter().any(|a| matches!(
+                a,
+                CodeActionOrCommand::CodeAction(ca) if ca.title.contains("Change 'const' to 'mut' on line 2")
+            )),
+            "Expected E002 quick-fix for 'const' on line 2, got: {fixes2:?}"
+        );
+    }
 }
 
