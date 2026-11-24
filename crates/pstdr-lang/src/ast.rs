@@ -106,6 +106,18 @@ pub enum EventKind {
     PlayerJoin {
         actor_var: String,
     },
+    Hurt {
+        target_var: String,
+        attacker_var: Option<String>,
+    },
+    Die {
+        target_var: String,
+        killer_var: Option<String>,
+    },
+    Consume {
+        item: Expr,
+        actor_var: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,6 +182,12 @@ pub enum Stmt {
     SendMessage {
         message: Expr,
         target: Expr,
+        span: Span,
+    },
+    SpawnParticle {
+        particle: Expr,
+        location: Expr,
+        dimension: Option<Expr>,
         span: Span,
     },
     After {

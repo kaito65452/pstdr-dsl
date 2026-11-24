@@ -188,6 +188,13 @@ pub fn map_method(method: &str) -> Option<&'static str> {
         "remove_effect" => Some("removeEffect"),
         "set_on_fire" => Some("setOnFire"),
         "extinguish_fire" => Some("extinguishFire"),
+        "spawn_particle" => Some("spawnParticle"),
+        "spawn_entity" => Some("spawnEntity"),
+        "spawn_item" => Some("spawnItem"),
+        "get_entities" => Some("getEntities"),
+        "get_players" => Some("getPlayers"),
+        "teleport" => Some("teleport"),
+        "kill" => Some("kill"),
         _ => None,
     }
 }

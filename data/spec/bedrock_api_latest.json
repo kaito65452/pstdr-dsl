@@ -69,6 +69,7 @@
     "stone", "dirt", "cobblestone", "obsidian", "bedrock", "ice", "packed_ice",
     "blue_ice", "snow", "iron_block", "gold_block", "diamond_block",
     "emerald_block", "diamond_ore", "iron_ore", "gold_ore", "coal_ore",
-    "planks", "log_oak"
+    "planks", "log_oak", "tuff", "polished_tuff", "tuff_bricks",
+    "copper_grate", "exposed_copper_grate", "weathered_copper_grate", "oxidized_copper_grate"
   ]
 }

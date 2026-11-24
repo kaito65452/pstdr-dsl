@@ -32,6 +32,9 @@ enum EventCtx {
     HitTarget,
     BreakBlock,
     PlayerJoin,
+    Hurt,
+    Die,
+    Consume,
     Timer,
 }
 
@@ -44,6 +47,9 @@ impl EventCtx {
             Self::HitTarget => "on hit",
             Self::BreakBlock => "on break",
             Self::PlayerJoin => "on join",
+            Self::Hurt => "on hurt",
+            Self::Die => "on die",
+            Self::Consume => "on consume",
             Self::Timer => "after/every",
         }
     }
@@ -343,6 +349,35 @@ impl<'a> Validator<'a> {
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::PlayerJoin;
             }
+            EventKind::Hurt {
+                target_var,
+                attacker_var,
+            } => {
+                self.insert_binding(target_var, BindingKind::ContextVar, ev.span.line);
+                if let Some(a) = attacker_var {
+                    self.insert_binding(a, BindingKind::ContextVar, ev.span.line);
+                }
+                self.event_ctx = EventCtx::Hurt;
+            }
+            EventKind::Die {
+                target_var,
+                killer_var,
+            } => {
+                self.insert_binding(target_var, BindingKind::ContextVar, ev.span.line);
+                if let Some(k) = killer_var {
+                    self.insert_binding(k, BindingKind::ContextVar, ev.span.line);
+                }
+                self.event_ctx = EventCtx::Die;
+            }
+            EventKind::Consume { item, actor_var } => {
+                self.validate_expr(item);
+                if let Some(s) = eval_static_string(item, &self.const_strings) {
+                    self.static_event_item_ids
+                        .push((s, item.span().clone()));
+                }
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::Consume;
+            }
         }
 
         self.validate_block(&ev.body);
@@ -563,6 +598,18 @@ impl<'a> Validator<'a> {
             } => {
                 self.validate_expr(message);
                 self.validate_expr(target);
+            }
+            Stmt::SpawnParticle {
+                particle,
+                location,
+                dimension,
+                ..
+            } => {
+                self.validate_expr(particle);
+                self.validate_expr(location);
+                if let Some(dim) = dimension {
+                    self.validate_expr(dim);
+                }
             }
             Stmt::After { body, .. } => {
                 let prev = self.event_ctx;

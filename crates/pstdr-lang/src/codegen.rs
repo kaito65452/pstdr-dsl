@@ -391,6 +391,52 @@ impl<'a> Codegen<'a> {
                 self.indent -= 1;
                 self.line("});");
             }
+            EventKind::Hurt {
+                target_var,
+                attacker_var,
+            } => {
+                self.line(&format!(
+                    "world.afterEvents.entityHurt.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("const {target_var} = ev.hurtEntity;"));
+                if let Some(a) = attacker_var {
+                    self.line(&format!("const {a} = ev.damageSource?.damagingEntity;"));
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::Die {
+                target_var,
+                killer_var,
+            } => {
+                self.line(&format!(
+                    "world.afterEvents.entityDie.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("const {target_var} = ev.deadEntity;"));
+                if let Some(k) = killer_var {
+                    self.line(&format!("const {k} = ev.damageSource?.damagingEntity;"));
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::Consume { item, actor_var } => {
+                let item_js = self.emit_expr(item);
+                self.line(&format!(
+                    "world.afterEvents.itemCompleteUse.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("const {actor_var} = ev.source;"));
+                self.line(&format!(
+                    "if (!ev.itemStack || ev.itemStack.typeId !== ({item_js})) return;"
+                ));
+                self.emit_block_stmts(&ev.body.stmts);
+                self.indent -= 1;
+                self.line("});");
+            }
         }
     }
 
@@ -558,6 +604,35 @@ impl<'a> Codegen<'a> {
                 let t = self.emit_expr(target);
                 let m = self.emit_expr(message);
                 self.wrap_before_event_mutation(format!("{t}.sendMessage({m});"));
+            }
+            Stmt::SpawnParticle {
+                particle,
+                location,
+                dimension,
+                ..
+            } => {
+                let p = self.emit_expr(particle);
+                let call = if let Some(dim) = dimension {
+                    let d = self.emit_expr(dim);
+                    let l = self.emit_expr(location);
+                    format!("{d}.spawnParticle({p}, {l});")
+                } else if let Expr::Member { object, field, .. } = location {
+                    if field == "location" || field == "head_location" {
+                        let obj_js = self.emit_expr(object);
+                        let loc_js = self.emit_expr(location);
+                        format!("{obj_js}.dimension.spawnParticle({p}, {loc_js});")
+                    } else {
+                        let l = self.emit_expr(location);
+                        format!("world.getDimension(\"overworld\").spawnParticle({p}, {l});")
+                    }
+                } else if matches!(location, Expr::Ident(_, _)) {
+                    let e = self.emit_expr(location);
+                    format!("{e}.dimension.spawnParticle({p}, {e}.location);")
+                } else {
+                    let l = self.emit_expr(location);
+                    format!("world.getDimension(\"overworld\").spawnParticle({p}, {l});")
+                };
+                self.wrap_before_event_mutation(call);
             }
             Stmt::After { duration, body, .. } => {
                 self.needs_system = true;

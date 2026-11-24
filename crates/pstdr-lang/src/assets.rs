@@ -18,6 +18,24 @@ pub fn is_forbidden_texture_alias(alias: &str) -> bool {
     lower.ends_with(".png") || lower.ends_with(".tga") || lower.ends_with(".jpg")
 }
 
+/// Extracts texture path strings from a texture entry (string, array, or `{ variations: [{ path }] }`).
+fn collect_texture_paths(val: &Value, out: &mut Vec<String>) {
+    if let Some(s) = val.as_str() {
+        out.push(s.to_string());
+    } else if let Some(arr) = val.as_array() {
+        for item in arr {
+            collect_texture_paths(item, out);
+        }
+    } else if let Some(obj) = val.as_object() {
+        if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
+            out.push(p.to_string());
+        }
+        if let Some(vars) = obj.get("variations") {
+            collect_texture_paths(vars, out);
+        }
+    }
+}
+
 /// Loads an alias -> list of image file paths dictionary from item_texture.json or terrain_texture.json.
 fn load_texture_dict(json_path: &Path) -> HashMap<String, Vec<String>> {
     let mut map = HashMap::new();
@@ -33,19 +51,11 @@ fn load_texture_dict(json_path: &Path) -> HashMap<String, Vec<String>> {
     if let Some(texture_data) = val.get("texture_data").and_then(|td| td.as_object()) {
         for (alias, entry) in texture_data {
             let mut paths = Vec::new();
-            if let Some(s) = entry.as_str() {
-                paths.push(s.to_string());
+            if entry.is_string() {
+                collect_texture_paths(entry, &mut paths);
             } else if let Some(obj) = entry.as_object() {
                 if let Some(tex) = obj.get("textures") {
-                    if let Some(s) = tex.as_str() {
-                        paths.push(s.to_string());
-                    } else if let Some(arr) = tex.as_array() {
-                        for item in arr {
-                            if let Some(s) = item.as_str() {
-                                paths.push(s.to_string());
-                            }
-                        }
-                    }
+                    collect_texture_paths(tex, &mut paths);
                 }
             }
             map.insert(alias.to_ascii_lowercase(), paths);
@@ -189,14 +199,7 @@ pub fn validate_workspace_assets(root: &Path, spec: &BedrockSpec) -> Result<Vec<
             let aliases = extract_icon_aliases(&val);
 
             for alias in aliases {
-                if is_forbidden_texture_alias(&alias) {
-                    diags.push(Diagnostic::error(
-                        DiagnosticCode::E017,
-                        &span,
-                        format!("Invalid item texture alias '{alias}': paths, file extensions (.png/.tga/.jpg), or namespaces are not allowed in 'minecraft:icon'."),
-                        "Use a simple identifier alias (e.g. 'my_item' or 'snowball') without file extensions or folder paths.",
-                    ));
-                } else if let Some(paths) = rp_item_textures.get(&alias.to_ascii_lowercase()) {
+                if let Some(paths) = rp_item_textures.get(&alias.to_ascii_lowercase()) {
                     let exists = paths.iter().any(|p| rp_texture_file_exists(root, p));
                     if !exists {
                         let path_info = if paths.is_empty() {
@@ -211,6 +214,13 @@ pub fn validate_workspace_assets(root: &Path, spec: &BedrockSpec) -> Result<Vec<
                             "Ensure the image file (.png or .tga) exists inside RP/ as defined in RP/textures/item_texture.json.",
                         ));
                     }
+                } else if is_forbidden_texture_alias(&alias) {
+                    diags.push(Diagnostic::error(
+                        DiagnosticCode::E017,
+                        &span,
+                        format!("Invalid item texture alias '{alias}': paths, file extensions (.png/.tga/.jpg), or namespaces are not allowed in 'minecraft:icon'."),
+                        "Use a simple identifier alias (e.g. 'my_item' or 'snowball') without file extensions or folder paths.",
+                    ));
                 } else if !spec.is_valid_vanilla_item_texture(&alias) {
                     if !has_rp {
                         diags.push(Diagnostic::error(
@@ -255,14 +265,7 @@ pub fn validate_workspace_assets(root: &Path, spec: &BedrockSpec) -> Result<Vec<
             let aliases = extract_material_instance_aliases(&val);
 
             for alias in aliases {
-                if is_forbidden_texture_alias(&alias) {
-                    diags.push(Diagnostic::error(
-                        DiagnosticCode::E017,
-                        &span,
-                        format!("Invalid block texture alias '{alias}': paths, file extensions (.png/.tga/.jpg), or namespaces are not allowed in 'minecraft:material_instances'."),
-                        "Use a simple identifier alias (e.g. 'my_block' or 'stone') without file extensions or folder paths.",
-                    ));
-                } else if let Some(paths) = rp_terrain_textures.get(&alias.to_ascii_lowercase()) {
+                if let Some(paths) = rp_terrain_textures.get(&alias.to_ascii_lowercase()) {
                     let exists = paths.iter().any(|p| rp_texture_file_exists(root, p));
                     if !exists {
                         let path_info = if paths.is_empty() {
@@ -277,6 +280,13 @@ pub fn validate_workspace_assets(root: &Path, spec: &BedrockSpec) -> Result<Vec<
                             "Ensure the image file (.png or .tga) exists inside RP/ as defined in RP/textures/terrain_texture.json.",
                         ));
                     }
+                } else if is_forbidden_texture_alias(&alias) {
+                    diags.push(Diagnostic::error(
+                        DiagnosticCode::E017,
+                        &span,
+                        format!("Invalid block texture alias '{alias}': paths, file extensions (.png/.tga/.jpg), or namespaces are not allowed in 'minecraft:material_instances'."),
+                        "Use a simple identifier alias (e.g. 'my_block' or 'stone') without file extensions or folder paths.",
+                    ));
                 } else if !spec.is_valid_vanilla_terrain_texture(&alias) {
                     if !has_rp {
                         diags.push(Diagnostic::error(

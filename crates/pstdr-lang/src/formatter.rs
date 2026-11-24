@@ -159,6 +159,23 @@ impl Formatter {
                     EventKind::PlayerJoin { actor_var } => {
                         format!("on join of {actor_var} {{")
                     }
+                    EventKind::Hurt {
+                        target_var,
+                        attacker_var,
+                    } => match attacker_var {
+                        Some(a) => format!("on hurt {target_var} by {a} {{"),
+                        None => format!("on hurt {target_var} {{"),
+                    },
+                    EventKind::Die {
+                        target_var,
+                        killer_var,
+                    } => match killer_var {
+                        Some(k) => format!("on die of {target_var} by {k} {{"),
+                        None => format!("on die of {target_var} {{"),
+                    },
+                    EventKind::Consume { item, actor_var } => {
+                        format!("on consume {} by {actor_var} {{", fmt_expr(item))
+                    }
                 };
                 self.line(&header);
                 self.indent += 1;
@@ -281,6 +298,24 @@ impl Formatter {
                     fmt_expr(target)
                 ));
             }
+            Stmt::SpawnParticle {
+                particle,
+                location,
+                dimension,
+                ..
+            } => match dimension {
+                Some(dim) => self.line(&format!(
+                    "spawn particle {} at {} in {}",
+                    fmt_expr(particle),
+                    fmt_expr(location),
+                    fmt_expr(dim)
+                )),
+                None => self.line(&format!(
+                    "spawn particle {} at {}",
+                    fmt_expr(particle),
+                    fmt_expr(location)
+                )),
+            },
             Stmt::After { duration, body, .. } => {
                 self.line(&format!("after {} {{", duration.raw));
                 self.indent += 1;

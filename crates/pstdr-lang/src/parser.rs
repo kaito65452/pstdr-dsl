@@ -65,6 +65,10 @@ impl<'a> Parser<'a> {
         matches!(&self.peek().kind, TokenKind::Ident(s) if s == word)
     }
 
+    fn peek_next_ident_word(&self, word: &str) -> bool {
+        matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(s)) if s == word)
+    }
+
     fn check_not_forbidden(&self, tok: &Token) -> Result<(), Box<Diagnostic>> {
         match &tok.kind {
             TokenKind::Ident(s) if is_forbidden_keyword(s) => Err(Box::new(Diagnostic::error(
@@ -604,12 +608,50 @@ impl<'a> Parser<'a> {
                 let (actor_var, _) = self.expect_user_ident("join event player")?;
                 EventKind::PlayerJoin { actor_var }
             }
+            TokenKind::Ident(w) if w == "hurt" => {
+                self.advance();
+                let (target_var, _) = self.expect_user_ident("hurt event target")?;
+                let attacker_var = if self.is_ident_word("by") {
+                    self.advance();
+                    let (a, _) = self.expect_user_ident("hurt event attacker")?;
+                    Some(a)
+                } else {
+                    None
+                };
+                EventKind::Hurt {
+                    target_var,
+                    attacker_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "die" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (target_var, _) = self.expect_user_ident("die event entity")?;
+                let killer_var = if self.is_ident_word("by") {
+                    self.advance();
+                    let (k, _) = self.expect_user_ident("die event killer")?;
+                    Some(k)
+                } else {
+                    None
+                };
+                EventKind::Die {
+                    target_var,
+                    killer_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "consume" => {
+                self.advance();
+                let item = self.parse_expr(false)?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("consume event actor")?;
+                EventKind::Consume { item, actor_var }
+            }
             _ => {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', or 'on join of player'.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on join of player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
                 )));
             }
         };
@@ -781,6 +823,26 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::SendMessage {
                 message,
                 target,
+                span: start,
+            });
+        }
+        if self.is_ident_word("spawn") && self.peek_next_ident_word("particle") {
+            let start = self.advance().span;
+            self.advance(); // consume "particle"
+            let particle = self.parse_expr(true)?;
+            self.expect_word("at")?;
+            let location = self.parse_nullish(true)?;
+            let dimension = if self.is_ident_word("in") {
+                self.advance();
+                Some(self.parse_expr(true)?)
+            } else {
+                None
+            };
+            self.consume_optional_semi();
+            return Ok(Stmt::SpawnParticle {
+                particle,
+                location,
+                dimension,
                 span: start,
             });
         }

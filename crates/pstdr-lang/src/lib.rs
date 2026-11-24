@@ -1075,4 +1075,110 @@ on join of player {
         let res2 = compile_source(unclosed, "garbage2.pstdr", None, &spec, true, true, vec![]);
         assert!(has_errors(&res2.diagnostics), "Expected errors for unclosed block");
     }
+
+    #[test]
+    fn phase_4_rlcraft_core_events_and_spawn_particle_codegen_and_fmt() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+const FOOD_ID = "example:potion"
+
+on hurt target by attacker {
+    if attacker != null {
+        spawn particle "minecraft:totem_particle" at target
+    }
+}
+
+on die of victim by killer {
+    if killer != null {
+        killer.play_sound("random.orb")
+    }
+}
+
+on consume FOOD_ID by player {
+    apply strength 2 to player for 5s
+    spawn particle "minecraft:heart_particle" at player.location in player.dimension
+}
+"#;
+        let res = compile_source(src, "rlcraft_events.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("world.afterEvents.entityHurt.subscribe"));
+        assert!(js.contains("const target = ev.hurtEntity;"));
+        assert!(js.contains("const attacker = ev.damageSource?.damagingEntity;"));
+        assert!(js.contains("target.dimension.spawnParticle(\"minecraft:totem_particle\", target.location);"));
+
+        assert!(js.contains("world.afterEvents.entityDie.subscribe"));
+        assert!(js.contains("const victim = ev.deadEntity;"));
+        assert!(js.contains("const killer = ev.damageSource?.damagingEntity;"));
+
+        assert!(js.contains("world.afterEvents.itemCompleteUse.subscribe"));
+        assert!(js.contains("if (!ev.itemStack || ev.itemStack.typeId !== (FOOD_ID)) return;"));
+        assert!(js.contains("player.addEffect(\"strength\", 100, { amplifier: 1 });"));
+        assert!(js.contains("player.dimension.spawnParticle(\"minecraft:heart_particle\", player.location);"));
+
+        let fmt1 = format_source(src, "rlcraft_events.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "rlcraft_events.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for new events and spawn particle");
+    }
+
+    #[test]
+    fn phase_4_negative_validation_for_new_events() {
+        let spec = BedrockSpec::bundled();
+        let bad = r#"
+on hurt target {
+    cancel event
+}
+on die of victim {
+    cancel event
+}
+on consume "example:apple" by player {
+    cancel event
+}
+"#;
+        let res = compile_source(bad, "bad_cancel.pstdr", None, &spec, true, true, vec![]);
+        let e004_count = res.diagnostics.iter().filter(|d| d.code == "PSTDR-E004").count();
+        assert_eq!(e004_count, 3, "Expected 3 E004 errors, got: {:?}", res.diagnostics);
+    }
+
+    #[test]
+    fn phase_4_asset_guard_allows_namespaced_rp_alias_and_variations() {
+        let dir = temp_dir("asset_namespaced_rp");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("BP/blocks")).unwrap();
+        fs::create_dir_all(dir.join("RP/textures/items")).unwrap();
+        fs::create_dir_all(dir.join("RP/textures/blocks")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("RP/manifest.json"),
+            r#"{"format_version":2,"header":{"name":"RP","description":"RP","uuid":"22222222-2222-4222-8222-222222222222","version":[1,0,0],"min_engine_version":[1,26,60]},"modules":[]}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("RP/textures/item_texture.json"),
+            r#"{"texture_data":{"example:potion":{"textures":"textures/items/potion"}}}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("RP/textures/terrain_texture.json"),
+            r#"{"texture_data":{"example:stone_var":{"textures":{"variations":[{"path":"textures/blocks/stone1"}]}}}}"#,
+        ).unwrap();
+        fs::write(dir.join("RP/textures/items/potion.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(dir.join("RP/textures/blocks/stone1.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+
+        fs::write(
+            dir.join("BP/items/potion.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"example:potion"},"components":{"minecraft:icon":"example:potion"}}}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("BP/blocks/stone_var.json"),
+            r#"{"format_version":"1.21.90","minecraft:block":{"description":{"identifier":"example:stone_var"},"components":{"minecraft:material_instances":{"*":{"texture":"example:stone_var"}}}}}"#,
+        ).unwrap();
+
+        let diags = validate_workspace_assets(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "Registered namespaced alias & variations must pass: {diags:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
