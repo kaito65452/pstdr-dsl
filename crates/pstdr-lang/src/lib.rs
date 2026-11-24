@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod formatter;
 pub mod lexer;
 pub mod parser;
+pub mod partition;
 pub mod spec;
 pub mod validator;
 pub mod wiring;
@@ -18,6 +19,7 @@ pub use diagnostics::{
 };
 pub use formatter::format_source;
 pub use parser::parse_source;
+pub use partition::{partition_program, PartitionedProgram, PartitionedTarget, TargetEntry, TargetRegistry};
 pub use spec::BedrockSpec;
 pub use validator::{validate_program, ValidatedProgramInfo, ValidationContext};
 pub use workspace::{
@@ -1414,5 +1416,347 @@ on die of dead {
             js.contains("dim.spawnParticle(\"minecraft:heart_particle\", dead.location);"),
             "Entity identifier with explicit dim must still append .location:\n{js}"
         );
+    }
+
+    // ─── WAVE 2B: Identifier-Driven Partitioning (partition.rs) ───
+
+    #[test]
+    fn partition_single_file_multiple_items_and_blocks() {
+        let dir = temp_dir("wave2b_partition_multi");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("BP/blocks")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/items/frost_scythe.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "pack:frost_scythe" },
+    "components": { "minecraft:icon": "snowball" }
+  }
+}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("BP/items/fire_blade.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "pack:fire_blade" },
+    "components": { "minecraft:icon": "diamond" }
+  }
+}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("BP/blocks/magic_altar.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:block": {
+    "description": { "identifier": "pack:magic_altar" },
+    "components": {}
+  }
+}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/all_weapons.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+const SCYTHE_ID = "pack:frost_scythe"
+const BLADE_ID = "pack:fire_blade"
+const ALTAR_ID = "pack:magic_altar"
+const BONUS_DMG = 6
+mut total_hits = 0
+
+func announce_hit(p) {
+    total_hits += 1
+    send "Total hits: {total_hits}" to p
+}
+
+on hit target with SCYTHE_ID by player {
+    damage target by BONUS_DMG
+    announce_hit(player)
+}
+
+on right click with SCYTHE_ID by player {
+    player.actionbar("Frost Nova!")
+}
+
+on hit target with BLADE_ID by player {
+    ignite target for 3s
+}
+
+on interact of ALTAR_ID by player {
+    send "Altar activated!" to player
+}
+
+on tick of ALTAR_ID {
+    spawn particle "minecraft:villager_happy" at block.location in dimension
+}
+
+on join of player {
+    send "Welcome to the arena!" to player
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags),
+            "convert_workspace must succeed for multi-target file: {diags:?}"
+        );
+
+        // Verify distinct generated modules exist
+        let scythe_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/items/frost_scythe.js")).unwrap();
+        let blade_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/items/fire_blade.js")).unwrap();
+        let altar_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/blocks/magic_altar.js")).unwrap();
+        let shared_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/_shared/all_weapons.shared.js"))
+                .unwrap();
+        let world_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/world/all_weapons.js")).unwrap();
+        let registry_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/_registry.js")).unwrap();
+        let main_js = fs::read_to_string(dir.join("BP/scripts/main.js")).unwrap();
+
+        // Item A merges on hit + on right click into a single custom component export
+        assert!(scythe_js.contains("export const component = {"));
+        assert!(scythe_js.contains("onUse(ev) {"));
+        assert!(scythe_js.contains("onHitEntity(ev) {"));
+        assert!(scythe_js.contains("from \"../_shared/all_weapons.shared.js\""));
+        assert!(scythe_js.contains("// @pstdr-source: src/all_weapons.pstdr:"));
+
+        // Item B has onHitEntity
+        assert!(blade_js.contains("export const component = {"));
+        assert!(blade_js.contains("onHitEntity(ev) {"));
+        assert!(blade_js.contains("target.setOnFire(3, true);"));
+
+        // Block merges on interact + on tick into a single block component export
+        assert!(altar_js.contains("export const component = {"));
+        assert!(altar_js.contains("onPlayerInteract(ev) {"));
+        assert!(altar_js.contains("onTick(ev) {"));
+        assert!(altar_js.contains("dimension.spawnParticle(\"minecraft:villager_happy\", block.location);"));
+
+        // Shared module exports const, __pstdr_mut, and func
+        assert!(shared_js.contains("export const BONUS_DMG = 6;"));
+        assert!(shared_js.contains("export const __pstdr_mut = {"));
+        assert!(shared_js.contains("total_hits: 0"));
+        assert!(shared_js.contains("export function announce_hit(p) {"));
+        assert!(shared_js.contains("__pstdr_mut.total_hits += 1;"));
+
+        // World module contains on join
+        assert!(world_js.contains("world.afterEvents.playerSpawn.subscribe"));
+        assert!(world_js.contains("Welcome to the arena!"));
+
+        // Centralized _registry.js registers all 3 components in one startup callback
+        assert!(registry_js.contains("system.beforeEvents.startup.subscribe"));
+        assert!(registry_js.contains("registerCustomComponent(\"pstdr:frost_scythe\", item_frost_scythe)"));
+        assert!(registry_js.contains("registerCustomComponent(\"pstdr:fire_blade\", item_fire_blade)"));
+        assert!(registry_js.contains("registerCustomComponent(\"pstdr:magic_altar\", block_magic_altar)"));
+
+        // main.js imports _registry.js and world/all_weapons.js
+        assert!(main_js.contains("import \"./generated/_registry.js\";"));
+        assert!(main_js.contains("import \"./generated/world/all_weapons.js\";"));
+
+        // All 3 BP JSON files are wired with their distinct component IDs
+        let scythe_json = fs::read_to_string(dir.join("BP/items/frost_scythe.json")).unwrap();
+        let blade_json = fs::read_to_string(dir.join("BP/items/fire_blade.json")).unwrap();
+        let altar_json = fs::read_to_string(dir.join("BP/blocks/magic_altar.json")).unwrap();
+        assert!(scythe_json.contains("\"pstdr:frost_scythe\": {}"));
+        assert!(blade_json.contains("\"pstdr:fire_blade\": {}"));
+        assert!(altar_json.contains("\"pstdr:magic_altar\": {}"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partition_orphan_cleanup_removes_deleted_item_module() {
+        let dir = temp_dir("wave2b_orphan_cleanup");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/items/item_a.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"pack:item_a"},"components":{"minecraft:icon":"snowball"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("BP/items/item_b.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"pack:item_b"},"components":{"minecraft:icon":"diamond"}}}"#,
+        )
+        .unwrap();
+
+        // First build with both item_a and item_b
+        fs::write(
+            dir.join("src/arsenal.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+on hit target with "pack:item_a" by player {
+    damage target by 4
+}
+
+on hit target with "pack:item_b" by player {
+    ignite target for 2s
+}
+"#,
+        )
+        .unwrap();
+
+        let diags1 = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags1), "first convert failed: {diags1:?}");
+        assert!(dir.join("BP/scripts/generated/items/item_a.js").is_file());
+        assert!(dir.join("BP/scripts/generated/items/item_b.js").is_file());
+
+        // Remove item_b from the .pstdr file and re-run convert_workspace
+        fs::write(
+            dir.join("src/arsenal.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+on hit target with "pack:item_a" by player {
+    damage target by 4
+}
+"#,
+        )
+        .unwrap();
+
+        let diags2 = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags2), "second convert failed: {diags2:?}");
+        assert!(
+            dir.join("BP/scripts/generated/items/item_a.js").is_file(),
+            "item_a.js must still exist"
+        );
+        assert!(
+            !dir.join("BP/scripts/generated/items/item_b.js").exists(),
+            "stale item_b.js must be deleted by orphan cleanup"
+        );
+
+        let registry_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/_registry.js")).unwrap();
+        assert!(registry_js.contains("pstdr:item_a"));
+        assert!(
+            !registry_js.contains("item_b"),
+            "_registry.js must no longer reference deleted item_b:\n{registry_js}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partition_shared_mut_compiles_without_es_module_reassignment_error() {
+        let dir = temp_dir("wave2b_shared_mut");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/items/dagger.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"pack:dagger"},"components":{"minecraft:icon":"snowball"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("BP/items/hammer.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"pack:hammer"},"components":{"minecraft:icon":"diamond"}}}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/combo.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+mut combo_count = 0
+
+on hit target with "pack:dagger" by player {
+    combo_count += 1
+    player.actionbar("Combo: {combo_count}")
+}
+
+on hit target with "pack:hammer" by player {
+    combo_count = 0
+    damage target by 10
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "convert_workspace failed: {diags:?}");
+
+        let shared_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/_shared/combo.shared.js")).unwrap();
+        let dagger_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/items/dagger.js")).unwrap();
+        let hammer_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/items/hammer.js")).unwrap();
+
+        assert!(shared_js.contains("export const __pstdr_mut = {"));
+        assert!(shared_js.contains("combo_count: 0"));
+        assert!(!shared_js.contains("export let combo_count"));
+
+        assert!(dagger_js.contains("import { __pstdr_mut } from \"../_shared/combo.shared.js\";"));
+        assert!(dagger_js.contains("__pstdr_mut.combo_count += 1;"));
+        assert!(dagger_js.contains("${__pstdr_mut.combo_count}"));
+
+        assert!(hammer_js.contains("import { __pstdr_mut } from \"../_shared/combo.shared.js\";"));
+        assert!(hammer_js.contains("__pstdr_mut.combo_count = 0;"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partition_cancellable_block_interact_routes_to_world_before_events() {
+        let dir = temp_dir("wave2b_cancel_interact");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/blocks")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/blocks/locked_chest.json"),
+            r#"{"format_version":"1.21.90","minecraft:block":{"description":{"identifier":"pack:locked_chest"},"components":{}}}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/vault.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+const CHEST_ID = "pack:locked_chest"
+
+on interact of CHEST_ID by player {
+    cancel event
+    send "Locked!" to player
+}
+
+on tick of CHEST_ID {
+    spawn particle "minecraft:villager_happy" at block.location in dimension
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "convert_workspace failed: {diags:?}");
+
+        let block_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/blocks/locked_chest.js")).unwrap();
+        let world_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/world/vault.js")).unwrap();
+
+        assert!(block_js.contains("onTick(ev) {"));
+        assert!(!block_js.contains("onPlayerInteract"));
+        assert!(world_js.contains("world.beforeEvents.playerInteractWithBlock.subscribe"));
+        assert!(world_js.contains("ev.cancel = true;"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -136,6 +136,81 @@ pub fn is_valid_v3_min_engine(s: &str) -> bool {
 }
 
 /// Injects `minecraft:custom_components` (V1) or direct component keys (V2)
+/// into a single BP item or block JSON file.
+pub fn wire_target_json(
+    target_path: &Path,
+    comp_id: &str,
+) -> Result<Option<ComponentKind>, String> {
+    if !target_path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(target_path)
+        .map_err(|e| format!("Failed to read target '{}': {e}", target_path.display()))?;
+    let Ok(mut val) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(None);
+    };
+
+    let fv = val
+        .get("format_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.21.50");
+    let is_v2 = uses_custom_components_v2(fv);
+
+    let kind_key = if val.get("minecraft:item").is_some() {
+        Some(("minecraft:item", ComponentKind::Item))
+    } else if val.get("minecraft:block").is_some() {
+        Some(("minecraft:block", ComponentKind::Block))
+    } else {
+        None
+    };
+
+    let Some((root_key, kind)) = kind_key else {
+        return Ok(None);
+    };
+
+    let mut modified = false;
+    if let Some(root_obj) = val.get_mut(root_key).and_then(|v| v.as_object_mut()) {
+        let comps = root_obj
+            .entry("components".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(comps_obj) = comps.as_object_mut() {
+            if is_v2 {
+                // Custom Components V2 (format_version >= 1.21.90):
+                // DO NOT write a "minecraft:custom_components" array.
+                // Inject directly as an object key inside "components": "pstdr:<slug>": {}.
+                if !comps_obj.contains_key(comp_id) {
+                    comps_obj.insert(comp_id.to_string(), json!({}));
+                    modified = true;
+                }
+            } else {
+                // Custom Components V1 (format_version < 1.21.90):
+                // Inject into the "minecraft:custom_components": ["pstdr:<slug>"] array.
+                let cc = comps_obj
+                    .entry("minecraft:custom_components".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(arr) = cc.as_array_mut() {
+                    let exists = arr.iter().any(|v| v.as_str() == Some(comp_id));
+                    if !exists {
+                        arr.push(Value::String(comp_id.to_string()));
+                        modified = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if modified {
+        let pretty = serde_json::to_string_pretty(&val)
+            .map_err(|e| format!("Failed to serialize JSON '{}': {e}", target_path.display()))?;
+        fs::write(target_path, format!("{pretty}\n"))
+            .map_err(|e| format!("Failed to write '{}': {e}", target_path.display()))?;
+    }
+
+    Ok(Some(kind))
+}
+
+/// Injects `minecraft:custom_components` (V1) or direct component keys (V2)
 /// into `BP/items/*.json` and `BP/blocks/*.json` files declared via `bind_target(...)`.
 pub fn wire_bind_targets(
     workspace_root: &Path,
@@ -147,69 +222,7 @@ pub fn wire_bind_targets(
 
     for bt in bind_targets {
         let target_path = workspace_root.join(&bt.path);
-        if !target_path.is_file() {
-            continue;
-        }
-
-        let raw = fs::read_to_string(&target_path)
-            .map_err(|e| format!("Failed to read target '{}': {e}", target_path.display()))?;
-        let Ok(mut val) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-
-        let fv = val
-            .get("format_version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("1.21.50");
-        let is_v2 = uses_custom_components_v2(fv);
-
-        let kind_key = if val.get("minecraft:item").is_some() {
-            Some(("minecraft:item", ComponentKind::Item))
-        } else if val.get("minecraft:block").is_some() {
-            Some(("minecraft:block", ComponentKind::Block))
-        } else {
-            None
-        };
-
-        if let Some((root_key, kind)) = kind_key {
-            let mut modified = false;
-            if let Some(root_obj) = val.get_mut(root_key).and_then(|v| v.as_object_mut()) {
-                let comps = root_obj
-                    .entry("components".to_string())
-                    .or_insert_with(|| Value::Object(Map::new()));
-                if let Some(comps_obj) = comps.as_object_mut() {
-                    if is_v2 {
-                        // Custom Components V2 (format_version >= 1.21.90):
-                        // DO NOT write a "minecraft:custom_components" array.
-                        // Inject directly as an object key inside "components": "pstdr:<stem>": {}.
-                        if !comps_obj.contains_key(&comp_id) {
-                            comps_obj.insert(comp_id.clone(), json!({}));
-                            modified = true;
-                        }
-                    } else {
-                        // Custom Components V1 (format_version < 1.21.90):
-                        // Inject into the "minecraft:custom_components": ["pstdr:<stem>"] array.
-                        let cc = comps_obj
-                            .entry("minecraft:custom_components".to_string())
-                            .or_insert_with(|| Value::Array(Vec::new()));
-                        if let Some(arr) = cc.as_array_mut() {
-                            let exists = arr.iter().any(|v| v.as_str() == Some(comp_id.as_str()));
-                            if !exists {
-                                arr.push(Value::String(comp_id.clone()));
-                                modified = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if modified {
-                let pretty = serde_json::to_string_pretty(&val)
-                    .map_err(|e| format!("Failed to serialize JSON '{}': {e}", bt.path))?;
-                fs::write(&target_path, format!("{pretty}\n"))
-                    .map_err(|e| format!("Failed to write '{}': {e}", target_path.display()))?;
-            }
-
+        if let Some(kind) = wire_target_json(&target_path, &comp_id)? {
             if !registered.iter().any(|(id, k)| id == &comp_id && k == &kind) {
                 registered.push((comp_id.clone(), kind));
             }
@@ -380,6 +393,11 @@ pub fn update_main_js(workspace_root: &Path, generated_modules: &[String]) -> Re
     let mut sorted = generated_modules.to_vec();
     sorted.sort();
     sorted.dedup();
+    // Ensure `_registry` is always imported first when present.
+    if let Some(pos) = sorted.iter().position(|m| m == "_registry") {
+        let reg = sorted.remove(pos);
+        sorted.insert(0, reg);
+    }
 
     let mut out = String::from("// Auto-generated entry point by pstdr-c\n");
     for m in sorted {
@@ -389,5 +407,101 @@ pub fn update_main_js(workspace_root: &Path, generated_modules: &[String]) -> Re
     let main_path = scripts_dir.join("main.js");
     fs::write(&main_path, out)
         .map_err(|e| format!("Failed to write '{}': {e}", main_path.display()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryEntry {
+    pub component_id: String,
+    pub kind: ComponentKind,
+    pub slug: String,
+}
+
+/// Generates the centralized `BP/scripts/generated/_registry.js` (or `.ts`) module
+/// that registers all partitioned item and block custom components in a single startup callback.
+pub fn emit_registry_module(
+    entries: &[RegistryEntry],
+    target_version: &str,
+    mode: crate::codegen::EmitMode,
+) -> String {
+    let use_v2_startup = uses_custom_components_v2(target_version);
+    let init_ev_param = if mode == crate::codegen::EmitMode::TypeScript {
+        "(initEv: any)"
+    } else {
+        "(initEv)"
+    };
+    let ext = if mode == crate::codegen::EmitMode::TypeScript {
+        ""
+    } else {
+        ".js"
+    };
+
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| {
+        let ka = match a.kind {
+            ComponentKind::Item => 0u8,
+            ComponentKind::Block => 1u8,
+        };
+        let kb = match b.kind {
+            ComponentKind::Item => 0u8,
+            ComponentKind::Block => 1u8,
+        };
+        ka.cmp(&kb).then_with(|| a.slug.cmp(&b.slug))
+    });
+    sorted.dedup_by(|a, b| a.kind == b.kind && a.slug == b.slug);
+
+    let mut out = String::from("// Auto-generated component registry by pstdr-c\n");
+    if use_v2_startup {
+        out.push_str("import { system } from \"@minecraft/server\";\n");
+    } else {
+        out.push_str("import { world } from \"@minecraft/server\";\n");
+    }
+
+    for entry in &sorted {
+        match entry.kind {
+            ComponentKind::Item => {
+                out.push_str(&format!(
+                    "import {{ component as item_{} }} from \"./items/{}{ext}\";\n",
+                    entry.slug, entry.slug
+                ));
+            }
+            ComponentKind::Block => {
+                out.push_str(&format!(
+                    "import {{ component as block_{} }} from \"./blocks/{}{ext}\";\n",
+                    entry.slug, entry.slug
+                ));
+            }
+        }
+    }
+
+    out.push('\n');
+    if use_v2_startup {
+        out.push_str(&format!(
+            "system.beforeEvents.startup.subscribe({init_ev_param} => {{\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "world.beforeEvents.worldInitialize.subscribe({init_ev_param} => {{\n"
+        ));
+    }
+
+    for entry in &sorted {
+        match entry.kind {
+            ComponentKind::Item => {
+                out.push_str(&format!(
+                    "    initEv.itemComponentRegistry.registerCustomComponent(\"{}\", item_{});\n",
+                    entry.component_id, entry.slug
+                ));
+            }
+            ComponentKind::Block => {
+                out.push_str(&format!(
+                    "    initEv.blockComponentRegistry.registerCustomComponent(\"{}\", block_{});\n",
+                    entry.component_id, entry.slug
+                ));
+            }
+        }
+    }
+
+    out.push_str("});\n");
+    out
 }
 

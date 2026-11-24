@@ -1,10 +1,17 @@
-use crate::codegen::{emit_code, CodegenOptions, ComponentKind, EmitMode};
+use crate::codegen::{
+    emit_block_component_module, emit_code, emit_item_component_module, emit_shared_module,
+    emit_world_module, CodegenOptions, ComponentKind, EmitMode, SharedContext,
+};
 use crate::diagnostics::{has_errors, Diagnostic, DiagnosticCode, Span};
 use crate::formatter::format_source;
 use crate::parser::parse_source;
+use crate::partition::{partition_program, TargetRegistry};
 use crate::spec::BedrockSpec;
 use crate::validator::{validate_program, ValidationContext};
-use crate::wiring::{generate_uuid_v4, is_valid_v3_min_engine, resolve_min_engine_version, update_main_js, update_manifest, wire_bind_targets};
+use crate::wiring::{
+    emit_registry_module, generate_uuid_v4, is_valid_v3_min_engine, resolve_min_engine_version,
+    update_main_js, update_manifest, wire_bind_targets, wire_target_json, RegistryEntry,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -266,12 +273,18 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         all_diags.extend(asset_diags);
     }
 
-    let mut generated_stems = Vec::new();
     let mut target_ver = cfg.bedrock_target.clone();
     let mut api_ver = cfg.script_api.clone();
+    let mut registry = TargetRegistry::discover(root)?;
 
-    let js_dir = root.join(&cfg.js_out_dir);
-    let ts_dir = root.join(&cfg.ts_out_dir);
+    struct ValidatedFile {
+        rel: String,
+        stem: String,
+        prog: crate::ast::Program,
+        bound_block_ids: Vec<String>,
+    }
+
+    let mut validated_files = Vec::new();
 
     for file_path in &files {
         let source = fs::read_to_string(file_path)
@@ -308,6 +321,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         }
 
         let prog = prog_opt.unwrap();
+        registry.register_bind_targets(root, &prog.bind_targets);
 
         let stem = file_path
             .file_stem()
@@ -315,41 +329,246 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             .unwrap_or("script")
             .to_string();
 
-        let registered = wire_bind_targets(root, &prog.bind_targets, &stem)?;
-
-        let opts = CodegenOptions {
-            source_file: rel,
-            source_map_comments: cfg.source_map_comments,
-            custom_components: registered,
+        validated_files.push(ValidatedFile {
+            rel,
+            stem,
+            prog,
             bound_block_ids,
-        };
-        let js = emit_code(&prog, &opts, EmitMode::JavaScript);
-        let ts = emit_code(&prog, &opts, EmitMode::TypeScript);
-
-        fs::create_dir_all(&js_dir)
-            .map_err(|e| format!("Failed to create directory '{}': {e}", js_dir.display()))?;
-        let js_out = js_dir.join(format!("{stem}.js"));
-        fs::write(&js_out, js)
-            .map_err(|e| format!("Failed to write '{}': {e}", js_out.display()))?;
-
-        if cfg.emit_ts {
-            fs::create_dir_all(&ts_dir)
-                .map_err(|e| format!("Failed to create directory '{}': {e}", ts_dir.display()))?;
-            let ts_out = ts_dir.join(format!("{stem}.ts"));
-            fs::write(&ts_out, ts)
-                .map_err(|e| format!("Failed to write '{}': {e}", ts_out.display()))?;
-        }
-
-        generated_stems.push(stem);
+        });
     }
 
-    if !has_errors(&all_diags) && !generated_stems.is_empty() {
-        update_main_js(root, &generated_stems)?;
+    if has_errors(&all_diags) || has_asset_err {
+        sort_and_dedup_diags(&mut all_diags);
+        return Ok(all_diags);
+    }
+
+    let js_dir = root.join(&cfg.js_out_dir);
+    let ts_dir = root.join(&cfg.ts_out_dir);
+
+    // Clean stale generated modules before writing new outputs so deleted targets
+    // do not leave orphan `.js`/`.ts` files behind.
+    clean_generated_dir(&js_dir, "js")?;
+    if cfg.emit_ts {
+        clean_generated_dir(&ts_dir, "ts")?;
+    }
+
+    let mut main_modules: Vec<String> = Vec::new();
+    let mut registry_entries: Vec<RegistryEntry> = Vec::new();
+
+    for vf in validated_files {
+        let part = partition_program(&vf.prog, &registry);
+        if !part.should_partition(vf.prog.bind_targets.len()) {
+            let registered = wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?;
+            let opts = CodegenOptions {
+                source_file: vf.rel,
+                source_map_comments: cfg.source_map_comments,
+                custom_components: registered,
+                bound_block_ids: vf.bound_block_ids,
+            };
+            let js = emit_code(&vf.prog, &opts, EmitMode::JavaScript);
+            write_generated_file(&js_dir.join(format!("{}.js", vf.stem)), &js)?;
+
+            if cfg.emit_ts {
+                let ts = emit_code(&vf.prog, &opts, EmitMode::TypeScript);
+                write_generated_file(&ts_dir.join(format!("{}.ts", vf.stem)), &ts)?;
+            }
+
+            main_modules.push(vf.stem);
+            continue;
+        }
+
+        let header = vf.prog.header.as_ref();
+        let has_shared = !part.shared.is_empty();
+        let shared_ctx_js = SharedContext::from_shared_items(
+            &part.shared,
+            has_shared.then(|| format!("../_shared/{}.shared.js", vf.stem)),
+        );
+        let shared_ctx_ts = SharedContext::from_shared_items(
+            &part.shared,
+            has_shared.then(|| format!("../_shared/{}.shared", vf.stem)),
+        );
+
+        if has_shared {
+            let shared_js = emit_shared_module(
+                &part.shared,
+                header,
+                &vf.rel,
+                cfg.source_map_comments,
+                EmitMode::JavaScript,
+            );
+            write_generated_file(
+                &js_dir.join(format!("_shared/{}.shared.js", vf.stem)),
+                &shared_js,
+            )?;
+            if cfg.emit_ts {
+                let shared_ts = emit_shared_module(
+                    &part.shared,
+                    header,
+                    &vf.rel,
+                    cfg.source_map_comments,
+                    EmitMode::TypeScript,
+                );
+                write_generated_file(
+                    &ts_dir.join(format!("_shared/{}.shared.ts", vf.stem)),
+                    &shared_ts,
+                )?;
+            }
+        }
+
+        for target in part.items.values() {
+            wire_target_json(&target.entry.json_path, &target.entry.component_id)?;
+            let item_js = emit_item_component_module(
+                &target.handlers,
+                &shared_ctx_js,
+                header,
+                &vf.rel,
+                cfg.source_map_comments,
+                EmitMode::JavaScript,
+            );
+            write_generated_file(
+                &js_dir.join(format!("items/{}.js", target.entry.slug)),
+                &item_js,
+            )?;
+            if cfg.emit_ts {
+                let item_ts = emit_item_component_module(
+                    &target.handlers,
+                    &shared_ctx_ts,
+                    header,
+                    &vf.rel,
+                    cfg.source_map_comments,
+                    EmitMode::TypeScript,
+                );
+                write_generated_file(
+                    &ts_dir.join(format!("items/{}.ts", target.entry.slug)),
+                    &item_ts,
+                )?;
+            }
+            registry_entries.push(RegistryEntry {
+                component_id: target.entry.component_id.clone(),
+                kind: ComponentKind::Item,
+                slug: target.entry.slug.clone(),
+            });
+        }
+
+        for target in part.blocks.values() {
+            wire_target_json(&target.entry.json_path, &target.entry.component_id)?;
+            let block_js = emit_block_component_module(
+                &target.handlers,
+                &shared_ctx_js,
+                header,
+                &vf.rel,
+                cfg.source_map_comments,
+                EmitMode::JavaScript,
+            );
+            write_generated_file(
+                &js_dir.join(format!("blocks/{}.js", target.entry.slug)),
+                &block_js,
+            )?;
+            if cfg.emit_ts {
+                let block_ts = emit_block_component_module(
+                    &target.handlers,
+                    &shared_ctx_ts,
+                    header,
+                    &vf.rel,
+                    cfg.source_map_comments,
+                    EmitMode::TypeScript,
+                );
+                write_generated_file(
+                    &ts_dir.join(format!("blocks/{}.ts", target.entry.slug)),
+                    &block_ts,
+                )?;
+            }
+            registry_entries.push(RegistryEntry {
+                component_id: target.entry.component_id.clone(),
+                kind: ComponentKind::Block,
+                slug: target.entry.slug.clone(),
+            });
+        }
+
+        if !part.world.is_empty() {
+            let world_js = emit_world_module(
+                &part.world,
+                &shared_ctx_js,
+                header,
+                &vf.rel,
+                cfg.source_map_comments,
+                EmitMode::JavaScript,
+            );
+            write_generated_file(
+                &js_dir.join(format!("world/{}.js", vf.stem)),
+                &world_js,
+            )?;
+            if cfg.emit_ts {
+                let world_ts = emit_world_module(
+                    &part.world,
+                    &shared_ctx_ts,
+                    header,
+                    &vf.rel,
+                    cfg.source_map_comments,
+                    EmitMode::TypeScript,
+                );
+                write_generated_file(
+                    &ts_dir.join(format!("world/{}.ts", vf.stem)),
+                    &world_ts,
+                )?;
+            }
+            main_modules.push(format!("world/{}", vf.stem));
+        }
+    }
+
+    if !registry_entries.is_empty() {
+        let reg_js = emit_registry_module(&registry_entries, &target_ver, EmitMode::JavaScript);
+        write_generated_file(&js_dir.join("_registry.js"), &reg_js)?;
+        if cfg.emit_ts {
+            let reg_ts = emit_registry_module(&registry_entries, &target_ver, EmitMode::TypeScript);
+            write_generated_file(&ts_dir.join("_registry.ts"), &reg_ts)?;
+        }
+        main_modules.push("_registry".to_string());
+    }
+
+    if !main_modules.is_empty() {
+        update_main_js(root, &main_modules)?;
         update_manifest(root, &target_ver, &api_ver)?;
     }
 
     sort_and_dedup_diags(&mut all_diags);
     Ok(all_diags)
+}
+
+fn write_generated_file(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory '{}': {e}", parent.display()))?;
+    }
+    fs::write(path, content)
+        .map_err(|e| format!("Failed to write '{}': {e}", path.display()))
+}
+
+fn clean_generated_dir(dir: &Path, ext: &str) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    clean_generated_recursive(dir, ext, true)
+}
+
+fn clean_generated_recursive(dir: &Path, ext: &str, is_root: bool) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory '{}': {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let p = entry.path();
+        if p.is_dir() {
+            clean_generated_recursive(&p, ext, false)?;
+            if fs::read_dir(&p).is_ok_and(|mut it| it.next().is_none()) {
+                let _ = fs::remove_dir(&p);
+            }
+        } else if p.extension().and_then(|e| e.to_str()) == Some(ext) {
+            fs::remove_file(&p)
+                .map_err(|e| format!("Failed to remove stale file '{}': {e}", p.display()))?;
+        }
+    }
+    let _ = is_root;
+    Ok(())
 }
 
 pub fn check_path(

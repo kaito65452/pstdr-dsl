@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Span};
+use crate::partition::TargetRegistry;
 use crate::spec::BedrockSpec;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -85,6 +86,10 @@ pub fn validate_program(
     program: &Program,
     ctx: &ValidationContext<'_>,
 ) -> (ValidatedProgramInfo, Vec<Diagnostic>) {
+    let discovered_registry = ctx
+        .workspace_root
+        .and_then(|root| TargetRegistry::discover(root).ok());
+
     let mut v = Validator {
         ctx,
         scopes: vec![HashMap::new()],
@@ -97,6 +102,7 @@ pub fn validate_program(
         has_block_bind_target: false,
         static_event_item_ids: Vec::new(),
         static_event_block_ids: Vec::new(),
+        discovered_registry,
     };
 
     v.seed_builtins();
@@ -128,6 +134,7 @@ struct Validator<'a> {
     has_block_bind_target: bool,
     static_event_item_ids: Vec<(String, Span)>,
     static_event_block_ids: Vec<(String, Span)>,
+    discovered_registry: Option<TargetRegistry>,
 }
 
 impl<'a> Validator<'a> {
@@ -408,12 +415,18 @@ impl<'a> Validator<'a> {
             }
             EventKind::BlockTick { block_id } => {
                 self.validate_expr(block_id);
-                if let Some(s) = eval_static_string(block_id, &self.const_strings) {
+                let resolved_id = eval_static_string(block_id, &self.const_strings);
+                if let Some(ref s) = resolved_id {
                     self.static_event_block_ids
-                        .push((s, block_id.span().clone()));
+                        .push((s.clone(), block_id.span().clone()));
                 }
+                let discovered_match = resolved_id.as_deref().is_some_and(|id| {
+                    self.discovered_registry
+                        .as_ref()
+                        .is_some_and(|reg| reg.has_block(id))
+                });
                 let has_bound_block = if self.ctx.workspace_root.is_some() {
-                    !self.bound_block_ids.is_empty()
+                    !self.bound_block_ids.is_empty() || discovered_match
                 } else {
                     self.has_block_bind_target
                 };
@@ -421,8 +434,8 @@ impl<'a> Validator<'a> {
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::E007,
                         &ev.span,
-                        "'on tick' requires a bound block target via bind_target(\"BP/blocks/...\").",
-                        "Add bind_target(\"BP/blocks/<block>.json\") at the top of the file matching the block identifier.",
+                        "'on tick' requires a bound block target via bind_target(\"BP/blocks/...\") or a matching block JSON in BP/blocks/.",
+                        "Add bind_target(\"BP/blocks/<block>.json\") at the top of the file or define a matching block JSON in BP/blocks/.",
                     ));
                 }
                 self.insert_binding("block", BindingKind::ContextVar, ev.span.line);
