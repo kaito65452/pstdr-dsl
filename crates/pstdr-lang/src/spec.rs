@@ -60,7 +60,7 @@ pub struct BedrockSpec {
     pub stable_before_events: HashSet<String>,
     /// Stable `world.afterEvents` names (lowercased).
     pub stable_after_events: HashSet<String>,
-    /// Lowercased `@minecraft/server` event names that require a `-beta` API version.
+    /// `@minecraft/server` event names that require a `-beta` API version (canonical casing preserved).
     pub beta_events: HashSet<String>,
     /// Lowercased event names executed in read-only mode.
     pub read_only_events: HashSet<String>,
@@ -89,7 +89,8 @@ impl BedrockSpec {
             .beta_events
             .unwrap_or_else(|| vec!["chatSend".to_string()])
             .into_iter()
-            .map(|s| s.trim().to_ascii_lowercase())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .collect();
         Ok(Self {
             bedrock_version: raw.bedrock_version,
@@ -210,8 +211,12 @@ impl BedrockSpec {
     }
 
     pub fn is_beta_event(&self, event_name: &str) -> bool {
-        self.beta_events
-            .contains(&event_name.trim().to_ascii_lowercase())
+        let trimmed = event_name.trim();
+        self.beta_events.contains(trimmed)
+            || self
+                .beta_events
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(trimmed))
     }
 
     pub fn is_beta_api(&self, symbol: &str) -> bool {
@@ -227,6 +232,58 @@ impl BedrockSpec {
 /// Returns true when a `@minecraft/server` API version string targets a Beta release (e.g. `"2.11.0-beta"`).
 pub fn is_beta_api_version(api: &str) -> bool {
     api.trim().to_ascii_lowercase().ends_with("-beta")
+}
+
+fn is_js_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Returns true when `needle` occurs in `haystack` bounded by non-identifier characters.
+pub fn contains_ident_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let n_len = needle.len();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let abs = start + pos;
+        let left_ok = abs == 0 || !is_js_ident_char(bytes[abs - 1]);
+        let right_idx = abs + n_len;
+        let right_ok = right_idx >= bytes.len() || !is_js_ident_char(bytes[right_idx]);
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Returns true when `text` references `beforeEvents.<beta_ev>` or `afterEvents.<beta_ev>`.
+pub fn text_uses_beta_event(text: &str, beta_ev: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let ev_lower = beta_ev.to_ascii_lowercase();
+    contains_ident_token(&lower, &format!("beforeevents.{ev_lower}"))
+        || contains_ident_token(&lower, &format!("afterevents.{ev_lower}"))
+}
+
+/// Returns true when `text` references a class-qualified Beta-only API (`ClassName.memberName`),
+/// including singleton aliases (`World.x` -> `world.x`, `System.x` -> `system.x`,
+/// `SystemBeforeEvents.x` -> `beforeEvents.x`, `SystemAfterEvents.x` -> `afterEvents.x`).
+pub fn text_uses_beta_api(text: &str, beta_sym: &str) -> bool {
+    if contains_ident_token(text, beta_sym) {
+        return true;
+    }
+    let Some((cls, member)) = beta_sym.split_once('.') else {
+        return false;
+    };
+    match cls {
+        "World" => contains_ident_token(text, &format!("world.{member}")),
+        "System" => contains_ident_token(text, &format!("system.{member}")),
+        "SystemBeforeEvents" => contains_ident_token(text, &format!("beforeEvents.{member}")),
+        "SystemAfterEvents" => contains_ident_token(text, &format!("afterEvents.{member}")),
+        _ => false,
+    }
 }
 
 /// Centralized mapping of snake_case .pstdr properties -> @minecraft/server API.

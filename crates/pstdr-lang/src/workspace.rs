@@ -779,19 +779,62 @@ fn audit_beta_api_usage(
     spec: &BedrockSpec,
     diags: &mut Vec<Diagnostic>,
 ) -> Result<(), String> {
-    // 1. Check generated JS and TS outputs for beta-only event subscriptions.
-    for (dir, ext) in [
-        (root.join(&cfg.js_out_dir), "js"),
-        (root.join(&cfg.ts_out_dir), "ts"),
-    ] {
-        if !dir.is_dir() {
+    let mut beta_events: Vec<&String> = spec.beta_events.iter().collect();
+    beta_events.sort();
+    let mut beta_apis: Vec<&String> = spec.beta_apis.iter().collect();
+    beta_apis.sort();
+
+    // 1. Scan runtime JS outputs under BP/scripts/ (skip build/ts/ mirrors to avoid duplicate reports).
+    let js_dir = root.join(&cfg.js_out_dir);
+    let mut js_files = Vec::new();
+    if js_dir.is_dir() {
+        collect_files_by_ext(&js_dir, "js", &mut js_files)?;
+        js_files.sort();
+    }
+
+    for path in &js_files {
+        let Ok(content) = fs::read_to_string(path) else {
             continue;
+        };
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        for (idx, line) in content.lines().enumerate() {
+            for beta_ev in &beta_events {
+                if crate::spec::text_uses_beta_event(line, beta_ev) {
+                    diags.push(Diagnostic::error(
+                        DiagnosticCode::E018,
+                        &Span::new(&rel, idx + 1, 1, line.len().max(1)),
+                        format!(
+                            "Audit Gate failed: '{rel}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                        ),
+                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                    ));
+                }
+            }
+            for beta_sym in &beta_apis {
+                if crate::spec::text_uses_beta_api(line, beta_sym) {
+                    diags.push(Diagnostic::error(
+                        DiagnosticCode::E018,
+                        &Span::new(&rel, idx + 1, 1, line.len().max(1)),
+                        format!(
+                            "Audit Gate failed: '{rel}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                        ),
+                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                    ));
+                }
+            }
         }
-        let mut out_files = Vec::new();
-        collect_files_by_ext(&dir, ext, &mut out_files)?;
-        out_files.sort();
-        for path in out_files {
-            let Ok(content) = fs::read_to_string(&path) else {
+    }
+
+    // 2. If no generated JS files exist yet, also inspect .pstdr sources against BP/manifest.json
+    // (catches files that declared `-beta` in `@addon` before `convert` updated the manifest).
+    if js_files.is_empty() {
+        let pstdr_files = collect_pstdr_files(scan_target)?;
+        for path in pstdr_files {
+            let Ok(source) = fs::read_to_string(&path) else {
                 continue;
             };
             let rel = path
@@ -799,149 +842,87 @@ fn audit_beta_api_usage(
                 .unwrap_or(&path)
                 .display()
                 .to_string();
-            for (idx, line) in content.lines().enumerate() {
-                let lower = line.to_ascii_lowercase();
-                for beta_ev in &spec.beta_events {
-                    let before_needle = format!("beforeevents.{beta_ev}");
-                    let after_needle = format!("afterevents.{beta_ev}");
-                    if contains_ident_token(&lower, &before_needle)
-                        || contains_ident_token(&lower, &after_needle)
-                    {
-                        diags.push(Diagnostic::error(
-                            DiagnosticCode::E018,
-                            &Span::new(&rel, idx + 1, 1, line.len().max(1)),
-                            format!(
-                                "Audit Gate failed: '{rel}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                            ),
-                            "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
-                        ));
-                    }
-                }
-                for beta_sym in &spec.beta_apis {
-                    if line_uses_beta_api(line, beta_sym) {
-                        diags.push(Diagnostic::error(
-                            DiagnosticCode::E018,
-                            &Span::new(&rel, idx + 1, 1, line.len().max(1)),
-                            format!(
-                                "Audit Gate failed: '{rel}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                            ),
-                            "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Check .pstdr sources for `on chat` and `unsafe` blocks referencing Beta-only APIs/events
-    // when BP/manifest.json declares a stable API version.
-    let pstdr_files = collect_pstdr_files(scan_target)?;
-    for path in pstdr_files {
-        let Ok(source) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        let (prog_opt, _) = parse_source(&source, &rel);
-        if let Some(prog) = prog_opt {
-            for item in &prog.items {
-                match item {
-                    crate::ast::TopLevelItem::EventHandler(ev)
-                        if spec.is_beta_event("chatSend")
-                            && matches!(ev.kind, crate::ast::EventKind::ChatSend { .. }) =>
-                    {
-                        diags.push(Diagnostic::error(
-                            DiagnosticCode::E018,
-                            &ev.span,
-                            format!(
-                                "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                            ),
-                            "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
-                        ));
-                    }
-                    crate::ast::TopLevelItem::UnsafeFuncDecl(u) => {
-                        for beta_sym in &spec.beta_apis {
-                            if line_uses_beta_api(&u.raw_body, beta_sym) {
-                                diags.push(Diagnostic::error(
-                                    DiagnosticCode::E018,
-                                    &u.span,
-                                    format!(
-                                        "Audit Gate failed: unsafe function '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                        u.name
-                                    ),
-                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                                ));
+            let (prog_opt, _) = parse_source(&source, &rel);
+            if let Some(prog) = prog_opt {
+                for item in &prog.items {
+                    match item {
+                        crate::ast::TopLevelItem::EventHandler(ev)
+                            if spec.is_beta_event("chatSend")
+                                && matches!(ev.kind, crate::ast::EventKind::ChatSend { .. }) =>
+                        {
+                            diags.push(Diagnostic::error(
+                                DiagnosticCode::E018,
+                                &ev.span,
+                                format!(
+                                    "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                                ),
+                                "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
+                            ));
+                        }
+                        crate::ast::TopLevelItem::UnsafeFuncDecl(u) => {
+                            for beta_ev in &beta_events {
+                                if crate::spec::text_uses_beta_event(&u.raw_body, beta_ev) {
+                                    diags.push(Diagnostic::error(
+                                        DiagnosticCode::E018,
+                                        &u.span,
+                                        format!(
+                                            "Audit Gate failed: unsafe function '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                            u.name
+                                        ),
+                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                                    ));
+                                }
+                            }
+                            for beta_sym in &beta_apis {
+                                if crate::spec::text_uses_beta_api(&u.raw_body, beta_sym) {
+                                    diags.push(Diagnostic::error(
+                                        DiagnosticCode::E018,
+                                        &u.span,
+                                        format!(
+                                            "Audit Gate failed: unsafe function '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                            u.name
+                                        ),
+                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                                    ));
+                                }
                             }
                         }
-                    }
-                    crate::ast::TopLevelItem::UnsafeVarDecl(u) => {
-                        for beta_sym in &spec.beta_apis {
-                            if line_uses_beta_api(&u.raw_rest, beta_sym) {
-                                diags.push(Diagnostic::error(
-                                    DiagnosticCode::E018,
-                                    &u.span,
-                                    format!(
-                                        "Audit Gate failed: unsafe variable '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                        u.name
-                                    ),
-                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                                ));
+                        crate::ast::TopLevelItem::UnsafeVarDecl(u) => {
+                            for beta_ev in &beta_events {
+                                if crate::spec::text_uses_beta_event(&u.raw_rest, beta_ev) {
+                                    diags.push(Diagnostic::error(
+                                        DiagnosticCode::E018,
+                                        &u.span,
+                                        format!(
+                                            "Audit Gate failed: unsafe variable '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                            u.name
+                                        ),
+                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                                    ));
+                                }
+                            }
+                            for beta_sym in &beta_apis {
+                                if crate::spec::text_uses_beta_api(&u.raw_rest, beta_sym) {
+                                    diags.push(Diagnostic::error(
+                                        DiagnosticCode::E018,
+                                        &u.span,
+                                        format!(
+                                            "Audit Gate failed: unsafe variable '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                            u.name
+                                        ),
+                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                                    ));
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
     }
 
     Ok(())
-}
-
-fn is_js_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
-}
-
-fn contains_ident_token(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let n_len = needle.len();
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let left_ok = abs == 0 || !is_js_ident_char(bytes[abs - 1]);
-        let right_idx = abs + n_len;
-        let right_ok = right_idx >= bytes.len() || !is_js_ident_char(bytes[right_idx]);
-        if left_ok && right_ok {
-            return true;
-        }
-        start = abs + 1;
-    }
-    false
-}
-
-/// Checks whether a JS/TS line or unsafe body references a class-qualified Beta-only API
-/// (`ClassName.memberName`), including singleton aliases (`World.x` -> `world.x`,
-/// `System.x` -> `system.x`, `SystemBeforeEvents.x` -> `beforeEvents.x`).
-fn line_uses_beta_api(text: &str, beta_sym: &str) -> bool {
-    if contains_ident_token(text, beta_sym) {
-        return true;
-    }
-    let Some((cls, member)) = beta_sym.split_once('.') else {
-        return false;
-    };
-    match cls {
-        "World" => contains_ident_token(text, &format!("world.{member}")),
-        "System" => contains_ident_token(text, &format!("system.{member}")),
-        "SystemBeforeEvents" => contains_ident_token(text, &format!("beforeEvents.{member}")),
-        "SystemAfterEvents" => contains_ident_token(text, &format!("afterEvents.{member}")),
-        _ => false,
-    }
 }
 
 fn collect_files_by_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<(), String> {

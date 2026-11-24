@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Span};
 use crate::partition::TargetRegistry;
-use crate::spec::{is_beta_api_version, BedrockSpec};
+use crate::spec::{is_beta_api_version, text_uses_beta_api, text_uses_beta_event, BedrockSpec};
 use crate::workspace::WorkspaceConfig;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -319,8 +319,13 @@ impl<'a> Validator<'a> {
                     self.pop_scope();
                     self.event_ctx = prev_ctx;
                 }
-                TopLevelItem::UnsafeFuncDecl(_) | TopLevelItem::UnsafeVarDecl(_) => {
-                    // `unsafe` contents are isolated and exempt from .pstdr type/keyword checks.
+                TopLevelItem::UnsafeFuncDecl(u) => {
+                    // `unsafe` contents bypass .pstdr keyword/ID checks, but Beta-only APIs
+                    // are still guarded when targeting a stable `@minecraft/server` version.
+                    self.validate_unsafe_beta_usage(&u.name, &u.raw_body, &u.span);
+                }
+                TopLevelItem::UnsafeVarDecl(u) => {
+                    self.validate_unsafe_beta_usage(&u.name, &u.raw_rest, &u.span);
                 }
                 TopLevelItem::EventHandler(ev) => {
                     self.validate_event_handler(ev);
@@ -342,6 +347,42 @@ impl<'a> Validator<'a> {
                     self.pop_scope();
                     self.event_ctx = prev_ctx;
                 }
+            }
+        }
+    }
+
+    fn validate_unsafe_beta_usage(&mut self, name: &str, raw_code: &str, span: &Span) {
+        if is_beta_api_version(&self.active_api) {
+            return;
+        }
+        let mut beta_events: Vec<&String> = self.ctx.spec.beta_events.iter().collect();
+        beta_events.sort();
+        for beta_ev in beta_events {
+            if text_uses_beta_event(raw_code, beta_ev) {
+                self.diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::E018,
+                    span,
+                    format!(
+                        "Unsafe declaration '{name}' uses Beta-only event '{beta_ev}', which is unavailable in stable '@minecraft/server' '{}'.",
+                        self.active_api
+                    ),
+                    "Set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' and enable the Beta APIs experiment in world settings, or remove the Beta-only event.",
+                ));
+            }
+        }
+        let mut beta_apis: Vec<&String> = self.ctx.spec.beta_apis.iter().collect();
+        beta_apis.sort();
+        for beta_sym in beta_apis {
+            if text_uses_beta_api(raw_code, beta_sym) {
+                self.diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::E018,
+                    span,
+                    format!(
+                        "Unsafe declaration '{name}' uses Beta-only API '{beta_sym}', which is unavailable in stable '@minecraft/server' '{}'.",
+                        self.active_api
+                    ),
+                    "Set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' and enable the Beta APIs experiment in world settings, or remove the Beta-only API call.",
+                ));
             }
         }
     }

@@ -2017,19 +2017,71 @@ on chat msg by player {
         assert!(!has_errors(&audit_ok), "audit_workspace must pass with -beta manifest: {audit_ok:?}");
 
         // Downgrade BP/manifest.json back to stable 2.11.0 and confirm Audit Gate catches E018
+        // exactly once (no duplicate .js + .ts hits) with preserved camelCase "chatSend"
         let downgraded = manifest_raw.replace("\"2.11.0-beta\"", "\"2.11.0\"");
         fs::write(dir.join("BP/manifest.json"), downgraded).unwrap();
         let audit_bad = audit_workspace(&dir, &spec).unwrap();
+        let e018s: Vec<_> = audit_bad.iter().filter(|d| d.code == "PSTDR-E018").collect();
+        assert_eq!(
+            e018s.len(),
+            1,
+            "audit_workspace must report PSTDR-E018 exactly once (no .ts duplicate): {audit_bad:?}"
+        );
         assert!(
-            audit_bad.iter().any(|d| d.code == "PSTDR-E018"),
-            "audit_workspace must emit PSTDR-E018 when manifest uses stable API with chatSend: {audit_bad:?}"
+            e018s[0].message.contains("'chatSend'"),
+            "audit_workspace must preserve exact 'chatSend' casing, got: {}",
+            e018s[0].message
+        );
+        assert!(
+            !e018s[0].file.ends_with(".ts"),
+            "audit_workspace must not report duplicate .ts mirror file: {:?}",
+            e018s[0]
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn bulk_beta_apis_detected_in_audit_workspace_on_stable_manifest() {
+    fn unsafe_beta_event_rejected_immediately_in_check_with_exact_casing() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+unsafe hook_chat() {
+    world.beforeEvents.chatSend.subscribe((ev) => {});
+}
+
+on join of player {
+    hook_chat()
+}
+"#;
+        let res = compile_source(src, "unsafe_chat.pstdr", None, &spec, true, true, vec![]);
+        assert!(res.js.is_none(), "stable API + unsafe chatSend must emit no JS");
+        let e018 = res
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "PSTDR-E018")
+            .expect("Expected PSTDR-E018 on unsafe chatSend in stable API");
+        assert!(
+            e018.message.contains("'chatSend'"),
+            "Expected exact 'chatSend' casing in diagnostic, got: {}",
+            e018.message
+        );
+
+        let dir = temp_dir("unsafe_chat_check");
+        let file = dir.join("unsafe_chat.pstdr");
+        fs::write(&file, src).unwrap();
+        let check_diags = check_path(&file, None, &spec).unwrap();
+        assert!(
+            check_diags
+                .iter()
+                .any(|d| d.code == "PSTDR-E018" && d.message.contains("'chatSend'")),
+            "check_path must emit PSTDR-E018 with exact 'chatSend' casing: {check_diags:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bulk_beta_apis_detected_in_check_and_audit_workspace_on_stable_manifest() {
         let dir = temp_dir("bulk_beta_apis_audit");
         let spec = BedrockSpec::from_json_str(
             r#"{
@@ -2051,9 +2103,9 @@ on chat msg by player {
         assert!(!spec.is_beta_api("World.getAllPlayers"));
 
         init_workspace(&dir, "BulkBetaPack", &spec).unwrap();
-        fs::write(
-            dir.join("src/beta_check.pstdr"),
-            r#"@addon(target = "26.60", api = "2.11.0")
+
+        // 1. On stable 2.11.0, check / convert immediately flags `unsafe` Beta API with exact casing
+        let stable_src = r#"@addon(target = "26.60", api = "2.11.0")
 
 unsafe call_beta_api() {
     return world.betaOnlyFeature();
@@ -2062,17 +2114,43 @@ unsafe call_beta_api() {
 on join of player {
     call_beta_api()
 }
-"#,
+"#;
+        fs::write(dir.join("src/beta_check.pstdr"), stable_src).unwrap();
+        let stable_conv = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            stable_conv
+                .iter()
+                .any(|d| d.code == "PSTDR-E018" && d.message.contains("'World.betaOnlyFeature'")),
+            "convert_workspace must immediately catch unsafe Beta API on stable 2.11.0: {stable_conv:?}"
+        );
+
+        // 2. Compile with 2.11.0-beta, then downgrade BP/manifest.json to 2.11.0 -> audit_workspace catches E018 once
+        fs::write(
+            dir.join("src/beta_check.pstdr"),
+            stable_src.replace("\"2.11.0\"", "\"2.11.0-beta\""),
+        )
+        .unwrap();
+        let beta_conv = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&beta_conv), "beta convert_workspace failed: {beta_conv:?}");
+
+        let manifest_raw = fs::read_to_string(dir.join("BP/manifest.json")).unwrap();
+        fs::write(
+            dir.join("BP/manifest.json"),
+            manifest_raw.replace("\"2.11.0-beta\"", "\"2.11.0\""),
         )
         .unwrap();
 
-        let conv_diags = convert_workspace(&dir, &spec).unwrap();
-        assert!(!has_errors(&conv_diags), "convert_workspace failed: {conv_diags:?}");
-
         let audit_diags = audit_workspace(&dir, &spec).unwrap();
+        let e018s: Vec<_> = audit_diags.iter().filter(|d| d.code == "PSTDR-E018").collect();
+        assert_eq!(
+            e018s.len(),
+            1,
+            "audit_workspace must report PSTDR-E018 exactly once: {audit_diags:?}"
+        );
         assert!(
-            audit_diags.iter().any(|d| d.code == "PSTDR-E018"),
-            "audit_workspace must flag Beta-only API in unsafe/generated JS on stable manifest: {audit_diags:?}"
+            e018s[0].message.contains("'World.betaOnlyFeature'"),
+            "Expected exact 'World.betaOnlyFeature' casing, got: {}",
+            e018s[0].message
         );
 
         let _ = fs::remove_dir_all(&dir);
