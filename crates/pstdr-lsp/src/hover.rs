@@ -93,7 +93,8 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
     // 4. Core DSL keywords
     let kw_doc = match word {
         "apply" => Some("**`apply <effect> <level> to <target> for <duration>`**\n\nApplies a status effect using 1-based levels (automatically converted to Bedrock 0-based `amplifier`)."),
-        "cancel" => Some("**`cancel event`**\n\nValid inside `on right click`, `on break`, `on interact`, and `on chat`. Automatically switches to `beforeEvents` and schedules mutations in `system.run(...)`."),
+        "cancel" => Some("**`cancel event`**\n\nValid inside `on right click`, `on break`, `on interact`, and `on chat` *(Beta API only)*. Automatically switches to `beforeEvents` and schedules mutations in `system.run(...)`."),
+        "chat" => Some("**`on chat <msg> by <player> { ... }`** `[Beta API only — requires api = \"...-beta\"]`\n\nCompiles to `world.beforeEvents.chatSend` (cancellable, auto `system.run(...)` for mutations). Requires `@addon(target = \"26.60\", api = \"2.11.0-beta\")` and the **Beta APIs** world experiment (`PSTDR-E018` on stable APIs)."),
         "every" => Some("**`every <duration> { ... }`**\n\nCompiles to `system.runInterval(..., ticks)`. Minimum interval is `50ms` (`1` tick)."),
         "after" => Some("**`after <duration> { ... }`**\n\nCompiles to `system.runTimeout(..., ticks)`."),
         "unsafe" => Some("**`unsafe`**\n\nIsolates raw JavaScript inside a `.pstdr` file without DSL keyword restrictions."),

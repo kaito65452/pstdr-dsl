@@ -1809,7 +1809,7 @@ on leave of player {
     #[test]
     fn on_chat_cancel_sync_and_mutations_wrapped_in_system_run() {
         let spec = BedrockSpec::bundled();
-        let src = r#"@addon(target = "26.60", api = "2.11.0")
+        let src = r#"@addon(target = "26.60", api = "2.11.0-beta")
 
 on chat msg by player {
     if msg == "!kit" {
@@ -1878,7 +1878,7 @@ on join of player {
         .unwrap();
         fs::write(
             dir.join("src/arena.pstdr"),
-            r#"@addon(target = "26.60", api = "2.11.0")
+            r#"@addon(target = "26.60", api = "2.11.0-beta")
 
 on right click with "pack:kit_token" by player {
     player.give_item("minecraft:blaze_rod", 1, "Starter")
@@ -1917,7 +1917,7 @@ on chat msg by player {
     #[test]
     fn scoreboard_helpers_codegen_and_before_event_safety() {
         let spec = BedrockSpec::bundled();
-        let src = r#"@addon(target = "26.60", api = "2.11.0")
+        let src = r#"@addon(target = "26.60", api = "2.11.0-beta")
 
 on chat msg by player {
     const kills = player.get_score("kills")
@@ -1950,5 +1950,81 @@ on chat msg by player {
             js.contains("system.run(() => {\n            __pstdr_add_score(player, \"resets\", 1);\n        });"),
             "add_score must be wrapped in system.run:\n{js}"
         );
+    }
+
+    #[test]
+    fn on_chat_rejected_on_stable_api_with_e018() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on chat msg by player {
+    if msg == "!ping" {
+        cancel event
+        send "pong" to player
+    }
+}
+"#;
+        let res = compile_source(src, "stable_chat.pstdr", None, &spec, true, true, vec![]);
+        assert!(res.js.is_none(), "stable API + on chat must emit no JS output");
+        assert!(res.ts.is_none(), "stable API + on chat must emit no TS output");
+        assert!(
+            res.diagnostics.iter().any(|d| d.code == "PSTDR-E018"),
+            "Expected PSTDR-E018 on stable API, got: {:?}",
+            res.diagnostics
+        );
+
+        let dir = temp_dir("stable_chat_check");
+        let file = dir.join("stable_chat.pstdr");
+        fs::write(&file, src).unwrap();
+        let check_diags = check_path(&file, None, &spec).unwrap();
+        assert!(
+            check_diags.iter().any(|d| d.code == "PSTDR-E018"),
+            "check_path must emit PSTDR-E018: {check_diags:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_chat_allowed_when_beta_api_declared() {
+        let dir = temp_dir("beta_chat_workspace");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "BetaChatPack", &spec).unwrap();
+
+        fs::write(
+            dir.join("src/chat_cmd.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0-beta")
+
+on chat msg by player {
+    if msg == "!ping" {
+        cancel event
+        send "pong" to player
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "beta convert_workspace failed: {diags:?}");
+
+        let manifest_raw = fs::read_to_string(dir.join("BP/manifest.json")).unwrap();
+        assert!(
+            manifest_raw.contains("\"2.11.0-beta\""),
+            "BP/manifest.json must wire 2.11.0-beta:\n{manifest_raw}"
+        );
+
+        let audit_ok = audit_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&audit_ok), "audit_workspace must pass with -beta manifest: {audit_ok:?}");
+
+        // Downgrade BP/manifest.json back to stable 2.11.0 and confirm Audit Gate catches E018
+        let downgraded = manifest_raw.replace("\"2.11.0-beta\"", "\"2.11.0\"");
+        fs::write(dir.join("BP/manifest.json"), downgraded).unwrap();
+        let audit_bad = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            audit_bad.iter().any(|d| d.code == "PSTDR-E018"),
+            "audit_workspace must emit PSTDR-E018 when manifest uses stable API with chatSend: {audit_bad:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

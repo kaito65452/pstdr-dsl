@@ -1,7 +1,8 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Span};
 use crate::partition::TargetRegistry;
-use crate::spec::BedrockSpec;
+use crate::spec::{is_beta_api_version, BedrockSpec};
+use crate::workspace::WorkspaceConfig;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -97,8 +98,19 @@ pub fn validate_program(
         .workspace_root
         .and_then(|root| TargetRegistry::discover(root).ok());
 
+    let active_api = program
+        .header
+        .as_ref()
+        .map(|h| h.api.clone())
+        .or_else(|| {
+            ctx.workspace_root
+                .map(|root| WorkspaceConfig::load_from_root(root).script_api)
+        })
+        .unwrap_or_else(|| ctx.spec.script_api_version.clone());
+
     let mut v = Validator {
         ctx,
+        active_api,
         scopes: vec![HashMap::new()],
         const_strings: HashMap::new(),
         state_names: HashSet::new(),
@@ -131,6 +143,7 @@ pub fn validate_program(
 
 struct Validator<'a> {
     ctx: &'a ValidationContext<'a>,
+    active_api: String,
     scopes: Vec<HashMap<String, BindingInfo>>,
     const_strings: HashMap<String, String>,
     state_names: HashSet<String>,
@@ -383,6 +396,18 @@ impl<'a> Validator<'a> {
                 self.event_ctx = EventCtx::PlayerLeave;
             }
             EventKind::ChatSend { msg_var, actor_var } => {
+                if self.ctx.spec.is_beta_event("chatSend") && !is_beta_api_version(&self.active_api)
+                {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E018,
+                        &ev.span,
+                        format!(
+                            "'on chat' compiles to 'world.beforeEvents.chatSend', which is Beta-only and unavailable in stable '@minecraft/server' '{}'.",
+                            self.active_api
+                        ),
+                        "Set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' and enable the Beta APIs experiment in world settings, or use stable item/sneak interactions ('on right click' with 'player is sneaking').",
+                    ));
+                }
                 self.insert_binding(msg_var, BindingKind::ContextVar, ev.span.line);
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::ChatSend;

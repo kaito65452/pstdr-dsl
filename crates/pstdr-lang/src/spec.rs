@@ -19,6 +19,9 @@ pub struct BedrockSpecRaw {
     /// `format_version` for block JSON (e.g. `"1.21.90"`).
     #[serde(default)]
     pub block_format_version: Option<String>,
+    /// `@minecraft/server` event names that require a `-beta` Script API version.
+    #[serde(default)]
+    pub beta_events: Option<Vec<String>>,
     pub effects: Vec<String>,
     pub sounds: Vec<String>,
     #[serde(default)]
@@ -37,6 +40,8 @@ pub struct BedrockSpec {
     pub item_format_version: String,
     /// `format_version` for block JSON.
     pub block_format_version: String,
+    /// Lowercased `@minecraft/server` event names that require a `-beta` API version.
+    pub beta_events: HashSet<String>,
     pub effects: HashSet<String>,
     pub sounds: HashSet<String>,
     pub item_textures: HashSet<String>,
@@ -54,6 +59,12 @@ impl BedrockSpec {
             crate::wiring::resolve_min_engine_version(&raw.bedrock_version)
                 .unwrap_or([1, 26, 60])
         });
+        let beta_events: HashSet<String> = raw
+            .beta_events
+            .unwrap_or_else(|| vec!["chatSend".to_string()])
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .collect();
         Ok(Self {
             bedrock_version: raw.bedrock_version,
             script_api_version: raw.script_api_version,
@@ -64,6 +75,7 @@ impl BedrockSpec {
             block_format_version: raw
                 .block_format_version
                 .unwrap_or_else(|| "1.21.90".to_string()),
+            beta_events,
             effects: raw.effects.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             sounds: raw.sounds.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             item_textures: raw.item_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
@@ -129,6 +141,16 @@ impl BedrockSpec {
             .to_ascii_lowercase();
         self.terrain_textures.contains(&norm)
     }
+
+    pub fn is_beta_event(&self, event_name: &str) -> bool {
+        self.beta_events
+            .contains(&event_name.trim().to_ascii_lowercase())
+    }
+}
+
+/// Returns true when a `@minecraft/server` API version string targets a Beta release (e.g. `"2.11.0-beta"`).
+pub fn is_beta_api_version(api: &str) -> bool {
+    api.trim().to_ascii_lowercase().ends_with("-beta")
 }
 
 /// Centralized mapping of snake_case .pstdr properties -> @minecraft/server API.

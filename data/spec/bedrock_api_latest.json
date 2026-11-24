@@ -4,6 +4,7 @@
   "min_engine_version": [1, 26, 60],
   "item_format_version": "1.21.90",
   "block_format_version": "1.21.90",
+  "beta_events": ["chatSend"],
   "effects": [
     "speed", "slowness", "haste", "mining_fatigue", "strength",
     "instant_health", "instant_damage", "jump_boost", "nausea",

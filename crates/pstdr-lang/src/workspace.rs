@@ -300,7 +300,11 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         if let Some(prog) = &prog_opt {
             if let Some(h) = &prog.header {
                 target_ver = h.target.clone();
-                api_ver = h.api.clone();
+                if !crate::spec::is_beta_api_version(&api_ver)
+                    || crate::spec::is_beta_api_version(&h.api)
+                {
+                    api_ver = h.api.clone();
+                }
             }
 
             let vctx = ValidationContext {
@@ -652,12 +656,29 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
 
     let bp_manifest = root.join("BP/manifest.json");
     let mut bp_uuid: Option<String> = None;
+    let mut manifest_server_api: Option<String> = None;
 
     if bp_manifest.is_file() {
         let raw = fs::read_to_string(&bp_manifest)
             .map_err(|e| format!("Failed to read BP/manifest.json: {e}"))?;
         match serde_json::from_str::<Value>(&raw) {
             Ok(val) => {
+                manifest_server_api = val
+                    .get("dependencies")
+                    .and_then(|d| d.as_array())
+                    .and_then(|deps| {
+                        deps.iter().find_map(|dep| {
+                            let is_server = dep.get("module_name").and_then(|m| m.as_str())
+                                == Some("@minecraft/server");
+                            if is_server {
+                                dep.get("version")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    });
                 let fmt_ver = val
                     .get("format_version")
                     .and_then(|v| v.as_u64())
@@ -740,7 +761,112 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
         }
     }
 
+    if let Some(api_ver) = manifest_server_api.as_deref() {
+        if !crate::spec::is_beta_api_version(api_ver) {
+            audit_beta_api_usage(root, &cfg, &scan_target, api_ver, spec, &mut diags)?;
+        }
+    }
+
+    sort_and_dedup_diags(&mut diags);
     Ok(diags)
+}
+
+fn audit_beta_api_usage(
+    root: &Path,
+    cfg: &WorkspaceConfig,
+    scan_target: &Path,
+    manifest_api: &str,
+    spec: &BedrockSpec,
+    diags: &mut Vec<Diagnostic>,
+) -> Result<(), String> {
+    // 1. Check generated JS and TS outputs for beta-only event subscriptions.
+    for (dir, ext) in [
+        (root.join(&cfg.js_out_dir), "js"),
+        (root.join(&cfg.ts_out_dir), "ts"),
+    ] {
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut out_files = Vec::new();
+        collect_files_by_ext(&dir, ext, &mut out_files)?;
+        out_files.sort();
+        for path in out_files {
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for (idx, line) in content.lines().enumerate() {
+                let lower = line.to_ascii_lowercase();
+                for beta_ev in &spec.beta_events {
+                    let before_needle = format!("beforeevents.{beta_ev}");
+                    let after_needle = format!("afterevents.{beta_ev}");
+                    if lower.contains(&before_needle) || lower.contains(&after_needle) {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E018,
+                            &Span::new(&rel, idx + 1, 1, line.len().max(1)),
+                            format!(
+                                "Audit Gate failed: '{rel}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                            ),
+                            "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Also check .pstdr sources in case a file declared `-beta` while BP/manifest.json stayed stable.
+    if spec.is_beta_event("chatSend") {
+        let pstdr_files = collect_pstdr_files(scan_target)?;
+        for path in pstdr_files {
+            let Ok(source) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let (prog_opt, _) = parse_source(&source, &rel);
+            if let Some(prog) = prog_opt {
+                for item in &prog.items {
+                    if let crate::ast::TopLevelItem::EventHandler(ev) = item {
+                        if matches!(ev.kind, crate::ast::EventKind::ChatSend { .. }) {
+                            diags.push(Diagnostic::error(
+                                DiagnosticCode::E018,
+                                &ev.span,
+                                format!(
+                                    "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                                ),
+                                "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_files_by_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory '{}': {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let p = entry.path();
+        if p.is_dir() {
+            collect_files_by_ext(&p, ext, out)?;
+        } else if p.extension().and_then(|e| e.to_str()) == Some(ext) {
+            out.push(p);
+        }
+    }
+    Ok(())
 }
 
 pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Result<(), String> {

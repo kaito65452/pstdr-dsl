@@ -79,7 +79,7 @@ const TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
     ("unsafe", "unsafe ${1:raw_fn}(${2:arg}) {\n    $0\n}", "Isolated raw JavaScript function"),
     ("on join", "on join of ${1:player} {\n    $0\n}", "Player initial join event"),
     ("on leave", "on leave of ${1:player} {\n    $0\n}", "Player leave event (beforeEvents, auto system.run)"),
-    ("on chat", "on chat ${1:msg} by ${2:player} {\n    $0\n}", "Chat send event (cancellable beforeEvents, auto system.run)"),
+    ("on chat", "on chat ${1:msg} by ${2:player} {\n    $0\n}", "[Beta API only — requires api = \"...-beta\"] Chat send event (cancellable beforeEvents, auto system.run)"),
     ("on right click", "on right click with ${1:\"example:wand\"} by ${2:player} {\n    $0\n}", "Item right-click / use event"),
     ("on hit", "on hit ${1:target} with ${2:\"example:wand\"} by ${3:player} {\n    $0\n}", "Entity hit with item event"),
     ("on break", "on break of ${1:\"minecraft:stone\"} by ${2:player} {\n    $0\n}", "Block break event (cancellable)"),

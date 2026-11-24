@@ -6,7 +6,7 @@
 | :--- | :--- | :--- | :--- |
 | **Player Join** | `on join of <actor> { ... }` | `<actor>` | `world.afterEvents.playerSpawn` (`ev.initialSpawn`) |
 | **Player Leave** | `on leave of <actor> { ... }` | `<actor>` | `world.beforeEvents.playerLeave` (auto `system.run` for mutations) |
-| **Chat Send** | `on chat <msg> by <actor> { ... }` | `<msg>`, `<actor>` | `world.beforeEvents.chatSend` (cancellable, auto `system.run` for mutations) |
+| **Chat Send** *(Beta API only)* | `on chat <msg> by <actor> { ... }` | `<msg>`, `<actor>` | `world.beforeEvents.chatSend` (**requires `api = "2.11.0-beta"`** + Beta APIs toggle; `PSTDR-E018` on stable) |
 | **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
 | **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` (or item component `onHitEntity`) |
 | **Consume Item** | `on consume <item> by <actor> { ... }` | `<actor>` | `world.afterEvents.itemCompleteUse` (or item component `onConsume`) |
@@ -19,6 +19,8 @@
 | **Entity Spawn** | `on spawn of <entity> [type <type_id>] { ... }` | `<entity>` | `world.afterEvents.entitySpawn` |
 
 > **Automatic `beforeEvents` Read-Only Safety:** `on leave` and `on chat` always subscribe to `world.beforeEvents` (as do `on right click`, `on break`, and `on interact` when they contain `cancel event`). Because Bedrock 2.11.0 executes `beforeEvents` in read-only mode, `pstdr-c` keeps `ev.cancel = true`, `const`/`mut` bindings, and read-only checks (such as `.get_score(...)`, `player.name`, and tags) synchronous while automatically wrapping world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `state` writes, `give_item`, `set_score`, `add_score`, and expression statements) inside `system.run(() => { ... })`.
+>
+> **Stable vs. Beta APIs (`PSTDR-E018`):** All 12 non-chat events work on stable `@minecraft/server` `2.11.0`. `on chat` compiles to `world.beforeEvents.chatSend`, which is **Beta-only** in Bedrock 2.x; using it without a `-beta` API version fails compilation with `PSTDR-E018` to prevent runtime `undefined.subscribe` crashes. Set `@addon(target = "26.60", api = "2.11.0-beta")` and enable the **Beta APIs** experiment in world settings to use `on chat`.
 
 ### Core & Combat Events Example
 
@@ -39,16 +41,6 @@ on join of player {
 on leave of player {
     const leaving_name = player.name
     send "{leaving_name} left the arena" to world
-}
-
-on chat msg by player {
-    if msg == "!kit" {
-        cancel event
-        player.give_item("minecraft:golden_apple", 2)
-        player.add_score("kits", 1)
-        const total = player.get_score("kits")
-        send "Kit granted (total: {total})" to player
-    }
 }
 
 on right click with WAND_ID by player {
@@ -96,6 +88,24 @@ on projectile hit victim with SPEAR_ID by shooter {
 
 on spawn of mob type "minecraft:zombie" {
     apply strength 1 to mob for 10s
+}
+```
+
+### Chat Event (`on chat` — Beta API Only)
+
+`on chat` requires a `-beta` `@minecraft/server` API version and the **Beta APIs** toggle enabled in world settings:
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0-beta")
+
+on chat msg by player {
+    if msg == "!kit" {
+        cancel event
+        player.give_item("minecraft:golden_apple", 2)
+        player.add_score("kits", 1)
+        const total = player.get_score("kits")
+        send "Kit granted (total: {total})" to player
+    }
 }
 ```
 

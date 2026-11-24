@@ -27,6 +27,7 @@ pub enum DiagnosticCode {
     E015,
     E016,
     E017,
+    E018,
 }
 
 impl DiagnosticCode {
@@ -49,6 +50,7 @@ impl DiagnosticCode {
             Self::E015 => "PSTDR-E015",
             Self::E016 => "PSTDR-E016",
             Self::E017 => "PSTDR-E017",
+            Self::E018 => "PSTDR-E018",
         }
     }
 }
@@ -275,6 +277,13 @@ pub fn explain_code(raw_code: &str) -> Option<&'static str> {
              or the physical image file (.png/.tga) is missing inside RP/.\n\
              Forbidden formats: alias cannot be empty, end with .png/.tga/.jpg, or contain paths ('/', '\\') or namespaces (':').\n\
              Right : Create RP/textures/item_texture.json along with the corresponding image file, or use a valid vanilla alias (e.g. 'snowball', 'diamond').",
+        ),
+        "E018" => Some(
+            "PSTDR-E018: Beta-only @minecraft/server API used with a stable API version.\n\
+             Cause: Beta-only APIs such as 'on chat' (world.beforeEvents.chatSend) do not exist in stable @minecraft/server releases\n\
+             and crash at world load with 'TypeError: cannot read property subscribe of undefined'.\n\
+             Wrong : @addon(target = \"26.60\", api = \"2.11.0\")\n        on chat msg by player { ... }\n\
+             Right : @addon(target = \"26.60\", api = \"2.11.0-beta\") // + enable Beta APIs in world settings\n        on chat msg by player { ... }",
         ),
         _ => None,
     }

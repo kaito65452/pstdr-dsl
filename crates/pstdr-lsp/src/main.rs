@@ -210,6 +210,19 @@ mod tests {
             );
         }
 
+        let chat_item = top
+            .iter()
+            .find(|i| i.label == "on chat")
+            .expect("on chat completion");
+        assert!(
+            chat_item
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("Beta API only")),
+            "on chat completion must mention Beta API only: {:?}",
+            chat_item.detail
+        );
+
         let dot = completion::complete_at("player.", 0, 7, &spec);
         for helper in ["give_item", "spawn_item", "get_score", "set_score", "add_score"] {
             assert!(
@@ -259,6 +272,14 @@ mod tests {
             .expect("get_score hover");
         if let HoverContents::Markup(MarkupContent { value, .. }) = h_score.contents {
             assert!(value.contains("__pstdr_get_score"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+
+        let h_chat = hover::hover_at("on chat msg by player {", 0, 4).expect("chat hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_chat.contents {
+            assert!(value.contains("Beta API only"), "got: {value}");
+            assert!(value.contains("PSTDR-E018"), "got: {value}");
         } else {
             panic!("expected markup hover");
         }
