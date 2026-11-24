@@ -56,5 +56,19 @@
     "random.fizz", "random.fuse", "random.glass", "random.hurt",
     "random.levelup", "random.orb", "random.pop", "random.potion.brewed",
     "random.splash", "random.swim", "random.toast", "random.totem"
+  ],
+  "item_textures": [
+    "snowball", "diamond", "emerald", "iron_ingot", "gold_ingot", "netherite_ingot",
+    "stick", "blaze_rod", "apple", "golden_apple", "arrow", "bone", "coal",
+    "feather", "flint", "ender_pearl", "nether_star", "slimeball", "string",
+    "paper", "book_normal", "sugar", "glowstone_dust", "redstone_dust",
+    "gunpowder", "prismarine_shard", "amethyst_shard", "copper_ingot",
+    "echo_shard", "breeze_rod"
+  ],
+  "terrain_textures": [
+    "stone", "dirt", "cobblestone", "obsidian", "bedrock", "ice", "packed_ice",
+    "blue_ice", "snow", "iron_block", "gold_block", "diamond_block",
+    "emerald_block", "diamond_ore", "iron_ore", "gold_ore", "coal_ore",
+    "planks", "log_oak"
   ]
 }

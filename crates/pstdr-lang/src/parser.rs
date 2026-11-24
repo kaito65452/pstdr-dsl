@@ -4,19 +4,28 @@ use crate::lexer::{is_forbidden_keyword, is_reserved_keyword, tokenize_with_offs
 
 pub fn parse_source(source: &str, file: &str) -> (Option<Program>, Vec<Diagnostic>) {
     let (tokens, lex_diags) = tokenize_with_offset(source, file, 1, 1);
-    if !lex_diags.is_empty() {
-        return (None, lex_diags);
-    }
     let mut parser = Parser {
         source,
         file: file.to_string(),
         tokens,
         pos: 0,
+        diags: Vec::new(),
     };
-    match parser.parse_program() {
-        Ok(prog) => (Some(prog), Vec::new()),
-        Err(diag) => (None, vec![*diag]),
-    }
+    let prog = parser.parse_program();
+    let mut all_diags = lex_diags;
+    all_diags.extend(parser.diags);
+
+    all_diags.sort_by(|a, b| {
+        a.file.cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.code.cmp(&b.code))
+    });
+    all_diags.dedup_by(|a, b| {
+        a.file == b.file && a.line == b.line && a.column == b.column && a.code == b.code
+    });
+
+    (Some(prog), all_diags)
 }
 
 struct Parser<'a> {
@@ -24,6 +33,7 @@ struct Parser<'a> {
     file: String,
     tokens: Vec<Token>,
     pos: usize,
+    diags: Vec<Diagnostic>,
 }
 
 impl<'a> Parser<'a> {
@@ -60,32 +70,32 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(s) if is_forbidden_keyword(s) => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E001,
                 &tok.span,
-                format!("Kata kunci terlarang '{s}' ditemukan di mode aman."),
-                "Ganti dengan padanan .pstdr (const/mut/func/null/{ ... }) atau pindahkan ke fungsi 'unsafe'.",
+                format!("Forbidden keyword '{s}' found in safe mode."),
+                "Replace with its .pstdr equivalent (const/mut/func/null/{ ... }) or move into an 'unsafe' function.",
             ))),
             TokenKind::TildeEq => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E001,
                 &tok.span,
-                "Kata kunci terlarang '~=' ditemukan di mode aman.",
-                "Gunakan operator '!=' sebagai pengganti '~='.",
+                "Forbidden operator '~=' found in safe mode.",
+                "Use '!=' instead of '~='.",
             ))),
             TokenKind::DotDot => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E001,
                 &tok.span,
-                "Kata kunci terlarang '..' ditemukan di mode aman.",
-                "Gunakan interpolasi string \"{a}{b}\" sebagai pengganti '..'.",
+                "Forbidden operator '..' found in safe mode.",
+                "Use string interpolation \"{a}{b}\" instead of '..'.",
             ))),
             TokenKind::ForeignString(_) => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                "Tanda kutip tunggal/backtick hanya diizinkan di dalam blok 'unsafe'.",
-                "Gunakan tanda kutip ganda \"...\" dengan interpolasi \"{expr}\".",
+                "Single quotes and backticks are only allowed inside 'unsafe' blocks.",
+                "Use double quotes \"...\" with \"{expr}\" interpolation.",
             ))),
             TokenKind::Unknown(c) => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                format!("Karakter tidak dikenal '{c}'."),
-                "Hapus karakter tersebut atau pindahkan kode mentah ke dalam fungsi 'unsafe'.",
+                format!("Unknown character '{c}'."),
+                "Remove this character or move raw code inside an 'unsafe' function.",
             ))),
             _ => Ok(()),
         }
@@ -101,8 +111,8 @@ impl<'a> Parser<'a> {
             Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                format!("Diharapkan identifier untuk {ctx}."),
-                "Periksa kembali sintaks pada baris ini.",
+                format!("Expected identifier for {ctx}."),
+                "Check the syntax on this line.",
             )))
         }
     }
@@ -113,8 +123,8 @@ impl<'a> Parser<'a> {
             return Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E003,
                 &span,
-                format!("'{name}' adalah kata kunci cadangan dan tidak boleh dipakai sebagai identifier."),
-                format!("Ganti '{name}' dengan nama lain yang tidak masuk daftar reserved keywords."),
+                format!("'{name}' is a reserved keyword and cannot be used as an identifier."),
+                format!("Rename '{name}' to a name that is not in the reserved keywords list."),
             )));
         }
         Ok((name, span))
@@ -132,8 +142,8 @@ impl<'a> Parser<'a> {
         Err(Box::new(Diagnostic::error(
             DiagnosticCode::E016,
             &tok.span,
-            format!("Diharapkan kata kunci '{word}'."),
-            format!("Tambahkan '{word}' sesuai struktur kalimat .pstdr."),
+            format!("Expected keyword '{word}'."),
+            format!("Add '{word}' according to .pstdr statement syntax."),
         )))
     }
 
@@ -146,8 +156,8 @@ impl<'a> Parser<'a> {
             Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                format!("Diharapkan '{label}'."),
-                format!("Periksa tanda '{label}' pada baris {}.", tok.span.line),
+                format!("Expected '{label}'."),
+                format!("Check '{label}' on line {}.", tok.span.line),
             )))
         }
     }
@@ -158,54 +168,141 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_program(&mut self) -> Result<Program, Box<Diagnostic>> {
+    fn is_top_level_start_token(&self) -> bool {
+        match &self.peek().kind {
+            TokenKind::At => true,
+            TokenKind::Ident(s) => {
+                matches!(
+                    s.as_str(),
+                    "bind_target"
+                        | "const"
+                        | "mut"
+                        | "state"
+                        | "func"
+                        | "unsafe"
+                        | "on"
+                        | "after"
+                        | "every"
+                ) || is_forbidden_keyword(s)
+            }
+            _ => false,
+        }
+    }
+
+    fn synchronize_top_level(&mut self, start_pos: usize) {
+        if self.pos == start_pos && !self.is_eof() {
+            self.advance();
+        }
+        let mut brace_depth = 0usize;
+        while !self.is_eof() {
+            if matches!(self.peek().kind, TokenKind::LBrace) {
+                brace_depth += 1;
+                self.advance();
+                continue;
+            }
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                self.advance();
+                if brace_depth == 0 {
+                    break;
+                }
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            if brace_depth == 0
+                && self.peek().span.line > self.prev_line()
+                && self.is_top_level_start_token()
+            {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn synchronize_stmt(&mut self, start_pos: usize) {
+        if self.pos == start_pos && !self.is_eof() {
+            self.advance();
+        }
+        while !self.is_eof() {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                break;
+            }
+            if matches!(self.peek().kind, TokenKind::Semi) {
+                self.advance();
+                break;
+            }
+            if self.peek().span.line > self.prev_line() {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn parse_program(&mut self) -> Program {
         let mut header = None;
         let mut bind_targets = Vec::new();
         let mut items = Vec::new();
 
-        if matches!(self.peek().kind, TokenKind::At) {
-            header = Some(self.parse_addon_directive()?);
-        }
-
         while !self.is_eof() {
+            let start_pos = self.pos;
             let tok = self.peek().clone();
-            self.check_not_forbidden(&tok)?;
 
             if matches!(tok.kind, TokenKind::At) {
                 if header.is_none() {
-                    header = Some(self.parse_addon_directive()?);
-                    continue;
+                    match self.parse_addon_directive() {
+                        Ok(dir) => header = Some(dir),
+                        Err(diag) => {
+                            self.diags.push(*diag);
+                            self.synchronize_top_level(start_pos);
+                        }
+                    }
                 } else {
-                    return Err(Box::new(Diagnostic::error(
+                    self.diags.push(Diagnostic::error(
                         DiagnosticCode::E016,
                         &tok.span,
-                        "Direktif '@addon' ganda tidak diizinkan.",
-                        "Sisakan hanya satu '@addon(...)' di bagian paling atas file.",
-                    )));
+                        "Duplicate '@addon' directive is not allowed.",
+                        "Keep only one '@addon(...)' at the top of the file.",
+                    ));
+                    self.synchronize_top_level(start_pos);
                 }
-            }
-
-            if self.is_ident_word("bind_target") {
-                bind_targets.push(self.parse_bind_target()?);
                 continue;
             }
 
-            items.push(self.parse_top_level_item()?);
+            if self.is_ident_word("bind_target") {
+                match self.parse_bind_target() {
+                    Ok(bt) => bind_targets.push(bt),
+                    Err(diag) => {
+                        self.diags.push(*diag);
+                        self.synchronize_top_level(start_pos);
+                    }
+                }
+                continue;
+            }
+
+            match self.parse_top_level_item() {
+                Ok(item) => items.push(item),
+                Err(diag) => {
+                    self.diags.push(*diag);
+                    self.synchronize_top_level(start_pos);
+                }
+            }
         }
 
-        Ok(Program {
+        Program {
             header,
             bind_targets,
             items,
-        })
+        }
     }
 
     fn parse_addon_directive(&mut self) -> Result<AddonDirective, Box<Diagnostic>> {
         let at_tok = self.advance();
         self.expect_word("addon")?;
         self.expect_kind(&TokenKind::LParen, "(")?;
-        // Default versi mengacu ke konstanta terpusat dari spec bundled.
-        // Tidak dihardcode secara kaku; ambil dari JSON spec yang disertakan saat kompilasi.
+        // Default versions come from the centralized bundled spec.
+        // Never hardcoded; loaded from the embedded spec JSON at compile time.
         let (default_target, default_api) = {
             let s = crate::spec::BedrockSpec::bundled();
             (s.bedrock_version, s.script_api_version)
@@ -214,7 +311,7 @@ impl<'a> Parser<'a> {
         let mut api = default_api;
 
         while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
-            let (key, key_span) = self.expect_ident_any("atribut @addon")?;
+            let (key, key_span) = self.expect_ident_any("@addon attribute")?;
             self.expect_kind(&TokenKind::Eq, "=")?;
             let val_tok = self.peek().clone();
             let val = match val_tok.kind {
@@ -226,8 +323,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E016,
                         &val_tok.span,
-                        "Nilai atribut @addon harus berupa string literal.",
-                        "Contoh: @addon(target = \"1.21.50\", api = \"1.16.0\")",
+                        "@addon attribute value must be a string literal.",
+                        "Example: @addon(target = \"26.60\", api = \"2.11.0\")",
                     )));
                 }
             };
@@ -238,8 +335,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E016,
                         &key_span,
-                        format!("Atribut @addon tidak dikenal '{key}'."),
-                        "Atribut yang didukung hanya 'target' dan 'api'.",
+                        format!("Unknown @addon attribute '{key}'."),
+                        "Only 'target' and 'api' attributes are supported.",
                     )));
                 }
             }
@@ -271,8 +368,8 @@ impl<'a> Parser<'a> {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &tok.span,
-                    "Argumen bind_target() harus berupa string path relatif.",
-                    "Contoh: bind_target(\"BP/items/frost_blade.json\")",
+                    "bind_target() argument must be a relative path string.",
+                    "Example: bind_target(\"BP/items/frost_blade.json\")",
                 )));
             }
         };
@@ -327,15 +424,15 @@ impl<'a> Parser<'a> {
         Err(Box::new(Diagnostic::error(
             DiagnosticCode::E016,
             &tok.span,
-            "Deklarasi level atas tidak dikenal.",
-            "Gunakan 'const', 'mut', 'state', 'func', 'unsafe', 'on', 'after', atau 'every'.",
+            "Unknown top-level declaration.",
+            "Use 'const', 'mut', 'state', 'func', 'unsafe', 'on', 'after', or 'every'.",
         )))
     }
 
     fn parse_var_decl(&mut self, is_const: bool) -> Result<VarDecl, Box<Diagnostic>> {
         let kw = self.advance();
         let (name, name_span) =
-            self.expect_user_ident(if is_const { "konstanta" } else { "variabel mut" })?;
+            self.expect_user_ident(if is_const { "constant" } else { "mut variable" })?;
         self.expect_kind(&TokenKind::Eq, "=")?;
         let value = self.parse_expr(true)?;
         self.consume_optional_semi();
@@ -351,7 +448,7 @@ impl<'a> Parser<'a> {
         let kw = self.advance();
         let (name, _) = self.expect_user_ident("state")?;
         self.expect_kind(&TokenKind::LBracket, "[")?;
-        let (owner_hint, _) = self.expect_user_ident("owner state")?;
+        let (owner_hint, _) = self.expect_user_ident("state owner")?;
         self.expect_kind(&TokenKind::RBracket, "]")?;
         self.expect_kind(&TokenKind::Eq, "=")?;
         let default_value = self.parse_expr(true)?;
@@ -366,11 +463,11 @@ impl<'a> Parser<'a> {
 
     fn parse_func_decl(&mut self) -> Result<FuncDecl, Box<Diagnostic>> {
         let kw = self.advance();
-        let (name, _) = self.expect_user_ident("nama fungsi")?;
+        let (name, _) = self.expect_user_ident("function name")?;
         self.expect_kind(&TokenKind::LParen, "(")?;
         let mut params = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
-            params.push(self.expect_user_ident("parameter fungsi")?);
+            params.push(self.expect_user_ident("function parameter")?);
             if matches!(self.peek().kind, TokenKind::Comma) {
                 self.advance();
             } else {
@@ -394,8 +491,8 @@ impl<'a> Parser<'a> {
             return Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E006,
                 &unsafe_tok.span,
-                "'unsafe' tidak boleh dipakai sebagai blok anonim atau nilai ekspresi.",
-                "Deklarasikan sebagai 'unsafe nama(param) { ... }' atau 'unsafe const/mut x = ...;'.",
+                "'unsafe' cannot be used as an anonymous block or expression value.",
+                "Declare it as 'unsafe name(param) { ... }' or 'unsafe const/mut x = ...;'.",
             )));
         }
 
@@ -411,8 +508,8 @@ impl<'a> Parser<'a> {
                         return Err(Box::new(Diagnostic::error(
                             DiagnosticCode::E016,
                             &name_tok.span,
-                            "Diharapkan nama variabel setelah 'unsafe const/mut/var/let'.",
-                            "Contoh: unsafe const RAW_WORLD = world;",
+                            "Expected variable name after 'unsafe const/mut/var/let'.",
+                            "Example: unsafe const RAW_WORLD = world;",
                         )));
                     }
                 };
@@ -429,12 +526,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Unsafe function: unsafe nama(p1, p2) { ...raw JS/TS... }
-        let (name, _) = self.expect_user_ident("nama fungsi unsafe")?;
+        // Unsafe function: unsafe name(p1, p2) { ...raw JS/TS... }
+        let (name, _) = self.expect_user_ident("unsafe function name")?;
         self.expect_kind(&TokenKind::LParen, "(")?;
         let mut params = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
-            let (p, _) = self.expect_ident_any("parameter unsafe")?;
+            let (p, _) = self.expect_ident_any("unsafe parameter")?;
             params.push(p);
             if matches!(self.peek().kind, TokenKind::Comma) {
                 self.advance();
@@ -474,16 +571,16 @@ impl<'a> Parser<'a> {
                 self.expect_word("with")?;
                 let item = self.parse_expr(false)?;
                 self.expect_word("by")?;
-                let (actor_var, _) = self.expect_user_ident("aktor event")?;
+                let (actor_var, _) = self.expect_user_ident("event actor")?;
                 EventKind::RightClick { item, actor_var }
             }
             TokenKind::Ident(w) if w == "hit" => {
                 self.advance();
-                let (target_var, _) = self.expect_user_ident("target event hit")?;
+                let (target_var, _) = self.expect_user_ident("hit event target")?;
                 self.expect_word("with")?;
                 let item = self.parse_expr(false)?;
                 self.expect_word("by")?;
-                let (actor_var, _) = self.expect_user_ident("penyerang event hit")?;
+                let (actor_var, _) = self.expect_user_ident("hit event attacker")?;
                 EventKind::HitTarget {
                     target_var,
                     item,
@@ -495,7 +592,7 @@ impl<'a> Parser<'a> {
                 self.expect_word("of")?;
                 let block_id = self.parse_expr(false)?;
                 self.expect_word("by")?;
-                let (actor_var, _) = self.expect_user_ident("pelaku event break")?;
+                let (actor_var, _) = self.expect_user_ident("break event actor")?;
                 EventKind::BreakBlock {
                     block_id,
                     actor_var,
@@ -504,15 +601,15 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(w) if w == "join" => {
                 self.advance();
                 self.expect_word("of")?;
-                let (actor_var, _) = self.expect_user_ident("pemain event join")?;
+                let (actor_var, _) = self.expect_user_ident("join event player")?;
                 EventKind::PlayerJoin { actor_var }
             }
             _ => {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &kind_tok.span,
-                    "Jenis event 'on' tidak dikenal.",
-                    "Gunakan 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', atau 'on join of player'.",
+                    "Unknown 'on' event type.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', or 'on join of player'.",
                 )));
             }
         };
@@ -529,17 +626,24 @@ impl<'a> Parser<'a> {
         let open_tok = self.expect_kind(&TokenKind::LBrace, "{")?;
         let mut stmts = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
-            stmts.push(self.parse_stmt()?);
+            let start_pos = self.pos;
+            match self.parse_stmt() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(diag) => {
+                    self.diags.push(*diag);
+                    self.synchronize_stmt(start_pos);
+                }
+            }
         }
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             return Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E012,
                 &open_tok.span,
                 format!(
-                    "Kurung kurawal '{{' pada baris {} tidak memiliki penutup '}}'.",
+                    "Opening brace '{{' on line {} has no matching closing brace '}}'.",
                     open_tok.span.line
                 ),
-                "Tutup blok dengan '}' yang sesuai.",
+                "Close the block with a matching '}'.",
             )));
         }
         self.advance();
@@ -557,8 +661,8 @@ impl<'a> Parser<'a> {
             return Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E006,
                 &tok.span,
-                "'unsafe' tidak boleh dipakai di dalam fungsi atau blok event.",
-                "Deklarasikan fungsi 'unsafe nama() { ... }' di level atas file lalu panggil namanya.",
+                "'unsafe' cannot be used inside a function or event block.",
+                "Declare a top-level function 'unsafe name() { ... }' and call it by name.",
             )));
         }
 
@@ -648,8 +752,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E016,
                         &effect_tok.span,
-                        "Diharapkan nama efek setelah 'apply'.",
-                        "Contoh: apply slowness 2 to target for 3s",
+                        "Expected effect name after 'apply'.",
+                        "Example: apply slowness 2 to target for 3s",
                     )));
                 }
             };
@@ -735,8 +839,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E016,
                         &op_span,
-                        "Target assignment tidak valid.",
-                        "Assignment hanya dapat dilakukan ke variabel, elemen index, atau properti objek.",
+                        "Invalid assignment target.",
+                        "Assignment can only target a variable, index element, or object property.",
                     )));
                 }
             };
@@ -779,7 +883,7 @@ impl<'a> Parser<'a> {
 
     fn parse_for_stmt(&mut self) -> Result<Stmt, Box<Diagnostic>> {
         let start = self.advance().span;
-        let (var, var_span) = self.expect_user_ident("variabel loop 'for'")?;
+        let (var, var_span) = self.expect_user_ident("'for' loop variable")?;
         self.expect_word("in")?;
         let iter = self.parse_expr(false)?;
         let body = self.parse_block()?;
@@ -808,8 +912,8 @@ impl<'a> Parser<'a> {
             _ => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                "Diharapkan literal durasi waktu (mis. 50ms, 3s, 2m).",
-                "Tambahkan satuan waktu 'ms', 's', atau 'm' di belakang angka.",
+                "Expected duration literal (e.g. 50ms, 3s, 2m).",
+                "Append a time unit ('ms', 's', or 'm') after the number.",
             ))),
         }
     }
@@ -952,7 +1056,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_is_predicate(&mut self, allow_brace_obj: bool) -> Result<IsPredicate, Box<Diagnostic>> {
-        let (word, span) = self.expect_ident_any("predikat 'is'")?;
+        let (word, span) = self.expect_ident_any("'is' predicate")?;
         match word.as_str() {
             "sneaking" => Ok(IsPredicate::Sneaking),
             "sprinting" => Ok(IsPredicate::Sprinting),
@@ -976,8 +1080,8 @@ impl<'a> Parser<'a> {
             _ => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &span,
-                format!("Predikat 'is {word}' tidak dikenal."),
-                "Gunakan sneaking, sprinting, swimming, flying, sleeping, on_ground, in_water, atau holding <item>.",
+                format!("Unknown predicate 'is {word}'."),
+                "Use sneaking, sprinting, swimming, flying, sleeping, on_ground, in_water, or holding <item>.",
             ))),
         }
     }
@@ -1078,7 +1182,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot | TokenKind::QuestionDot => {
                     let optional = matches!(tok.kind, TokenKind::QuestionDot);
                     let sp = self.advance().span;
-                    let (field, _) = self.expect_ident_any("nama properti/method")?;
+                    let (field, _) = self.expect_ident_any("property/method name")?;
                     expr = Expr::Member {
                         object: Box::new(expr),
                         field,
@@ -1152,8 +1256,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E006,
                         &tok.span,
-                        "'unsafe' tidak boleh dipakai sebagai nilai ekspresi.",
-                        "Deklarasikan sebagai fungsi top-level 'unsafe nama() { ... }' lalu panggil namanya.",
+                        "'unsafe' cannot be used as an expression value.",
+                        "Declare it as a top-level function 'unsafe name() { ... }' and call it by name.",
                     )));
                 }
                 if s == "true" {
@@ -1172,8 +1276,8 @@ impl<'a> Parser<'a> {
                     return Err(Box::new(Diagnostic::error(
                         DiagnosticCode::E016,
                         &tok.span,
-                        format!("Kata kunci '{s}' tidak dapat dipakai sebagai ekspresi di sini."),
-                        "Periksa struktur ekspresi atau nama variabel Anda.",
+                        format!("Keyword '{s}' cannot be used as an expression here."),
+                        "Check your expression syntax or variable name.",
                     )));
                 }
                 self.advance();
@@ -1219,8 +1323,8 @@ impl<'a> Parser<'a> {
                             return Err(Box::new(Diagnostic::error(
                                 DiagnosticCode::E016,
                                 &key_tok.span,
-                                "Diharapkan nama properti objek.",
-                                "Contoh: { key = value } atau { key: value }",
+                                "Expected object property name.",
+                                "Example: { key = value } or { key: value }",
                             )));
                         }
                     };
@@ -1230,8 +1334,8 @@ impl<'a> Parser<'a> {
                         return Err(Box::new(Diagnostic::error(
                             DiagnosticCode::E016,
                             &self.peek().span,
-                            "Diharapkan '=' atau ':' setelah key objek.",
-                            "Contoh: { amplifier = 1 } atau { amplifier: 1 }",
+                            "Expected '=' or ':' after object key.",
+                            "Example: { amplifier = 1 } or { amplifier: 1 }",
                         )));
                     }
                     let value = self.parse_expr(true)?;
@@ -1251,10 +1355,10 @@ impl<'a> Parser<'a> {
                         DiagnosticCode::E012,
                         &tok.span,
                         format!(
-                            "Kurung kurawal '{{' pada baris {} tidak memiliki penutup '}}'.",
+                            "Opening brace '{{' on line {} has no matching closing brace '}}'.",
                             tok.span.line
                         ),
-                        "Tutup objek konfigurasi dengan '}'.",
+                        "Close the configuration object with '}'.",
                     )));
                 }
                 self.advance();
@@ -1263,8 +1367,8 @@ impl<'a> Parser<'a> {
             _ => Err(Box::new(Diagnostic::error(
                 DiagnosticCode::E016,
                 &tok.span,
-                "Diharapkan ekspresi.",
-                "Periksa nilai atau operator sebelum posisi ini.",
+                "Expected expression.",
+                "Check the value or operator before this position.",
             ))),
         }
     }
@@ -1344,10 +1448,10 @@ fn parse_string_parts(raw_inner: &str, str_span: &Span) -> Result<Vec<StringPart
                         DiagnosticCode::E012,
                         str_span,
                         format!(
-                            "Kurung kurawal '{{' pada interpolasi string baris {} tidak ditutup '}}'.",
+                            "Opening brace '{{' in string interpolation on line {} has no closing '}}'.",
                             str_span.line
                         ),
-                        "Tutup ekspresi interpolasi dengan '}' atau escape dengan '\\{'.",
+                        "Close the interpolation expression with '}' or escape it with '\\{'.",
                     )));
                 }
             };
@@ -1357,8 +1461,8 @@ fn parse_string_parts(raw_inner: &str, str_span: &Span) -> Result<Vec<StringPart
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     str_span,
-                    "Ekspresi interpolasi string '{}' kosong.",
-                    "Isi ekspresi di dalam '{...}' atau escape menjadi '\\{\\}'.",
+                    "Empty string interpolation expression '{}'.",
+                    "Provide an expression inside '{...}' or escape it as '\\{\\}'.",
                 )));
             }
             let (toks, lex_diags) = tokenize_with_offset(
@@ -1375,14 +1479,15 @@ fn parse_string_parts(raw_inner: &str, str_span: &Span) -> Result<Vec<StringPart
                 file: str_span.file.clone(),
                 tokens: toks,
                 pos: 0,
+                diags: Vec::new(),
             };
             let expr = sub_parser.parse_expr(true)?;
             if !sub_parser.is_eof() {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &sub_parser.peek().span,
-                    "Token sisa di dalam ekspresi interpolasi string.",
-                    "Pastikan isi '{...}' hanya berupa satu ekspresi valid.",
+                    "Unexpected trailing tokens inside string interpolation expression.",
+                    "Ensure '{...}' contains only a single valid expression.",
                 )));
             }
             parts.push(StringPart::Expr(expr));
@@ -1470,10 +1575,10 @@ fn scan_js_brace_block(
         DiagnosticCode::E012,
         open_span,
         format!(
-            "Kurung kurawal '{{' pada baris {} tidak memiliki penutup '}}'.",
+            "Opening brace '{{' on line {} has no matching closing brace '}}'.",
             open_span.line
         ),
-        "Tutup blok 'unsafe' dengan '}' yang sesuai.",
+        "Close the 'unsafe' block with a matching '}'.",
     )))
 }
 

@@ -55,75 +55,75 @@ pub fn component_id_for_script(script_stem: &str) -> String {
     format!("pstdr:{clean}")
 }
 
-/// Meresolusi `min_engine_version` berformat `[1, x, x]` dari string versi target.
+/// Resolves a `[1, x, x]` `min_engine_version` triplet from a target version string.
 ///
-/// Aturan resmi Bedrock:
-/// - Format lama `"1.x.y"` atau `"1.x"` → `[1, x, y]` (mis. `"1.21.50"` → `[1, 21, 50]`)
-/// - Format baru `"26.x"` atau `"26.x.y"` (major >= 26, bukan diawali 1) → prepend `1`:
+/// Official Bedrock rules:
+/// - Legacy format `"1.x.y"` or `"1.x"` → `[1, x, y]` (e.g. `"1.21.50"` → `[1, 21, 50]`)
+/// - Modern format `"26.x"` or `"26.x.y"` (major >= 26, not starting with 1) → prepend `1`:
 ///   `"26.60"` → `[1, 26, 60]`, `"26.60.0"` → `[1, 26, 60]`
 ///
-/// Hasil **selalu** memiliki elemen pertama `1` sesuai spec manifest Bedrock resmi.
+/// The result **always** has `1` as its first element per the official Bedrock manifest spec.
 pub fn resolve_min_engine_version(target: &str) -> Result<[u64; 3], String> {
     let trimmed = target.trim();
     if trimmed.is_empty() {
-        return Err("String versi tidak boleh kosong".to_string());
+        return Err("Version string cannot be empty".to_string());
     }
 
     let parts: Vec<&str> = trimmed.split('.').collect();
     if parts.is_empty() || parts.len() > 3 {
         return Err(format!(
-            "Format versi tidak valid '{trimmed}': harus 2 atau 3 komponen dipisah '.'"
+            "Invalid version format '{trimmed}': must have 2 or 3 dot-separated components"
         ));
     }
 
     let parse_part = |s: &str| -> Result<u64, String> {
         s.parse::<u64>()
-            .map_err(|_| format!("Komponen versi '{s}' bukan angka bulat non-negatif"))
+            .map_err(|_| format!("Version component '{s}' is not a non-negative integer"))
     };
 
     let first = parse_part(parts[0])?;
 
     if first == 1 {
-        // Format lama: "1.x" atau "1.x.y"
+        // Legacy format: "1.x" or "1.x.y"
         if parts.len() < 2 {
             return Err(format!(
-                "Format versi tidak valid '{trimmed}': minimal 2 komponen untuk format '1.x'"
+                "Invalid version format '{trimmed}': at least 2 components required for '1.x' format"
             ));
         }
         let minor = parse_part(parts[1])?;
         let patch = if parts.len() >= 3 { parse_part(parts[2])? } else { 0 };
         Ok([1, minor, patch])
     } else if first >= 26 {
-        // Format baru: "26.x" atau "26.x.y" – prepend 1
+        // Modern format: "26.x" or "26.x.y" – prepend 1
         if parts.len() < 2 {
             return Err(format!(
-                "Format versi tidak valid '{trimmed}': minimal 2 komponen untuk format '{first}.x'"
+                "Invalid version format '{trimmed}': at least 2 components required for '{first}.x' format"
             ));
         }
         let minor = parse_part(parts[1])?;
-        // sub-patch ketiga pada format baru diabaikan (Bedrock hanya pakai dua segmen setelah prepend)
+        // Third sub-patch segment in modern format is ignored (Bedrock uses two segments after prepending 1)
         Ok([1, first, minor])
     } else {
         Err(format!(
-            "Format versi tidak dikenal '{trimmed}': diharapkan format '1.x.y' (lama) atau '26.x' (baru, >= 26)"
+            "Unrecognized version format '{trimmed}': expected '1.x.y' (legacy) or '26.x' (modern, >= 26)"
         ))
     }
 }
 
-/// Alias backward-compat yang dipakai oleh kode lama.
-/// Gunakan `resolve_min_engine_version` untuk logika baru.
-#[deprecated(since = "0.1.0", note = "Gunakan `resolve_min_engine_version` sebagai gantinya")]
+/// Backward-compatible alias used by legacy code.
+/// Use `resolve_min_engine_version` for new logic.
+#[deprecated(since = "0.1.0", note = "Use `resolve_min_engine_version` instead")]
 pub fn parse_semver_triplet(ver: &str) -> [u64; 3] {
     resolve_min_engine_version(ver).unwrap_or([1, 26, 60])
 }
 
-/// Menentukan apakah format_version file BP menggunakan skema Custom Components V2 (>= 1.21.90).
+/// Determines whether a BP file's `format_version` uses the Custom Components V2 schema (>= 1.21.90).
 pub fn uses_custom_components_v2(format_version: &str) -> bool {
     let triplet = resolve_min_engine_version(format_version).unwrap_or([1, 0, 0]);
     triplet >= [1, 21, 90]
 }
 
-/// Helper validasi format min_engine_version string pada manifest format_version: 3 (SemVer "1.x.x").
+/// Validates the string `min_engine_version` format for manifest `format_version: 3` (SemVer `"1.x.x"`).
 pub fn is_valid_v3_min_engine(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 3 {
@@ -135,8 +135,8 @@ pub fn is_valid_v3_min_engine(s: &str) -> bool {
     p0 == 1
 }
 
-/// Menyuntikkan `minecraft:custom_components` (V1) atau key komponen langsung (V2)
-/// pada file BP/items/*.json dan BP/blocks/*.json yang dideklarasikan melalui `bind_target(...)`.
+/// Injects `minecraft:custom_components` (V1) or direct component keys (V2)
+/// into `BP/items/*.json` and `BP/blocks/*.json` files declared via `bind_target(...)`.
 pub fn wire_bind_targets(
     workspace_root: &Path,
     bind_targets: &[BindTargetStmt],
@@ -152,7 +152,7 @@ pub fn wire_bind_targets(
         }
 
         let raw = fs::read_to_string(&target_path)
-            .map_err(|e| format!("Gagal membaca target '{}': {e}", target_path.display()))?;
+            .map_err(|e| format!("Failed to read target '{}': {e}", target_path.display()))?;
         let Ok(mut val) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
@@ -180,15 +180,15 @@ pub fn wire_bind_targets(
                 if let Some(comps_obj) = comps.as_object_mut() {
                     if is_v2 {
                         // Custom Components V2 (format_version >= 1.21.90):
-                        // JANGAN menulis array "minecraft:custom_components".
-                        // Suntikkan langsung key objek di dalam "components": "pstdr:<stem>": {}.
+                        // DO NOT write a "minecraft:custom_components" array.
+                        // Inject directly as an object key inside "components": "pstdr:<stem>": {}.
                         if !comps_obj.contains_key(&comp_id) {
                             comps_obj.insert(comp_id.clone(), json!({}));
                             modified = true;
                         }
                     } else {
                         // Custom Components V1 (format_version < 1.21.90):
-                        // Suntikkan ke array "minecraft:custom_components": ["pstdr:<stem>"].
+                        // Inject into the "minecraft:custom_components": ["pstdr:<stem>"] array.
                         let cc = comps_obj
                             .entry("minecraft:custom_components".to_string())
                             .or_insert_with(|| Value::Array(Vec::new()));
@@ -205,9 +205,9 @@ pub fn wire_bind_targets(
 
             if modified {
                 let pretty = serde_json::to_string_pretty(&val)
-                    .map_err(|e| format!("Gagal serialize JSON '{}': {e}", bt.path))?;
+                    .map_err(|e| format!("Failed to serialize JSON '{}': {e}", bt.path))?;
                 fs::write(&target_path, format!("{pretty}\n"))
-                    .map_err(|e| format!("Gagal menulis '{}': {e}", target_path.display()))?;
+                    .map_err(|e| format!("Failed to write '{}': {e}", target_path.display()))?;
             }
 
             if !registered.iter().any(|(id, k)| id == &comp_id && k == &kind) {
@@ -219,8 +219,8 @@ pub fn wire_bind_targets(
     Ok(registered)
 }
 
-/// Memastikan `BP/manifest.json` memiliki modul `script` (entry `scripts/main.js`),
-/// dependency `@minecraft/server`, dan `min_engine_version` sesuai format_version (v2: array, v3: SemVer string).
+/// Ensures `BP/manifest.json` has `data` and `script` modules (entry `scripts/main.js`),
+/// the `@minecraft/server` dependency, and `min_engine_version` matching `format_version` (v2: array, v3: SemVer string).
 pub fn update_manifest(
     workspace_root: &Path,
     target_version: &str,
@@ -228,15 +228,15 @@ pub fn update_manifest(
 ) -> Result<(), String> {
     let bp_dir = workspace_root.join("BP");
     fs::create_dir_all(&bp_dir)
-        .map_err(|e| format!("Gagal membuat folder '{}': {e}", bp_dir.display()))?;
+        .map_err(|e| format!("Failed to create directory '{}': {e}", bp_dir.display()))?;
     let manifest_path = bp_dir.join("manifest.json");
     let min_engine = resolve_min_engine_version(target_version)?;
 
     let mut manifest: Value = if manifest_path.is_file() {
         let raw = fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("Gagal membaca BP/manifest.json: {e}"))?;
+            .map_err(|e| format!("Failed to read BP/manifest.json: {e}"))?;
         serde_json::from_str(&raw)
-            .map_err(|e| format!("BP/manifest.json bukan JSON valid: {e}"))?
+            .map_err(|e| format!("BP/manifest.json is not valid JSON: {e}"))?
     } else {
         json!({
             "format_version": 2,
@@ -366,16 +366,16 @@ pub fn update_manifest(
     }
 
     let pretty = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("Gagal serialize BP/manifest.json: {e}"))?;
+        .map_err(|e| format!("Failed to serialize BP/manifest.json: {e}"))?;
     fs::write(&manifest_path, format!("{pretty}\n"))
-        .map_err(|e| format!("Gagal menulis BP/manifest.json: {e}"))
+        .map_err(|e| format!("Failed to write BP/manifest.json: {e}"))
 }
 
-/// Memperbarui entry point `BP/scripts/main.js` agar mengimpor seluruh modul hasil generate.
+/// Updates the `BP/scripts/main.js` entry point to import all generated modules.
 pub fn update_main_js(workspace_root: &Path, generated_modules: &[String]) -> Result<(), String> {
     let scripts_dir = workspace_root.join("BP/scripts");
     fs::create_dir_all(&scripts_dir)
-        .map_err(|e| format!("Gagal membuat folder '{}': {e}", scripts_dir.display()))?;
+        .map_err(|e| format!("Failed to create directory '{}': {e}", scripts_dir.display()))?;
 
     let mut sorted = generated_modules.to_vec();
     sorted.sort();
@@ -388,6 +388,6 @@ pub fn update_main_js(workspace_root: &Path, generated_modules: &[String]) -> Re
 
     let main_path = scripts_dir.join("main.js");
     fs::write(&main_path, out)
-        .map_err(|e| format!("Gagal menulis '{}': {e}", main_path.display()))
+        .map_err(|e| format!("Failed to write '{}': {e}", main_path.display()))
 }
 

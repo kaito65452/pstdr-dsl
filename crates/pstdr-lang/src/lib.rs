@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod ast;
 pub mod codegen;
 pub mod diagnostics;
@@ -9,6 +10,7 @@ pub mod validator;
 pub mod wiring;
 pub mod workspace;
 
+pub use assets::validate_workspace_assets;
 pub use codegen::{emit_code, CodegenOptions, ComponentKind, EmitMode};
 pub use diagnostics::{
     diagnostics_to_json, explain_code, format_diagnostics_compact, format_diagnostics_pretty,
@@ -43,7 +45,7 @@ mod tests {
     }
 
     #[test]
-    fn fase_a_forbidden_keywords_emit_e001() {
+    fn phase_a_forbidden_keywords_emit_e001() {
         let cases = [
             "class Foo {}",
             "let x = 1",
@@ -61,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn fase_a_const_mutation_e002_and_mut_allowed() {
+    fn phase_a_const_mutation_e002_and_mut_allowed() {
         let spec = BedrockSpec::bundled();
         let bad = r#"
 on join of player {
@@ -86,11 +88,11 @@ on join of player {
     }
 
     #[test]
-    fn fase_a_multi_error_e010_and_e005_and_e004() {
+    fn phase_a_multi_error_e010_and_e005_and_e004() {
         let spec = BedrockSpec::bundled();
         let src = r#"
 every 0s {
-    send "tes" to player
+    send "test" to player
     cancel event
 }
 "#;
@@ -102,7 +104,7 @@ every 0s {
     }
 
     #[test]
-    fn fase_a_effect_level_zero_e011_and_invalid_vanilla_e013() {
+    fn phase_a_effect_level_zero_e011_and_invalid_vanilla_e013() {
         let spec = BedrockSpec::bundled();
         let src = r#"
 on join of player {
@@ -116,7 +118,7 @@ on join of player {
     }
 
     #[test]
-    fn fase_a_unsafe_isolation_and_unclosed_brace_e012() {
+    fn phase_a_unsafe_isolation_and_unclosed_brace_e012() {
         let spec = BedrockSpec::bundled();
         let src = r#"
 unsafe spawn_raw(id_target) {
@@ -136,7 +138,7 @@ unsafe spawn_raw(id_target) {
     }
 
     #[test]
-    fn fase_b_codegen_before_after_events_and_amplifier_and_snake_case() {
+    fn phase_b_codegen_before_after_events_and_amplifier_and_snake_case() {
         let spec = BedrockSpec::bundled();
         let src = r#"
 @addon(target = "1.21.50", api = "1.16.0")
@@ -145,12 +147,12 @@ const BLADE_ID = "my_pack:frost_blade"
 state mana[player] = 100
 
 on break of "minecraft:stone" by player {
-    send "Batu pecah" to player
+    send "Stone broken" to player
 }
 
 on break of "minecraft:diamond_ore" by player {
     cancel event
-    player.actionbar("§cTerproteksi!")
+    player.actionbar("§cProtected!")
 }
 
 on hit target with BLADE_ID by player {
@@ -175,7 +177,7 @@ on hit target with BLADE_ID by player {
     }
 
     #[test]
-    fn fase_b_bind_target_const_propagation_and_wiring() {
+    fn phase_b_bind_target_const_propagation_and_wiring() {
         let dir = temp_dir("bind");
         let spec = BedrockSpec::bundled();
         fs::create_dir_all(dir.join("BP/items")).unwrap();
@@ -221,7 +223,7 @@ on hit target with BLADE_ID by player {
         let manifest = fs::read_to_string(dir.join("BP/manifest.json")).unwrap();
         assert!(manifest.contains("@minecraft/server"));
 
-        // Uji mismatch E008 lewat const yang berbeda
+        // Test E008 mismatch via a different const identifier
         let bad_script = r#"
 bind_target("BP/items/frost_blade.json")
 const WRONG_ID = "my_pack:other_blade"
@@ -236,7 +238,7 @@ on hit target with WRONG_ID by player {
     }
 
     #[test]
-    fn fase_b_formatter_is_idempotent_and_preserves_unsafe() {
+    fn phase_b_formatter_is_idempotent_and_preserves_unsafe() {
         let ugly = r#"
 @addon(target="1.21.50",api="1.16.0")
 const ID="my_pack:x";
@@ -257,75 +259,75 @@ send "Hi {n}" to player;
         assert!(first.contains("mut n = 1 + 2"));
     }
 
-    // ─── FASE 2: Tes baru untuk resolve_min_engine_version ───────────────────
+    // ─── PHASE 2: Tests for resolve_min_engine_version ───────────────────────
 
     #[test]
-    fn fase_2_resolve_min_engine_version_format_baru() {
-        // Format baru: "26.x" → [1, 26, x]
+    fn phase_2_resolve_min_engine_version_modern_format() {
+        // Modern format: "26.x" → [1, 26, x]
         assert_eq!(resolve_min_engine_version("26.60"), Ok([1, 26, 60]));
         assert_eq!(resolve_min_engine_version("26.0"),  Ok([1, 26, 0]));
-        // Format baru dengan 3 komponen (sub-patch ketiga diabaikan → major=26, minor=60)
+        // Modern format with 3 components (third sub-patch ignored → major=26, minor=60)
         assert_eq!(resolve_min_engine_version("26.60.0"), Ok([1, 26, 60]));
-        // Versi lebih besar
+        // Higher versions
         assert_eq!(resolve_min_engine_version("30.10"), Ok([1, 30, 10]));
     }
 
     #[test]
-    fn fase_2_resolve_min_engine_version_format_lama() {
-        // Format lama: "1.x.y" → [1, x, y]
+    fn phase_2_resolve_min_engine_version_legacy_format() {
+        // Legacy format: "1.x.y" → [1, x, y]
         assert_eq!(resolve_min_engine_version("1.21.50"),  Ok([1, 21, 50]));
         assert_eq!(resolve_min_engine_version("1.21.130"), Ok([1, 21, 130]));
         assert_eq!(resolve_min_engine_version("1.20.80"),  Ok([1, 20, 80]));
-        // Format "1.x" tanpa patch → patch default 0
+        // "1.x" without patch → default patch 0
         assert_eq!(resolve_min_engine_version("1.20"), Ok([1, 20, 0]));
     }
 
     #[test]
-    fn fase_2_resolve_min_engine_version_selalu_diawali_1() {
-        // Pastikan elemen pertama selalu 1 untuk semua kasus yang valid
+    fn phase_2_resolve_min_engine_version_always_starts_with_1() {
+        // Ensure first element is always 1 for all valid cases
         for target in &["26.60", "26.0", "1.21.50", "1.20.80", "1.21.130"] {
             let result = resolve_min_engine_version(target).expect(target);
             assert_eq!(result[0], 1,
-                "min_engine_version[0] harus 1 untuk target '{target}', dapat: {result:?}");
+                "min_engine_version[0] must be 1 for target '{target}', got: {result:?}");
         }
     }
 
     #[test]
-    fn fase_2_resolve_min_engine_version_error_cases() {
-        // Input kosong
+    fn phase_2_resolve_min_engine_version_error_cases() {
+        // Empty input
         assert!(resolve_min_engine_version("").is_err());
-        // Format ambigu (major 2..25)
+        // Ambiguous format (major 2..25)
         assert!(resolve_min_engine_version("2.0").is_err());
         assert!(resolve_min_engine_version("25.60").is_err());
-        // Bukan angka
+        // Non-numeric
         assert!(resolve_min_engine_version("abc.def").is_err());
-        // Terlalu banyak komponen
+        // Too many components
         assert!(resolve_min_engine_version("1.2.3.4").is_err());
     }
 
     #[test]
-    fn fase_2_update_manifest_min_engine_version_selalu_diawali_1() {
+    fn phase_2_update_manifest_min_engine_version_always_starts_with_1() {
         let dir = temp_dir("manifest");
-        // Target 26.60 → min_engine_version harus [1, 26, 60]
+        // Target 26.60 → min_engine_version must be [1, 26, 60]
         crate::wiring::update_manifest(&dir, "26.60", "2.11.0").unwrap();
         let raw = fs::read_to_string(dir.join("BP/manifest.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let min = val["header"]["min_engine_version"].as_array().unwrap();
-        assert_eq!(min[0].as_u64(), Some(1), "elemen pertama harus 1, dapat: {min:?}");
+        assert_eq!(min[0].as_u64(), Some(1), "first element must be 1, got: {min:?}");
         assert_eq!(min[1].as_u64(), Some(26));
         assert_eq!(min[2].as_u64(), Some(60));
 
-        // Verifikasi modules selalu mengandung KEDUA tipe: "data" dan "script" dengan UUID berbeda
-        let modules1 = val["modules"].as_array().expect("modules harus array");
-        let data_mod1 = modules1.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
-        let script_mod1 = modules1.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        // Verify modules always contain BOTH types: "data" and "script" with distinct UUIDs
+        let modules1 = val["modules"].as_array().expect("modules must be an array");
+        let data_mod1 = modules1.iter().find(|m| m["type"] == "data").expect("must contain 'data' module");
+        let script_mod1 = modules1.iter().find(|m| m["type"] == "script").expect("must contain 'script' module");
         let d_uuid1 = data_mod1["uuid"].as_str().unwrap();
         let s_uuid1 = script_mod1["uuid"].as_str().unwrap();
         assert!(!d_uuid1.is_empty());
         assert!(!s_uuid1.is_empty());
-        assert_ne!(d_uuid1, s_uuid1, "UUID data dan script harus berbeda");
+        assert_ne!(d_uuid1, s_uuid1, "data and script module UUIDs must be distinct");
 
-        // Target lama 1.21.50 → min_engine_version harus [1, 21, 50]
+        // Legacy target 1.21.50 → min_engine_version must be [1, 21, 50]
         let dir2 = temp_dir("manifest2");
         crate::wiring::update_manifest(&dir2, "1.21.50", "1.16.0").unwrap();
         let raw2 = fs::read_to_string(dir2.join("BP/manifest.json")).unwrap();
@@ -335,17 +337,17 @@ send "Hi {n}" to player;
         assert_eq!(min2[1].as_u64(), Some(21));
         assert_eq!(min2[2].as_u64(), Some(50));
 
-        let modules2 = val2["modules"].as_array().expect("modules harus array");
-        let data_mod2 = modules2.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
-        let script_mod2 = modules2.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
-        assert_ne!(data_mod2["uuid"], script_mod2["uuid"], "UUID data dan script harus berbeda");
+        let modules2 = val2["modules"].as_array().expect("modules must be an array");
+        let data_mod2 = modules2.iter().find(|m| m["type"] == "data").expect("must contain 'data' module");
+        let script_mod2 = modules2.iter().find(|m| m["type"] == "script").expect("must contain 'script' module");
+        assert_ne!(data_mod2["uuid"], script_mod2["uuid"], "data and script module UUIDs must be distinct");
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
     }
 
     #[test]
-    fn fase_2_init_workspace_min_engine_version_26_60() {
+    fn phase_2_init_workspace_min_engine_version_26_60() {
         let dir = temp_dir("init");
         let spec = BedrockSpec::bundled(); // version 26.60
         init_workspace(&dir, "TestPack", &spec).unwrap();
@@ -354,34 +356,34 @@ send "Hi {n}" to player;
         let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let min = val["header"]["min_engine_version"].as_array().unwrap();
         assert_eq!(min[0].as_u64(), Some(1),
-            "init_workspace: min_engine_version[0] harus 1, dapat: {min:?}");
+            "init_workspace: min_engine_version[0] must be 1, got: {min:?}");
 
-        // Verifikasi @minecraft/server versi terbaru ada di manifest
+        // Verify latest @minecraft/server version is in manifest
         let dep_ver = val["dependencies"][0]["version"].as_str().unwrap_or("");
         assert_eq!(dep_ver, "2.11.0",
-            "dependency @minecraft/server harus 2.11.0, dapat: '{dep_ver}'");
+            "@minecraft/server dependency must be 2.11.0, got: '{dep_ver}'");
 
-        // Verifikasi modules selalu mengandung KEDUA tipe: "data" dan "script" dengan UUID berbeda
-        let modules = val["modules"].as_array().expect("modules harus array");
-        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
-        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        // Verify modules always contain BOTH types: "data" and "script" with distinct UUIDs
+        let modules = val["modules"].as_array().expect("modules must be an array");
+        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("must contain 'data' module");
+        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("must contain 'script' module");
         let data_uuid = data_mod["uuid"].as_str().unwrap();
         let script_uuid = script_mod["uuid"].as_str().unwrap();
         assert!(!data_uuid.is_empty());
         assert!(!script_uuid.is_empty());
-        assert_ne!(data_uuid, script_uuid, "UUID data dan script harus berbeda");
+        assert_ne!(data_uuid, script_uuid, "data and script module UUIDs must be distinct");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fase_2_audit_workspace_tolak_format_salah_terima_yang_benar() {
+    fn phase_2_audit_workspace_rejects_invalid_and_accepts_valid_formats() {
         let dir = temp_dir("audit");
         let spec = BedrockSpec::bundled();
         fs::create_dir_all(dir.join("BP")).unwrap();
         fs::create_dir_all(dir.join("src")).unwrap();
 
-        // Kasus GAGAL: [26, 60, 0] – angka pertama bukan 1
+        // FAIL case: [26, 60, 0] – first number is not 1
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":2,"header":{"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","version":[1,0,0],"min_engine_version":[26,60,0]},"modules":[],"dependencies":[]}"#,
@@ -389,10 +391,10 @@ send "Hi {n}" to player;
         let diags = audit_workspace(&dir, &spec).unwrap();
         assert!(
             diags.iter().any(|d| d.code == "PSTDR-E015"),
-            "Harus tolak [26, 60, 0]: {diags:?}"
+            "Must reject [26, 60, 0]: {diags:?}"
         );
 
-        // Kasus LULUS: [1, 26, 60]
+        // PASS case: [1, 26, 60]
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":2,"header":{"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","version":[1,0,0],"min_engine_version":[1,26,60]},"modules":[],"dependencies":[]}"#,
@@ -400,10 +402,10 @@ send "Hi {n}" to player;
         let diags2 = audit_workspace(&dir, &spec).unwrap();
         assert!(
             !diags2.iter().any(|d| d.code == "PSTDR-E015"),
-            "[1, 26, 60] harus lulus E015: {diags2:?}"
+            "[1, 26, 60] must pass E015: {diags2:?}"
         );
 
-        // Kasus LULUS: [1, 21, 50]
+        // PASS case: [1, 21, 50]
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":2,"header":{"uuid":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","version":[1,0,0],"min_engine_version":[1,21,50]},"modules":[],"dependencies":[]}"#,
@@ -411,16 +413,16 @@ send "Hi {n}" to player;
         let diags3 = audit_workspace(&dir, &spec).unwrap();
         assert!(
             !diags3.iter().any(|d| d.code == "PSTDR-E015"),
-            "[1, 21, 50] harus lulus E015: {diags3:?}"
+            "[1, 21, 50] must pass E015: {diags3:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fase_2_codegen_snapshot_target_baru_26_60() {
-        // Snapshot codegen untuk target 26.60: custom component harus memakai
-        // system.beforeEvents.startup (API v2) dan import system (bukan world).
+    fn phase_2_codegen_snapshot_modern_target_26_60() {
+        // Codegen snapshot for target 26.60: custom component must use
+        // system.beforeEvents.startup (API v2) and import system (not world).
         let spec = BedrockSpec::bundled();
         let src = r#"
 @addon(target = "26.60", api = "2.11.0")
@@ -429,7 +431,7 @@ bind_target("BP/items/ice_shard.json")
 const ICE_ID = "my_pack:ice_shard"
 
 on right click with ICE_ID by player {
-    player.actionbar("§b✦ Es Retak!")
+    player.actionbar("§b✦ Ice Shatter!")
 }
 "#;
         let dir = temp_dir("snap26");
@@ -445,22 +447,22 @@ on right click with ICE_ID by player {
         assert!(!has_errors(&diags), "diags: {diags:?}");
 
         let js = fs::read_to_string(dir.join("BP/scripts/generated/ice_shard.js")).unwrap();
-        // Harus pakai system.beforeEvents.startup (API v2)
+        // Must use system.beforeEvents.startup (API v2)
         assert!(
             js.contains("system.beforeEvents.startup.subscribe"),
-            "Harus pakai system.beforeEvents.startup:\n{js}"
+            "Must use system.beforeEvents.startup:\n{js}"
         );
-        // Harus import system (bukan world saja)
-        assert!(js.contains("system"), "Harus import system:\n{js}");
-        // Header versi tidak memakai 1.21.50 secara kaku
-        assert!(js.contains("26.60"), "Header harus menyebut 26.60:\n{js}");
+        // Must import system (not world only)
+        assert!(js.contains("system"), "Must import system:\n{js}");
+        // Version header must not hardcode 1.21.50
+        assert!(js.contains("26.60"), "Header must reference 26.60:\n{js}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fase_2_codegen_snapshot_target_lama_1_21_50() {
-        // Snapshot kompatibilitas mundur: target 1.21.50 masih bisa dikompilasi.
+    fn phase_2_codegen_snapshot_legacy_target_1_21_50() {
+        // Backward-compatibility snapshot: target 1.21.50 still compiles cleanly.
         let spec = BedrockSpec::bundled();
         let src = r#"
 @addon(target = "1.21.50", api = "1.16.0")
@@ -474,21 +476,21 @@ on hit target with BLADE_ID by player {
         let res = compile_source(src, "legacy.pstdr", None, &spec, false, true, vec![]);
         assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
         let js = res.js.unwrap();
-        // Event entityHitEntity tetap sama di semua API version
+        // entityHitEntity event remains unchanged across all API versions
         assert!(js.contains("world.afterEvents.entityHitEntity.subscribe"));
-        assert!(js.contains("1.21.50"), "Header harus menyebut 1.21.50:\n{js}");
+        assert!(js.contains("1.21.50"), "Header must reference 1.21.50:\n{js}");
     }
 
-    // ─── FASE 2: Tes Tambahan Custom Components V1 vs V2 & Manifest v3 ───────
+    // ─── PHASE 2: Additional Tests for Custom Components V1 vs V2 & Manifest v3 ───
 
     #[test]
-    fn fase_2_wiring_custom_components_v1_vs_v2() {
+    fn phase_2_wiring_custom_components_v1_vs_v2() {
         let dir = temp_dir("wiring_v1_v2");
         let spec = BedrockSpec::bundled();
         fs::create_dir_all(dir.join("BP/items")).unwrap();
         fs::create_dir_all(dir.join("src")).unwrap();
 
-        // 1. Format lama: 1.21.50 -> array minecraft:custom_components
+        // 1. Legacy format: 1.21.50 -> minecraft:custom_components array
         fs::write(
             dir.join("BP/items/v1_item.json"),
             r#"{
@@ -509,7 +511,7 @@ on hit target with V1_ID by player { damage target by 1 }
 "#,
         ).unwrap();
 
-        // 2. Format baru: 1.21.90 -> direct key "pstdr:...": {}
+        // 2. Modern format: 1.21.90 -> direct key "pstdr:...": {}
         fs::write(
             dir.join("BP/items/v2_item_90.json"),
             r#"{
@@ -530,7 +532,7 @@ on hit target with V2_90_ID by player { damage target by 1 }
 "#,
         ).unwrap();
 
-        // 3. Format baru: 1.26.60 -> direct key "pstdr:...": {}
+        // 3. Modern format: 1.26.60 -> direct key "pstdr:...": {}
         fs::write(
             dir.join("BP/items/v2_item_26.json"),
             r#"{
@@ -554,43 +556,43 @@ on hit target with V2_26_ID by player { damage target by 1 }
         let diags = convert_workspace(&dir, &spec).unwrap();
         assert!(!has_errors(&diags), "diags: {diags:?}");
 
-        // Verifikasi v1_item.json (format 1.21.50): memiliki array minecraft:custom_components
+        // Verify v1_item.json (format 1.21.50): has minecraft:custom_components array
         let v1_json: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(dir.join("BP/items/v1_item.json")).unwrap(),
         ).unwrap();
         let comps_v1 = &v1_json["minecraft:item"]["components"];
         let arr = comps_v1["minecraft:custom_components"]
             .as_array()
-            .expect("harus ada array minecraft:custom_components");
+            .expect("must have minecraft:custom_components array");
         assert!(arr.iter().any(|v| v.as_str() == Some("pstdr:v1_item")));
 
-        // Verifikasi v2_item_90.json (format 1.21.90): key langsung, tanpa array minecraft:custom_components
+        // Verify v2_item_90.json (format 1.21.90): direct key, without minecraft:custom_components array
         let v2_90_json: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(dir.join("BP/items/v2_item_90.json")).unwrap(),
         ).unwrap();
         let comps_v2_90 = &v2_90_json["minecraft:item"]["components"];
         assert!(
             comps_v2_90.get("minecraft:custom_components").is_none(),
-            "1.21.90 tidak boleh ada array minecraft:custom_components"
+            "1.21.90 must not contain minecraft:custom_components array"
         );
         assert!(
             comps_v2_90.get("pstdr:v2_item_90").is_some(),
-            "1.21.90 harus punya key 'pstdr:v2_item_90'"
+            "1.21.90 must contain key 'pstdr:v2_item_90'"
         );
         assert_eq!(comps_v2_90["pstdr:v2_item_90"], serde_json::json!({}));
 
-        // Verifikasi v2_item_26.json (format 1.26.60): key langsung, tanpa array minecraft:custom_components
+        // Verify v2_item_26.json (format 1.26.60): direct key, without minecraft:custom_components array
         let v2_26_json: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(dir.join("BP/items/v2_item_26.json")).unwrap(),
         ).unwrap();
         let comps_v2_26 = &v2_26_json["minecraft:item"]["components"];
         assert!(
             comps_v2_26.get("minecraft:custom_components").is_none(),
-            "1.26.60 tidak boleh ada array minecraft:custom_components"
+            "1.26.60 must not contain minecraft:custom_components array"
         );
         assert!(
             comps_v2_26.get("pstdr:v2_item_26").is_some(),
-            "1.26.60 harus punya key 'pstdr:v2_item_26'"
+            "1.26.60 must contain key 'pstdr:v2_item_26'"
         );
         assert_eq!(comps_v2_26["pstdr:v2_item_26"], serde_json::json!({}));
 
@@ -598,13 +600,13 @@ on hit target with V2_26_ID by player { damage target by 1 }
     }
 
     #[test]
-    fn fase_2_manifest_v3_update_and_audit() {
+    fn phase_2_manifest_v3_update_and_audit() {
         let dir = temp_dir("manifest_v3");
         let spec = BedrockSpec::bundled();
         fs::create_dir_all(dir.join("BP")).unwrap();
         fs::create_dir_all(dir.join("src")).unwrap();
 
-        // 1. format_version: 3 dengan "min_engine_version": "1.26.60" -> LULUS
+        // 1. format_version: 3 with "min_engine_version": "1.26.60" -> PASS
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":"1.26.60"},"modules":[],"dependencies":[]}"#,
@@ -612,10 +614,10 @@ on hit target with V2_26_ID by player { damage target by 1 }
         let diags_ok = audit_workspace(&dir, &spec).unwrap();
         assert!(
             !diags_ok.iter().any(|d| d.code == "PSTDR-E015"),
-            "Format v3 '1.26.60' harus lulus: {diags_ok:?}"
+            "v3 format '1.26.60' must pass: {diags_ok:?}"
         );
 
-        // 2. format_version: 3 dengan "min_engine_version": "26.60.0" -> GAGAL PSTDR-E015
+        // 2. format_version: 3 with "min_engine_version": "26.60.0" -> FAIL PSTDR-E015
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":"26.60.0"},"modules":[],"dependencies":[]}"#,
@@ -623,10 +625,10 @@ on hit target with V2_26_ID by player { damage target by 1 }
         let diags_err1 = audit_workspace(&dir, &spec).unwrap();
         assert!(
             diags_err1.iter().any(|d| d.code == "PSTDR-E015"),
-            "Format v3 '26.60.0' harus gagal: {diags_err1:?}"
+            "v3 format '26.60.0' must fail: {diags_err1:?}"
         );
 
-        // 3. format_version: 3 dengan array [1, 26, 60] -> GAGAL PSTDR-E015
+        // 3. format_version: 3 with array [1, 26, 60] -> FAIL PSTDR-E015
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0],"min_engine_version":[1,26,60]},"modules":[],"dependencies":[]}"#,
@@ -634,10 +636,10 @@ on hit target with V2_26_ID by player { damage target by 1 }
         let diags_err2 = audit_workspace(&dir, &spec).unwrap();
         assert!(
             diags_err2.iter().any(|d| d.code == "PSTDR-E015"),
-            "Format v3 array [1,26,60] harus gagal: {diags_err2:?}"
+            "v3 format array [1,26,60] must fail: {diags_err2:?}"
         );
 
-        // 4. update_manifest pada format_version: 3 menulis SemVer string "1.26.60", bukan array
+        // 4. update_manifest on format_version: 3 writes SemVer string "1.26.60", not array
         fs::write(
             dir.join("BP/manifest.json"),
             r#"{"format_version":3,"header":{"uuid":"11111111-1111-4111-8111-111111111111","version":[1,0,0]},"modules":[],"dependencies":[]}"#,
@@ -648,30 +650,30 @@ on hit target with V2_26_ID by player { damage target by 1 }
         assert_eq!(
             val["header"]["min_engine_version"].as_str(),
             Some("1.26.60"),
-            "v3 manifest harus punya min_engine_version string '1.26.60': {manifest_content}"
+            "v3 manifest must have string min_engine_version '1.26.60': {manifest_content}"
         );
         assert!(
             val["header"]["min_engine_version"].as_array().is_none(),
-            "v3 manifest tidak boleh berupa array"
+            "v3 manifest must not use an array"
         );
 
-        // Verifikasi modules pada v3 mengandung kedua tipe: "data" dan "script" dengan version "1.0.0"
-        let modules = val["modules"].as_array().expect("modules harus array");
-        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("harus ada module 'data'");
-        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("harus ada module 'script'");
+        // Verify v3 modules contain both types: "data" and "script" with version "1.0.0"
+        let modules = val["modules"].as_array().expect("modules must be an array");
+        let data_mod = modules.iter().find(|m| m["type"] == "data").expect("must contain 'data' module");
+        let script_mod = modules.iter().find(|m| m["type"] == "script").expect("must contain 'script' module");
         assert_eq!(data_mod["version"].as_str(), Some("1.0.0"));
         assert_eq!(script_mod["version"].as_str(), Some("1.0.0"));
         let data_uuid = data_mod["uuid"].as_str().unwrap();
         let script_uuid = script_mod["uuid"].as_str().unwrap();
         assert!(!data_uuid.is_empty());
         assert!(!script_uuid.is_empty());
-        assert_ne!(data_uuid, script_uuid, "UUID data dan script harus berbeda");
+        assert_ne!(data_uuid, script_uuid, "data and script module UUIDs must be distinct");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fase_2_codegen_api_v1_uses_world_initialize() {
+    fn phase_2_codegen_api_v1_uses_world_initialize() {
         let src = r#"
 @addon(target = "1.21.50", api = "1.16.0")
 
@@ -692,20 +694,20 @@ on hit target with SWORD_ID by player {
         let js = emit_code(&prog, &opts, EmitMode::JavaScript);
         assert!(
             js.contains("world.beforeEvents.worldInitialize.subscribe"),
-            "API v1.16.0 harus pakai world.beforeEvents.worldInitialize:\n{js}"
+            "API v1.16.0 must use world.beforeEvents.worldInitialize:\n{js}"
         );
         assert!(
             !js.contains("system.beforeEvents.startup"),
-            "API v1.16.0 tidak boleh pakai startup:\n{js}"
+            "API v1.16.0 must not use startup:\n{js}"
         );
         assert!(
             js.contains("world"),
-            "API v1.16.0 harus mengimpor world:\n{js}"
+            "API v1.16.0 must import world:\n{js}"
         );
     }
 
     #[test]
-    fn fase_2_codegen_api_v2_uses_system_startup() {
+    fn phase_2_codegen_api_v2_uses_system_startup() {
         let src = r#"
 @addon(target = "26.60", api = "2.11.0")
 
@@ -726,15 +728,351 @@ on right click with WAND_ID by player {
         let js = emit_code(&prog, &opts, EmitMode::JavaScript);
         assert!(
             js.contains("system.beforeEvents.startup.subscribe"),
-            "API v2.11.0 harus pakai system.beforeEvents.startup:\n{js}"
+            "API v2.11.0 must use system.beforeEvents.startup:\n{js}"
         );
         assert!(
             !js.contains("worldInitialize"),
-            "API v2.11.0 tidak boleh pakai worldInitialize:\n{js}"
+            "API v2.11.0 must not use worldInitialize:\n{js}"
         );
         assert!(
             js.contains("import {") && js.contains("system"),
-            "API v2.11.0 harus mengimpor system:\n{js}"
+            "API v2.11.0 must import system:\n{js}"
         );
+    }
+
+    // ─── PHASE 3: Auto-Detection of Custom/Forbidden Textures Without RP (PSTDR-E017) ───
+
+    #[test]
+    fn phase_3_asset_guard_fails_compile_without_rp_on_custom_or_invalid_icon() {
+        let dir = temp_dir("asset_guard_fail");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/items/frost_scythe.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:frost_scythe" },
+    "components": {
+      "minecraft:icon": "frost_scythe"
+    }
+  }
+}"#,
+        ).unwrap();
+
+        fs::write(
+            dir.join("src/frost_scythe.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/frost_scythe.json")
+const SCYTHE_ID = "my_pack:frost_scythe"
+on hit target with SCYTHE_ID by player { damage target by 5 }
+"#,
+        ).unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags.iter().any(|d| d.code == "PSTDR-E017"),
+            "Must emit PSTDR-E017 on custom icon without RP: {diags:?}"
+        );
+        let js_out = dir.join("BP/scripts/generated/frost_scythe.js");
+        assert!(
+            !js_out.exists(),
+            "Compilation must stop and NOT emit generated JS when asset errors exist"
+        );
+
+        // Also test diamond_sword (not a valid vanilla item_textures alias in 26.60)
+        fs::write(
+            dir.join("BP/items/frost_scythe.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:frost_scythe" },
+    "components": {
+      "minecraft:icon": "diamond_sword"
+    }
+  }
+}"#,
+        ).unwrap();
+        let diags2 = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags2.iter().any(|d| d.code == "PSTDR-E017"),
+            "diamond_sword is not a valid vanilla alias in 26.60, must emit PSTDR-E017: {diags2:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phase_3_asset_guard_allows_valid_vanilla_icon_without_rp() {
+        let dir = temp_dir("asset_guard_vanilla_ok");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // 1. Direct string format: "snowball"
+        fs::write(
+            dir.join("BP/items/ice_ball.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:ice_ball" },
+    "components": {
+      "minecraft:icon": "snowball"
+    }
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/ice_ball.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/ice_ball.json")
+const BALL_ID = "my_pack:ice_ball"
+on right click with BALL_ID by player { player.actionbar("Throw!") }
+"#,
+        ).unwrap();
+
+        // 2. Modern object format: {"textures": {"default": "diamond"}}
+        fs::write(
+            dir.join("BP/items/gem.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:gem" },
+    "components": {
+      "minecraft:icon": {
+        "textures": {
+          "default": "diamond"
+        }
+      }
+    }
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/gem.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/gem.json")
+const GEM_ID = "my_pack:gem"
+on right click with GEM_ID by player { player.actionbar("Shine!") }
+"#,
+        ).unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags),
+            "convert_workspace must pass with 0 errors for vanilla icons: {diags:?}"
+        );
+        let audit_diags = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&audit_diags),
+            "audit_workspace must pass with 0 errors for vanilla icons: {audit_diags:?}"
+        );
+        assert!(dir.join("BP/scripts/generated/ice_ball.js").exists());
+        assert!(dir.join("BP/scripts/generated/gem.js").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phase_3_asset_guard_rejects_raw_png_path_in_icon() {
+        let dir = temp_dir("asset_guard_raw_png");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/items/scythe.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:scythe" },
+    "components": {
+      "minecraft:icon": "textures/items/scythe.png"
+    }
+  }
+}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/scythe.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/scythe.json")
+const SCYTHE_ID = "my_pack:scythe"
+on hit target with SCYTHE_ID by player { damage target by 3 }
+"#,
+        ).unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags.iter().any(|d| d.code == "PSTDR-E017"),
+            "Must fail with PSTDR-E017 when using a raw .png path: {diags:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phase_3_asset_guard_passes_with_rp_and_fails_on_missing_png() {
+        let dir = temp_dir("asset_guard_rp");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("RP/textures")).unwrap();
+
+        fs::write(
+            dir.join("RP/manifest.json"),
+            r#"{
+  "format_version": 2,
+  "header": {
+    "name": "Pack RP",
+    "description": "RP",
+    "uuid": "22222222-2222-4222-8222-222222222222",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 26, 60]
+  },
+  "modules": []
+}"#,
+        ).unwrap();
+
+        fs::write(
+            dir.join("RP/textures/item_texture.json"),
+            r#"{
+  "resource_pack_name": "pack",
+  "texture_name": "atlas.items",
+  "texture_data": {
+    "frost_scythe": {
+      "textures": "textures/items/frost_scythe"
+    }
+  }
+}"#,
+        ).unwrap();
+
+        fs::write(
+            dir.join("BP/items/frost_scythe.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:frost_scythe" },
+    "components": {
+      "minecraft:icon": "frost_scythe"
+    }
+  }
+}"#,
+        ).unwrap();
+
+        fs::write(
+            dir.join("src/frost_scythe.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/frost_scythe.json")
+const SCYTHE_ID = "my_pack:frost_scythe"
+on hit target with SCYTHE_ID by player { damage target by 5 }
+"#,
+        ).unwrap();
+
+        // 1. Physical image file missing -> must fail with PSTDR-E017
+        let diags_missing = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            diags_missing.iter().any(|d| d.code == "PSTDR-E017"),
+            "Must fail with PSTDR-E017 because physical image file is missing: {diags_missing:?}"
+        );
+
+        // 2. Create .png file at RP/textures/items/frost_scythe.png
+        fs::create_dir_all(dir.join("RP/textures/items")).unwrap();
+        fs::write(dir.join("RP/textures/items/frost_scythe.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+
+        // 3. After image is created -> convert_workspace & audit_workspace must pass with 0 errors
+        let diags_ok = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags_ok),
+            "convert_workspace must succeed once png file exists: {diags_ok:?}"
+        );
+        let audit_diags = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&audit_diags),
+            "audit_workspace must succeed once png file exists: {audit_diags:?}"
+        );
+        assert!(dir.join("BP/scripts/generated/frost_scythe.js").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_error_two_syntax_errors_top_level() {
+        let src = "let a = 1\nlet b = 2\n";
+        let (_prog, diags) = parse_source(src, "two_errors.pstdr");
+        let e001_count = diags.iter().filter(|d| d.code == "PSTDR-E001").count();
+        assert!(
+            e001_count >= 2,
+            "Expected at least 2 E001 errors, got {e001_count}: {diags:?}"
+        );
+        let lines: Vec<usize> = diags
+            .iter()
+            .filter(|d| d.code == "PSTDR-E001")
+            .map(|d| d.line)
+            .collect();
+        assert!(lines.contains(&1), "Expected error on line 1: {lines:?}");
+        assert!(lines.contains(&2), "Expected error on line 2: {lines:?}");
+    }
+
+    #[test]
+    fn multi_error_two_errors_inside_same_block() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+on join of player {
+    let x = 1
+    const y = 2
+    y = 3
+}
+"#;
+        let res = compile_source(src, "block_multi.pstdr", None, &spec, true, true, vec![]);
+        let codes: Vec<&str> = res.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"PSTDR-E001"), "missing E001 in diags: {codes:?}");
+        assert!(codes.contains(&"PSTDR-E002"), "missing E002 in diags: {codes:?}");
+    }
+
+    #[test]
+    fn multi_error_syntax_plus_semantic_in_one_file() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+let a = 1
+on join of player {
+    apply slownes 0 to player for 3s
+}
+"#;
+        let res = compile_source(src, "syn_sem.pstdr", None, &spec, true, true, vec![]);
+        assert!(res.js.is_none(), "convert must fail when errors exist");
+        assert!(res.ts.is_none(), "convert must fail when errors exist");
+        let codes: Vec<&str> = res.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"PSTDR-E001"), "missing E001 in diags: {codes:?}");
+        assert!(codes.contains(&"PSTDR-E011"), "missing E011 in diags: {codes:?}");
+        assert!(codes.contains(&"PSTDR-E013"), "missing E013 in diags: {codes:?}");
+
+        let dir = temp_dir("multi_error_check_path");
+        let file = dir.join("syn_sem.pstdr");
+        fs::write(&file, src).unwrap();
+        let check_diags = check_path(&file, None, &spec).unwrap();
+        let check_codes: Vec<&str> = check_diags.iter().map(|d| d.code.as_str()).collect();
+        assert!(check_codes.contains(&"PSTDR-E001"), "check_path missing E001: {check_codes:?}");
+        assert!(check_codes.contains(&"PSTDR-E011"), "check_path missing E011: {check_codes:?}");
+        assert!(check_codes.contains(&"PSTDR-E013"), "check_path missing E013: {check_codes:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_error_no_infinite_loop_on_garbage_input() {
+        let spec = BedrockSpec::bundled();
+        let garbage = "@@@ {{{ ))) let ===";
+        let res1 = compile_source(garbage, "garbage1.pstdr", None, &spec, true, true, vec![]);
+        assert!(has_errors(&res1.diagnostics), "Expected errors for garbage input");
+
+        let unclosed = "on join of player { let x =";
+        let res2 = compile_source(unclosed, "garbage2.pstdr", None, &spec, true, true, vec![]);
+        assert!(has_errors(&res2.diagnostics), "Expected errors for unclosed block");
     }
 }

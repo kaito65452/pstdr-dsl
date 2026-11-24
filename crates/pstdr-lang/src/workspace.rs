@@ -20,6 +20,7 @@ pub struct WorkspaceConfig {
     pub emit_ts: bool,
     pub strict_vanilla_ids: bool,
     pub source_map_comments: bool,
+    pub strict_asset_refs: bool,
 }
 
 impl Default for WorkspaceConfig {
@@ -34,6 +35,7 @@ impl Default for WorkspaceConfig {
             emit_ts: true,
             strict_vanilla_ids: true,
             source_map_comments: true,
+            strict_asset_refs: true,
         }
     }
 }
@@ -66,6 +68,7 @@ impl WorkspaceConfig {
                 "emit_ts" => cfg.emit_ts = val == "true",
                 "strict_vanilla_ids" => cfg.strict_vanilla_ids = val == "true",
                 "source_map_comments" => cfg.source_map_comments = val == "true",
+                "strict_asset_refs" => cfg.strict_asset_refs = val == "true",
                 _ => {}
             }
         }
@@ -106,7 +109,7 @@ pub fn collect_pstdr_files(path: &Path) -> Result<Vec<PathBuf>, String> {
         return Ok(files);
     }
     if !path.is_dir() {
-        return Err(format!("Path tidak ditemukan: '{}'", path.display()));
+        return Err(format!("Path not found: '{}'", path.display()));
     }
     collect_recursive(path, &mut files)?;
     files.sort();
@@ -115,9 +118,9 @@ pub fn collect_pstdr_files(path: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(dir)
-        .map_err(|e| format!("Gagal membaca direktori '{}': {e}", dir.display()))?;
+        .map_err(|e| format!("Failed to read directory '{}': {e}", dir.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("Gagal membaca entri direktori: {e}"))?;
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
         let p = entry.path();
         if p.is_dir() {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -132,6 +135,21 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+fn sort_and_dedup_diags(diags: &mut Vec<Diagnostic>) {
+    diags.sort_by(|a, b| {
+        a.file.cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.code.cmp(&b.code))
+    });
+    diags.dedup_by(|a, b| {
+        a.file == b.file
+            && a.line == b.line
+            && a.column == b.column
+            && a.code == b.code
+    });
+}
+
 pub fn compile_source(
     source: &str,
     file: &str,
@@ -141,29 +159,27 @@ pub fn compile_source(
     source_map_comments: bool,
     custom_components: Vec<(String, ComponentKind)>,
 ) -> CompileResult {
-    let (program, parse_diags) = parse_source(source, file);
-    let Some(prog) = program else {
-        return CompileResult {
-            js: None,
-            ts: None,
-            diagnostics: parse_diags,
-        };
-    };
-
+    let (program, mut diags) = parse_source(source, file);
     let vctx = ValidationContext {
         workspace_root,
         spec,
         strict_vanilla_ids,
     };
-    let (_info, val_diags) = validate_program(&prog, &vctx);
-    if has_errors(&val_diags) {
+    if let Some(prog) = &program {
+        let (_info, val_diags) = validate_program(prog, &vctx);
+        diags.extend(val_diags);
+    }
+    sort_and_dedup_diags(&mut diags);
+
+    if has_errors(&diags) || program.is_none() {
         return CompileResult {
             js: None,
             ts: None,
-            diagnostics: val_diags,
+            diagnostics: diags,
         };
     }
 
+    let prog = program.unwrap();
     let opts = CodegenOptions {
         source_file: file.to_string(),
         source_map_comments,
@@ -175,7 +191,7 @@ pub fn compile_source(
     CompileResult {
         js: Some(js),
         ts: Some(ts),
-        diagnostics: val_diags,
+        diagnostics: diags,
     }
 }
 
@@ -186,7 +202,7 @@ pub fn convert_single_file(
     emit_ts_sibling: bool,
 ) -> Result<Vec<Diagnostic>, String> {
     let source = fs::read_to_string(from)
-        .map_err(|e| format!("Gagal membaca '{}': {e}", from.display()))?;
+        .map_err(|e| format!("Failed to read '{}': {e}", from.display()))?;
     let file_label = from.display().to_string();
     let ws_root = find_workspace_root(from);
 
@@ -206,7 +222,7 @@ pub fn convert_single_file(
     if let Some(parent) = to.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
-                .map_err(|e| format!("Gagal membuat folder '{}': {e}", parent.display()))?;
+                .map_err(|e| format!("Failed to create directory '{}': {e}", parent.display()))?;
         }
     }
 
@@ -216,13 +232,13 @@ pub fn convert_single_file(
     } else {
         res.js.as_deref().unwrap_or("")
     };
-    fs::write(to, primary).map_err(|e| format!("Gagal menulis '{}': {e}", to.display()))?;
+    fs::write(to, primary).map_err(|e| format!("Failed to write '{}': {e}", to.display()))?;
 
     if emit_ts_sibling && !is_ts_out {
         let ts_path = to.with_extension("ts");
         if let Some(ts_code) = res.ts {
             fs::write(&ts_path, ts_code)
-                .map_err(|e| format!("Gagal menulis '{}': {e}", ts_path.display()))?;
+                .map_err(|e| format!("Failed to write '{}': {e}", ts_path.display()))?;
         }
     }
 
@@ -239,6 +255,14 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     };
 
     let mut all_diags = Vec::new();
+
+    let mut has_asset_err = false;
+    if cfg.strict_asset_refs {
+        let asset_diags = crate::assets::validate_workspace_assets(root, spec)?;
+        has_asset_err = has_errors(&asset_diags);
+        all_diags.extend(asset_diags);
+    }
+
     let mut generated_stems = Vec::new();
     let mut target_ver = cfg.bedrock_target.clone();
     let mut api_ver = cfg.script_api.clone();
@@ -248,35 +272,37 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     for file_path in &files {
         let source = fs::read_to_string(file_path)
-            .map_err(|e| format!("Gagal membaca '{}': {e}", file_path.display()))?;
+            .map_err(|e| format!("Failed to read '{}': {e}", file_path.display()))?;
         let rel = file_path
             .strip_prefix(root)
             .unwrap_or(file_path)
             .display()
             .to_string();
 
-        let (prog_opt, parse_diags) = parse_source(&source, &rel);
-        let Some(prog) = prog_opt else {
-            all_diags.extend(parse_diags);
-            continue;
-        };
+        let (prog_opt, mut file_diags) = parse_source(&source, &rel);
+        if let Some(prog) = &prog_opt {
+            if let Some(h) = &prog.header {
+                target_ver = h.target.clone();
+                api_ver = h.api.clone();
+            }
 
-        if let Some(h) = &prog.header {
-            target_ver = h.target.clone();
-            api_ver = h.api.clone();
+            let vctx = ValidationContext {
+                workspace_root: Some(root),
+                spec,
+                strict_vanilla_ids: cfg.strict_vanilla_ids,
+            };
+            let (_info, val_diags) = validate_program(prog, &vctx);
+            file_diags.extend(val_diags);
+        }
+        sort_and_dedup_diags(&mut file_diags);
+
+        let file_failed = has_errors(&file_diags) || prog_opt.is_none();
+        all_diags.extend(file_diags);
+        if file_failed || has_asset_err {
+            continue;
         }
 
-        let vctx = ValidationContext {
-            workspace_root: Some(root),
-            spec,
-            strict_vanilla_ids: cfg.strict_vanilla_ids,
-        };
-        let (_info, val_diags) = validate_program(&prog, &vctx);
-        let failed = has_errors(&val_diags);
-        all_diags.extend(val_diags);
-        if failed {
-            continue;
-        }
+        let prog = prog_opt.unwrap();
 
         let stem = file_path
             .file_stem()
@@ -295,17 +321,17 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         let ts = emit_code(&prog, &opts, EmitMode::TypeScript);
 
         fs::create_dir_all(&js_dir)
-            .map_err(|e| format!("Gagal membuat folder '{}': {e}", js_dir.display()))?;
+            .map_err(|e| format!("Failed to create directory '{}': {e}", js_dir.display()))?;
         let js_out = js_dir.join(format!("{stem}.js"));
         fs::write(&js_out, js)
-            .map_err(|e| format!("Gagal menulis '{}': {e}", js_out.display()))?;
+            .map_err(|e| format!("Failed to write '{}': {e}", js_out.display()))?;
 
         if cfg.emit_ts {
             fs::create_dir_all(&ts_dir)
-                .map_err(|e| format!("Gagal membuat folder '{}': {e}", ts_dir.display()))?;
+                .map_err(|e| format!("Failed to create directory '{}': {e}", ts_dir.display()))?;
             let ts_out = ts_dir.join(format!("{stem}.ts"));
             fs::write(&ts_out, ts)
-                .map_err(|e| format!("Gagal menulis '{}': {e}", ts_out.display()))?;
+                .map_err(|e| format!("Failed to write '{}': {e}", ts_out.display()))?;
         }
 
         generated_stems.push(stem);
@@ -316,6 +342,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         update_manifest(root, &target_ver, &api_ver)?;
     }
 
+    sort_and_dedup_diags(&mut all_diags);
     Ok(all_diags)
 }
 
@@ -332,28 +359,28 @@ pub fn check_path(
 
     for f in files {
         let source = fs::read_to_string(&f)
-            .map_err(|e| format!("Gagal membaca '{}': {e}", f.display()))?;
+            .map_err(|e| format!("Failed to read '{}': {e}", f.display()))?;
         let label = workspace_root
             .and_then(|r| f.strip_prefix(r).ok())
             .unwrap_or(&f)
             .display()
             .to_string();
 
-        let (prog_opt, parse_diags) = parse_source(&source, &label);
-        let Some(prog) = prog_opt else {
-            all_diags.extend(parse_diags);
-            continue;
-        };
-
-        let vctx = ValidationContext {
-            workspace_root,
-            spec,
-            strict_vanilla_ids: cfg.strict_vanilla_ids,
-        };
-        let (_info, val_diags) = validate_program(&prog, &vctx);
-        all_diags.extend(val_diags);
+        let (prog_opt, mut diags) = parse_source(&source, &label);
+        if let Some(prog) = &prog_opt {
+            let vctx = ValidationContext {
+                workspace_root,
+                spec,
+                strict_vanilla_ids: cfg.strict_vanilla_ids,
+            };
+            let (_info, val_diags) = validate_program(prog, &vctx);
+            diags.extend(val_diags);
+        }
+        sort_and_dedup_diags(&mut diags);
+        all_diags.extend(diags);
     }
 
+    sort_and_dedup_diags(&mut all_diags);
     Ok(all_diags)
 }
 
@@ -364,15 +391,20 @@ pub fn fmt_path(path: &Path, check_only: bool) -> Result<(usize, Vec<Diagnostic>
 
     for f in files {
         let source = fs::read_to_string(&f)
-            .map_err(|e| format!("Gagal membaca '{}': {e}", f.display()))?;
+            .map_err(|e| format!("Failed to read '{}': {e}", f.display()))?;
         let label = f.display().to_string();
+        let (_prog, parse_diags) = parse_source(&source, &label);
+        if has_errors(&parse_diags) {
+            all_diags.extend(parse_diags);
+            continue;
+        }
         match format_source(&source, &label) {
             Ok(formatted) => {
                 if formatted != source {
                     changed += 1;
                     if !check_only {
                         fs::write(&f, formatted)
-                            .map_err(|e| format!("Gagal menulis '{}': {e}", f.display()))?;
+                            .map_err(|e| format!("Failed to write '{}': {e}", f.display()))?;
                     }
                 }
             }
@@ -389,12 +421,16 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
     let scan_target = if src_dir.is_dir() { src_dir } else { root.to_path_buf() };
     let mut diags = check_path(&scan_target, Some(root), spec)?;
 
+    if cfg.strict_asset_refs {
+        diags.extend(crate::assets::validate_workspace_assets(root, spec)?);
+    }
+
     let bp_manifest = root.join("BP/manifest.json");
     let mut bp_uuid: Option<String> = None;
 
     if bp_manifest.is_file() {
         let raw = fs::read_to_string(&bp_manifest)
-            .map_err(|e| format!("Gagal membaca BP/manifest.json: {e}"))?;
+            .map_err(|e| format!("Failed to read BP/manifest.json: {e}"))?;
         match serde_json::from_str::<Value>(&raw) {
             Ok(val) => {
                 let fmt_ver = val
@@ -431,17 +467,17 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
                         diags.push(Diagnostic::error(
                             DiagnosticCode::E015,
                             &Span::file_only("BP/manifest.json"),
-                            "Audit Gate gagal: manifest format_version: 3 mewajibkan 'min_engine_version' berupa string SemVer \"1.x.x\".",
-                            "Atur \"min_engine_version\": \"1.26.60\" pada header BP/manifest.json. Angka pertama wajib 1 (contoh: \"1.26.60\").",
+                            "Audit Gate failed: manifest format_version: 3 requires 'min_engine_version' to be a SemVer string \"1.x.x\".",
+                            "Set \"min_engine_version\": \"1.26.60\" in the BP/manifest.json header. The first number must be 1 (e.g. \"1.26.60\").",
                         ));
                     } else {
                         diags.push(Diagnostic::error(
                             DiagnosticCode::E015,
                             &Span::file_only("BP/manifest.json"),
-                            "Audit Gate gagal: 'min_engine_version' harus berformat [1, x, x].",
-                            "Atur \"min_engine_version\": [1, 26, 60] pada header BP/manifest.json. \
-                             Angka pertama wajib 1, meski target game adalah 26.60 (mis. [1, 26, 60]) \
-                             atau versi lama (mis. [1, 21, 50]).",
+                            "Audit Gate failed: 'min_engine_version' must be formatted as [1, x, x].",
+                            "Set \"min_engine_version\": [1, 26, 60] in the BP/manifest.json header. \
+                             The first number must be 1, whether targeting 26.60 (e.g. [1, 26, 60]) \
+                             or legacy versions (e.g. [1, 21, 50]).",
                         ));
                     }
                 }
@@ -450,8 +486,8 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
                 diags.push(Diagnostic::error(
                     DiagnosticCode::E015,
                     &Span::file_only("BP/manifest.json"),
-                    format!("Audit Gate gagal: BP/manifest.json tidak valid ({e})."),
-                    "Perbaiki format JSON pada BP/manifest.json.",
+                    format!("Audit Gate failed: BP/manifest.json is invalid ({e})."),
+                    "Fix the JSON syntax in BP/manifest.json.",
                 ));
             }
         }
@@ -470,8 +506,8 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
                         diags.push(Diagnostic::error(
                             DiagnosticCode::E015,
                             &Span::file_only("RP/manifest.json"),
-                            format!("Audit Gate gagal: UUID header BP dan RP bentrok ('{bp}')."),
-                            "Buat UUID v4 unik untuk masing-masing header BP dan RP.",
+                            format!("Audit Gate failed: BP and RP header UUIDs collide ('{bp}')."),
+                            "Generate a unique UUID v4 for each of the BP and RP headers.",
                         ));
                     }
                 }
@@ -483,12 +519,12 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
 }
 
 pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Result<(), String> {
-    fs::create_dir_all(root.join("src")).map_err(|e| format!("Gagal membuat src/: {e}"))?;
-    fs::create_dir_all(root.join("BP/items")).map_err(|e| format!("Gagal membuat BP/items/: {e}"))?;
+    fs::create_dir_all(root.join("src")).map_err(|e| format!("Failed to create src/: {e}"))?;
+    fs::create_dir_all(root.join("BP/items")).map_err(|e| format!("Failed to create BP/items/: {e}"))?;
     fs::create_dir_all(root.join("BP/scripts/generated"))
-        .map_err(|e| format!("Gagal membuat BP/scripts/generated/: {e}"))?;
+        .map_err(|e| format!("Failed to create BP/scripts/generated/: {e}"))?;
     fs::create_dir_all(root.join("RP/models/entity"))
-        .map_err(|e| format!("Gagal membuat RP/models/entity/: {e}"))?;
+        .map_err(|e| format!("Failed to create RP/models/entity/: {e}"))?;
 
     let toml_content = format!(
         "[pack]\nname = \"{pack_name}\"\nbedrock_target = \"{}\"\nscript_api = \"{}\"\n\n\
@@ -497,7 +533,7 @@ pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Resul
         spec.bedrock_version, spec.script_api_version
     );
     fs::write(root.join("pstdr.toml"), toml_content)
-        .map_err(|e| format!("Gagal menulis pstdr.toml: {e}"))?;
+        .map_err(|e| format!("Failed to write pstdr.toml: {e}"))?;
 
     let fmt_ver = 2u64;
     let mod_ver = if fmt_ver == 3 {
@@ -541,15 +577,15 @@ pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Resul
         root.join("BP/manifest.json"),
         format!("{}\n", serde_json::to_string_pretty(&bp_manifest).unwrap()),
     )
-    .map_err(|e| format!("Gagal menulis BP/manifest.json: {e}"))?;
+    .map_err(|e| format!("Failed to write BP/manifest.json: {e}"))?;
 
     let sample_script = format!(
         "@addon(target = \"{}\", api = \"{}\")\n\n\
-         on join of player {{\n    send \"§aSelamat datang di {pack_name}!\" to player\n}}\n",
+         on join of player {{\n    send \"§aWelcome to {pack_name}!\" to player\n}}\n",
         spec.bedrock_version, spec.script_api_version
     );
     fs::write(root.join("src/welcome.pstdr"), sample_script)
-        .map_err(|e| format!("Gagal menulis src/welcome.pstdr: {e}"))?;
+        .map_err(|e| format!("Failed to write src/welcome.pstdr: {e}"))?;
 
     Ok(())
 }
@@ -557,18 +593,18 @@ pub fn init_workspace(root: &Path, pack_name: &str, spec: &BedrockSpec) -> Resul
 pub fn new_script(root: &Path, name: &str, spec: &BedrockSpec) -> Result<PathBuf, String> {
     let clean = name.trim().trim_end_matches(".pstdr");
     let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir).map_err(|e| format!("Gagal membuat src/: {e}"))?;
+    fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create src/: {e}"))?;
     let path = src_dir.join(format!("{clean}.pstdr"));
     if path.exists() {
-        return Err(format!("File '{}' sudah ada.", path.display()));
+        return Err(format!("File '{}' already exists.", path.display()));
     }
     let content = format!(
         "@addon(target = \"{}\", api = \"{}\")\n\n\
          const ITEM_ID = \"my_pack:{clean}\"\n\n\
-         on right click with ITEM_ID by player {{\n    player.actionbar(\"§bMenggunakan {clean}!\")\n}}\n",
+         on right click with ITEM_ID by player {{\n    player.actionbar(\"§bUsing {clean}!\")\n}}\n",
         spec.bedrock_version, spec.script_api_version
     );
-    fs::write(&path, content).map_err(|e| format!("Gagal menulis '{}': {e}", path.display()))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write '{}': {e}", path.display()))?;
     Ok(path)
 }
 
@@ -593,15 +629,15 @@ pub fn doctor_report(root: Option<&Path>, spec: &BedrockSpec) -> String {
             out.push_str(&format!("  Workspace root   : {}\n", r.display()));
             out.push_str(&format!(
                 "  pstdr.toml       : {}\n",
-                if r.join("pstdr.toml").is_file() { "OK" } else { "tidak ada (pakai default)" }
+                if r.join("pstdr.toml").is_file() { "OK" } else { "missing (using defaults)" }
             ));
             out.push_str(&format!(
                 "  BP/manifest.json : {}\n",
-                if r.join("BP/manifest.json").is_file() { "OK" } else { "belum dibuat" }
+                if r.join("BP/manifest.json").is_file() { "OK" } else { "not created yet" }
             ));
         }
         None => {
-            out.push_str("  Workspace root   : tidak terdeteksi (jalankan di root proyek atau pakai 'pstdr-c init')\n");
+            out.push_str("  Workspace root   : not detected (run in project root or use 'pstdr-c init')\n");
         }
     }
     out

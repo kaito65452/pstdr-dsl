@@ -9,41 +9,47 @@ pub const BUNDLED_SPEC_JSON: &str = include_str!("../../../data/spec/bedrock_api
 pub struct BedrockSpecRaw {
     pub bedrock_version: String,
     pub script_api_version: String,
-    /// `min_engine_version` resmi untuk manifest Bedrock – selalu diawali angka 1,
-    /// mis. `[1, 26, 60]` untuk target `26.60`.
+    /// Official `min_engine_version` for Bedrock manifests — always starts with 1,
+    /// e.g. `[1, 26, 60]` for target `26.60`.
     #[serde(default)]
     pub min_engine_version: Option<[u64; 3]>,
-    /// `format_version` untuk item JSON (mis. `"1.21.90"`).
+    /// `format_version` for item JSON (e.g. `"1.21.90"`).
     #[serde(default)]
     pub item_format_version: Option<String>,
-    /// `format_version` untuk block JSON (mis. `"1.21.90"`).
+    /// `format_version` for block JSON (e.g. `"1.21.90"`).
     #[serde(default)]
     pub block_format_version: Option<String>,
     pub effects: Vec<String>,
     pub sounds: Vec<String>,
+    #[serde(default)]
+    pub item_textures: Vec<String>,
+    #[serde(default)]
+    pub terrain_textures: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct BedrockSpec {
     pub bedrock_version: String,
     pub script_api_version: String,
-    /// `min_engine_version` untuk `BP/manifest.json` – selalu `[1, x, x]`.
+    /// `min_engine_version` for `BP/manifest.json` — always `[1, x, x]`.
     pub min_engine_version: [u64; 3],
-    /// `format_version` untuk item JSON.
+    /// `format_version` for item JSON.
     pub item_format_version: String,
-    /// `format_version` untuk block JSON.
+    /// `format_version` for block JSON.
     pub block_format_version: String,
     pub effects: HashSet<String>,
     pub sounds: HashSet<String>,
+    pub item_textures: HashSet<String>,
+    pub terrain_textures: HashSet<String>,
     pub source_label: String,
 }
 
 impl BedrockSpec {
     pub fn from_json_str(json: &str, source_label: impl Into<String>) -> Result<Self, String> {
         let raw: BedrockSpecRaw =
-            serde_json::from_str(json).map_err(|e| format!("Gagal mem-parse spec JSON: {e}"))?;
-        // Hitung min_engine_version: gunakan nilai eksplisit dari JSON jika ada,
-        // jika tidak, derive dari bedrock_version menggunakan aturan resmi Bedrock.
+            serde_json::from_str(json).map_err(|e| format!("Failed to parse spec JSON: {e}"))?;
+        // Compute min_engine_version: use the explicit JSON value if present,
+        // otherwise derive from bedrock_version using official Bedrock rules.
         let min_engine_version = raw.min_engine_version.unwrap_or_else(|| {
             crate::wiring::resolve_min_engine_version(&raw.bedrock_version)
                 .unwrap_or([1, 26, 60])
@@ -60,6 +66,8 @@ impl BedrockSpec {
                 .unwrap_or_else(|| "1.21.90".to_string()),
             effects: raw.effects.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             sounds: raw.sounds.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            item_textures: raw.item_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            terrain_textures: raw.terrain_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             source_label: source_label.into(),
         })
     }
@@ -72,14 +80,14 @@ impl BedrockSpec {
     pub fn load(custom_spec: Option<&Path>, workspace_root: Option<&Path>) -> Result<Self, String> {
         if let Some(p) = custom_spec {
             let text = fs::read_to_string(p)
-                .map_err(|e| format!("Gagal membaca spec '{}': {e}", p.display()))?;
+                .map_err(|e| format!("Failed to read spec '{}': {e}", p.display()))?;
             return Self::from_json_str(&text, p.display().to_string());
         }
         if let Some(root) = workspace_root {
             let local = root.join("data/spec/bedrock_api_latest.json");
             if local.is_file() {
                 let text = fs::read_to_string(&local)
-                    .map_err(|e| format!("Gagal membaca spec '{}': {e}", local.display()))?;
+                    .map_err(|e| format!("Failed to read spec '{}': {e}", local.display()))?;
                 return Self::from_json_str(&text, local.display().to_string());
             }
         }
@@ -103,10 +111,28 @@ impl BedrockSpec {
             .to_ascii_lowercase();
         self.sounds.contains(&norm)
     }
+
+    pub fn is_valid_vanilla_item_texture(&self, alias: &str) -> bool {
+        let norm = alias
+            .trim()
+            .strip_prefix("minecraft:")
+            .unwrap_or(alias.trim())
+            .to_ascii_lowercase();
+        self.item_textures.contains(&norm)
+    }
+
+    pub fn is_valid_vanilla_terrain_texture(&self, alias: &str) -> bool {
+        let norm = alias
+            .trim()
+            .strip_prefix("minecraft:")
+            .unwrap_or(alias.trim())
+            .to_ascii_lowercase();
+        self.terrain_textures.contains(&norm)
+    }
 }
 
-/// Pemetaan terpusat properti snake_case .pstdr -> API @minecraft/server.
-/// Properti di luar tabel ini diteruskan apa adanya (pass-through).
+/// Centralized mapping of snake_case .pstdr properties -> @minecraft/server API.
+/// Properties outside this table are passed through as-is.
 pub fn map_property(field: &str) -> Option<&'static str> {
     match field {
         "name_tag" => Some("nameTag"),
@@ -133,7 +159,7 @@ pub fn map_property(field: &str) -> Option<&'static str> {
     }
 }
 
-/// Pemetaan properti pada ItemStack (mis. hasil dari `player.mainhand?.id`).
+/// Property mapping on ItemStack (e.g. from `player.mainhand?.id`).
 pub fn map_item_property(field: &str) -> Option<&'static str> {
     match field {
         "id" | "type_id" => Some("typeId"),
@@ -142,7 +168,7 @@ pub fn map_item_property(field: &str) -> Option<&'static str> {
     }
 }
 
-/// Pemetaan method snake_case pada entitas/pemain -> @minecraft/server.
+/// Mapping of snake_case methods on entities/players -> @minecraft/server.
 pub fn map_method(method: &str) -> Option<&'static str> {
     match method {
         "actionbar" => Some("onScreenDisplay.setActionBar"),
@@ -166,7 +192,7 @@ pub fn map_method(method: &str) -> Option<&'static str> {
     }
 }
 
-/// Pemetaan method pada objek global `world`.
+/// Method mapping on the global `world` object.
 pub fn map_world_method(method: &str) -> Option<&'static str> {
     match method {
         "players" => Some("getAllPlayers"),

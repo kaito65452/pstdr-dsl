@@ -38,7 +38,7 @@ enum EventCtx {
 impl EventCtx {
     fn label(&self) -> &'static str {
         match self {
-            Self::TopLevel => "level atas",
+            Self::TopLevel => "top level",
             Self::Func => "func",
             Self::RightClick => "on right click",
             Self::HitTarget => "on hit",
@@ -162,8 +162,8 @@ impl<'a> Validator<'a> {
                 self.diagnostics.push(Diagnostic::error(
                     DiagnosticCode::E009,
                     &bt.span,
-                    format!("Path traversal tidak diizinkan pada bind_target('{}').", bt.path),
-                    "Hapus '..' atau path absolut; gunakan hanya path relatif dari root workspace.",
+                    format!("Path traversal is not allowed in bind_target('{}').", bt.path),
+                    "Remove '..' or absolute paths; use only paths relative to the workspace root.",
                 ));
                 continue;
             }
@@ -177,8 +177,8 @@ impl<'a> Validator<'a> {
                 self.diagnostics.push(Diagnostic::error(
                     DiagnosticCode::E007,
                     &bt.span,
-                    format!("File target '{}' pada bind_target() tidak ditemukan.", bt.path),
-                    "Periksa ejaan path relatif dari root proyek dan pastikan file tersebut ada.",
+                    format!("Target file '{}' in bind_target() not found.", bt.path),
+                    "Check the spelling of the relative path from the project root and ensure the file exists.",
                 ));
                 continue;
             }
@@ -190,8 +190,8 @@ impl<'a> Validator<'a> {
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::E009,
                         &bt.span,
-                        format!("Path traversal tidak diizinkan pada bind_target('{}').", bt.path),
-                        "Target harus berada di dalam folder root workspace proyek.",
+                        format!("Path traversal is not allowed in bind_target('{}').", bt.path),
+                        "Target must reside inside the project workspace root directory.",
                     ));
                     continue;
                 }
@@ -272,7 +272,7 @@ impl<'a> Validator<'a> {
                     self.event_ctx = prev_ctx;
                 }
                 TopLevelItem::UnsafeFuncDecl(_) | TopLevelItem::UnsafeVarDecl(_) => {
-                    // Isi `unsafe` diisolasi dan tidak dibatasi pemeriksa tipe/kata .pstdr.
+                    // `unsafe` contents are isolated and exempt from .pstdr type/keyword checks.
                 }
                 TopLevelItem::EventHandler(ev) => {
                     self.validate_event_handler(ev);
@@ -363,10 +363,10 @@ impl<'a> Validator<'a> {
                     DiagnosticCode::E008,
                     span,
                     format!(
-                        "Identifier tidak cocok: '{path}' memakai '{id_json}', skrip memakai '{id_code}'."
+                        "Identifier mismatch: '{path}' uses '{id_json}', script uses '{id_code}'."
                     ),
                     format!(
-                        "Samakan \"identifier\" di '{path}' dengan ID item '{id_code}' pada skrip .pstdr."
+                        "Match \"identifier\" in '{path}' with item ID '{id_code}' in your .pstdr script."
                     ),
                 ));
             }
@@ -384,10 +384,10 @@ impl<'a> Validator<'a> {
                     DiagnosticCode::E008,
                     span,
                     format!(
-                        "Identifier tidak cocok: '{path}' memakai '{id_json}', skrip memakai '{id_code}'."
+                        "Identifier mismatch: '{path}' uses '{id_json}', script uses '{id_code}'."
                     ),
                     format!(
-                        "Samakan \"identifier\" di '{path}' dengan ID blok '{id_code}' pada skrip .pstdr."
+                        "Match \"identifier\" in '{path}' with block ID '{id_code}' in your .pstdr script."
                     ),
                 ));
             }
@@ -399,8 +399,8 @@ impl<'a> Validator<'a> {
             self.diagnostics.push(Diagnostic::error(
                 DiagnosticCode::E010,
                 &duration.span,
-                "Interval 'every' harus minimal 1 tick (50ms / 0.05s).",
-                "Naikkan interval menjadi minimal '50ms' atau '1s' untuk mencegah tick loop Bedrock membeku.",
+                "'every' interval must be at least 1 tick (50ms / 0.05s).",
+                "Increase the interval to at least '50ms' or '1s' to prevent freezing the Bedrock tick loop.",
             ));
         }
     }
@@ -429,9 +429,9 @@ impl<'a> Validator<'a> {
                             self.diagnostics.push(Diagnostic::error(
                                 DiagnosticCode::E002,
                                 span,
-                                format!("Tidak dapat mengubah variabel konstan '{name}'."),
+                                format!("Cannot reassign constant variable '{name}'."),
                                 format!(
-                                    "Ubah deklarasi di baris {} menjadi 'mut {name} = ...' jika nilainya perlu diubah.",
+                                    "Change the declaration on line {} to 'mut {name} = ...' if its value needs to change.",
                                     info.decl_line
                                 ),
                             ));
@@ -509,10 +509,10 @@ impl<'a> Validator<'a> {
                         DiagnosticCode::E004,
                         span,
                         format!(
-                            "'cancel event' tidak valid di dalam blok '{}'.",
+                            "'cancel event' is not valid inside '{}' block.",
                             self.event_ctx.label()
                         ),
-                        "Pindahkan 'cancel event' ke dalam 'on right click' atau 'on break'.",
+                        "Move 'cancel event' into an 'on right click' or 'on break' block.",
                     ));
                 }
             }
@@ -539,10 +539,10 @@ impl<'a> Validator<'a> {
                             DiagnosticCode::E011,
                             level.span(),
                             format!(
-                                "Level efek '{effect}' harus bernilai >= 1 (ditemukan: {}).",
+                                "Effect '{effect}' level must be >= 1 (found: {}).",
                                 format_num(lvl_val)
                             ),
-                            "Gunakan level berbasis manusia mulai dari 1 (Level I).",
+                            "Use human-readable 1-based levels starting at 1 (Level I).",
                         ));
                     }
                 }
@@ -552,9 +552,9 @@ impl<'a> Validator<'a> {
                         DiagnosticCode::E013,
                         effect_span,
                         format!(
-                            "ID efek/suara vanilla '{effect}' tidak ditemukan di spesifikasi Bedrock terbaru."
+                            "Vanilla effect/sound ID '{effect}' not found in the latest Bedrock specification."
                         ),
-                        "Periksa ejaan nama efek (mengacu pada data/spec/bedrock_api_latest.json).",
+                        "Check the spelling of the effect name (refer to data/spec/bedrock_api_latest.json).",
                     ));
                 }
             }
@@ -624,7 +624,7 @@ impl<'a> Validator<'a> {
                 self.validate_expr(object);
             }
             Expr::Call { callee, args, .. } => {
-                // Cek vanilla sound ID pada play_sound("...") / playSound("...")
+                // Check vanilla sound ID in play_sound("...") / playSound("...")
                 if let Expr::Member { field, .. } = callee.as_ref() {
                     if (field == "play_sound" || field == "playSound") && self.ctx.strict_vanilla_ids
                     {
@@ -635,9 +635,9 @@ impl<'a> Validator<'a> {
                                         DiagnosticCode::E013,
                                         first_arg.span(),
                                         format!(
-                                            "ID efek/suara vanilla '{snd}' tidak ditemukan di spesifikasi Bedrock terbaru."
+                                            "Vanilla effect/sound ID '{snd}' not found in the latest Bedrock specification."
                                         ),
-                                        "Periksa ejaan nama suara pada data/spec/bedrock_api_latest.json.",
+                                        "Check the spelling of the sound name in data/spec/bedrock_api_latest.json.",
                                     ));
                                 }
                             }
@@ -679,15 +679,15 @@ impl<'a> Validator<'a> {
 
     fn emit_missing_scope_error(&mut self, name: &str, span: &Span) {
         let hint = if self.event_ctx == EventCtx::Timer && name == "player" {
-            "Di dalam blok 'every'/'after', lakukan iterasi: for p in world.players() { ... }."
+            "Inside 'every'/'after' blocks, iterate over players: for p in world.players() { ... }."
         } else {
-            "Pastikan variabel sudah dideklarasikan dengan const/mut atau tersedia pada event ini."
+            "Ensure the variable is declared with const/mut or is available in this event scope."
         };
         self.diagnostics.push(Diagnostic::error(
             DiagnosticCode::E005,
             span,
             format!(
-                "Variabel konteks '{name}' tidak tersedia di dalam '{}'.",
+                "Context variable '{name}' is not available inside '{}'.",
                 self.event_ctx.label()
             ),
             hint,

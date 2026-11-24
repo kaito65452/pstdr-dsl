@@ -26,6 +26,7 @@ pub enum DiagnosticCode {
     E014,
     E015,
     E016,
+    E017,
 }
 
 impl DiagnosticCode {
@@ -47,6 +48,7 @@ impl DiagnosticCode {
             Self::E014 => "PSTDR-E014",
             Self::E015 => "PSTDR-E015",
             Self::E016 => "PSTDR-E016",
+            Self::E017 => "PSTDR-E017",
         }
     }
 }
@@ -146,7 +148,7 @@ pub fn format_diagnostics_pretty(diags: &[Diagnostic]) -> String {
             Severity::Warning => "warning",
         };
         out.push_str(&format!(
-            "{}[{}]: {}\n  --> {}:{}:{}\n  solusi: {}\n\n",
+            "{}[{}]: {}\n  --> {}:{}:{}\n  help: {}\n\n",
             sev, d.code, d.message, d.file, d.line, d.column, d.solution
         ));
     }
@@ -161,7 +163,7 @@ pub fn format_diagnostics_compact(diags: &[Diagnostic]) -> String {
             Severity::Warning => "WARN",
         };
         out.push_str(&format!(
-            "{}:{}:{}: {} [{}] {} (Solusi: {})\n",
+            "{}:{}:{}: {} [{}] {} (Help: {})\n",
             d.file, d.line, d.column, sev, d.code, d.message, d.solution
         ));
     }
@@ -173,98 +175,106 @@ pub fn explain_code(raw_code: &str) -> Option<&'static str> {
     let code = norm.strip_prefix("PSTDR-").unwrap_or(&norm);
     match code {
         "E001" => Some(
-            "PSTDR-E001: Kata kunci atau simbol paradigma asing di mode aman.\n\
-             Penyebab: Menggunakan 'class', 'extends', 'super', 'new', 'this', 'constructor', 'var', 'let', 'function', 'nil', '~=', '..', 'then', 'end', 'import', 'export', 'require', atau 'eval' di luar blok/deklarasi 'unsafe'.\n\
-             Salah : let dmg = 5\n\
-             Benar : mut dmg = 5",
+            "PSTDR-E001: Foreign-paradigm keyword or symbol in safe mode.\n\
+             Cause: Using 'class', 'extends', 'super', 'new', 'this', 'constructor', 'var', 'let', 'function', 'nil', '~=', '..', 'then', 'end', 'import', 'export', 'require', or 'eval' outside an 'unsafe' block/declaration.\n\
+             Wrong : let dmg = 5\n\
+             Right : mut dmg = 5",
         ),
         "E002" => Some(
-            "PSTDR-E002: Tidak dapat mengubah variabel konstan ('const').\n\
-             Penyebab: Melakukan assignment (=, +=, -=, *=, /=) ke variabel yang dideklarasikan dengan 'const'.\n\
-             Salah : const hp = 10\n        hp = 5\n\
-             Benar : mut hp = 10\n        hp = 5",
+            "PSTDR-E002: Cannot reassign constant ('const') variable.\n\
+             Cause: Performing assignment (=, +=, -=, *=, /=) on a variable declared with 'const'.\n\
+             Wrong : const hp = 10\n        hp = 5\n\
+             Right : mut hp = 10\n        hp = 5",
         ),
         "E003" => Some(
-            "PSTDR-E003: Reserved keyword dipakai sebagai identifier.\n\
-             Penyebab: Memakai kata cadangan .pstdr (const, mut, state, func, on, if, apply, dll.) sebagai nama variabel, parameter, atau fungsi.\n\
-             Salah : const if = 1\n\
-             Benar : const kondisi = 1",
+            "PSTDR-E003: Reserved keyword used as an identifier.\n\
+             Cause: Using a reserved .pstdr keyword (const, mut, state, func, on, if, apply, etc.) as a variable, parameter, or function name.\n\
+             Wrong : const if = 1\n\
+             Right : const condition = 1",
         ),
         "E004" => Some(
-            "PSTDR-E004: 'cancel event' di konteks non-cancellable.\n\
-             Penyebab: Menulis 'cancel event' di dalam 'func', 'after', 'every', 'on hit', atau 'on join'.\n\
-             Salah : every 1s { cancel event }\n\
-             Benar : on break of \"minecraft:stone\" by player { cancel event }",
+            "PSTDR-E004: 'cancel event' used in a non-cancellable context.\n\
+             Cause: Writing 'cancel event' inside 'func', 'after', 'every', 'on hit', or 'on join'.\n\
+             Wrong : every 1s { cancel event }\n\
+             Right : on break of \"minecraft:stone\" by player { cancel event }",
         ),
         "E005" => Some(
-            "PSTDR-E005: Variabel konteks tidak tersedia di scope ini.\n\
-             Penyebab: Mengakses 'player' di dalam 'every 1s { ... }', atau 'target' di dalam 'on right click'.\n\
-             Salah : every 1s { send \"hi\" to player }\n\
-             Benar : every 1s { for p in world.players() { send \"hi\" to p } }",
+            "PSTDR-E005: Context variable is not available in this scope.\n\
+             Cause: Accessing 'player' inside 'every 1s { ... }', or 'target' inside 'on right click'.\n\
+             Wrong : every 1s { send \"hi\" to player }\n\
+             Right : every 1s { for p in world.players() { send \"hi\" to p } }",
         ),
         "E006" => Some(
-            "PSTDR-E006: 'unsafe' tidak boleh dipakai sebagai nilai ekspresi.\n\
-             Penyebab: Menulis misalnya 'const x = unsafe { 1 }'.\n\
-             Salah : const x = unsafe { 1 }\n\
-             Benar : unsafe get_raw() { return 1; }",
+            "PSTDR-E006: 'unsafe' cannot be used as an expression value.\n\
+             Cause: Writing e.g. 'const x = unsafe { 1 }'.\n\
+             Wrong : const x = unsafe { 1 }\n\
+             Right : unsafe get_raw() { return 1; }",
         ),
         "E007" => Some(
-            "PSTDR-E007: File target pada bind_target() tidak ditemukan.\n\
-             Penyebab: Path relatif dari root proyek tidak ada di disk.\n\
-             Benar : Pastikan file ada di Explorer, mis. bind_target(\"BP/items/frost_blade.json\")",
+            "PSTDR-E007: Target file in bind_target() not found.\n\
+             Cause: The relative path from the project root does not exist on disk.\n\
+             Right : Make sure the file exists, e.g. bind_target(\"BP/items/frost_blade.json\")",
         ),
         "E008" => Some(
-            "PSTDR-E008: Ketidakcocokan identifier antara file JSON target dan skrip .pstdr.\n\
-             Penyebab: Nilai \"identifier\" di BP/items/*.json atau BP/blocks/*.json berbeda dengan ID item/blok di skrip.\n\
-             Benar : Samakan \"identifier\" JSON dengan konstanta/string di event .pstdr.",
+            "PSTDR-E008: Identifier mismatch between target JSON file and .pstdr script.\n\
+             Cause: The \"identifier\" value in BP/items/*.json or BP/blocks/*.json differs from the item/block ID used in the script.\n\
+             Right : Match the JSON \"identifier\" with the constant/string in your .pstdr event handler.",
         ),
         "E009" => Some(
-            "PSTDR-E009: Path traversal atau path absolut pada bind_target().\n\
-             Penyebab: Path mengandung '..' atau diawali '/' / huruf drive.\n\
-             Salah : bind_target(\"../secret.json\")\n\
-             Benar : bind_target(\"BP/items/frost_blade.json\")",
+            "PSTDR-E009: Path traversal or absolute path in bind_target().\n\
+             Cause: Path contains '..' or starts with '/' / a drive letter.\n\
+             Wrong : bind_target(\"../secret.json\")\n\
+             Right : bind_target(\"BP/items/frost_blade.json\")",
         ),
         "E010" => Some(
-            "PSTDR-E010: Interval 'every' terlalu kecil (< 1 tick / 50ms).\n\
-             Penyebab: 'every 0s' atau 'every 10ms' dapat membekukan tick loop Bedrock.\n\
-             Salah : every 0s { ... }\n\
-             Benar : every 50ms { ... } atau every 1s { ... }",
+            "PSTDR-E010: 'every' interval is too small (< 1 tick / 50ms).\n\
+             Cause: 'every 0s' or 'every 10ms' can freeze the Bedrock tick loop.\n\
+             Wrong : every 0s { ... }\n\
+             Right : every 50ms { ... } or every 1s { ... }",
         ),
         "E011" => Some(
-            "PSTDR-E011: Level efek status harus >= 1.\n\
-             Penyebab: Level efek di .pstdr berbasis manusia mulai dari 1 (compiler otomatis mengurangi 1 untuk amplifier Bedrock).\n\
-             Salah : apply speed 0 to player for 3s\n\
-             Benar : apply speed 1 to player for 3s",
+            "PSTDR-E011: Status effect level must be >= 1.\n\
+             Cause: Effect levels in .pstdr are 1-based for readability (the compiler automatically subtracts 1 for Bedrock's amplifier).\n\
+             Wrong : apply speed 0 to player for 3s\n\
+             Right : apply speed 1 to player for 3s",
         ),
         "E012" => Some(
-            "PSTDR-E012: Kurung kurawal '{' tidak memiliki penutup '}'.\n\
-             Penyebab: Blok fungsi, event, atau blok 'unsafe' belum ditutup dengan '}'.\n\
-             Benar : Pastikan setiap '{' berpasangan dengan '}' yang sesuai.",
+            "PSTDR-E012: Opening brace '{' has no matching closing brace '}'.\n\
+             Cause: A function, event, or 'unsafe' block was not closed with '}'.\n\
+             Right : Ensure every '{' has a matching '}'.",
         ),
         "E013" => Some(
-            "PSTDR-E013: ID efek/suara vanilla tidak ditemukan di spesifikasi Bedrock terbaru.\n\
-             Penyebab: Salah ketik nama efek pada 'apply' atau suara vanilla pada 'play_sound'.\n\
-             Salah : apply slownes 2 to target for 3s\n\
-             Benar : apply slowness 2 to target for 3s",
+            "PSTDR-E013: Vanilla effect/sound ID not found in the latest Bedrock specification.\n\
+             Cause: Typo in effect name in 'apply' or vanilla sound name in 'play_sound'.\n\
+             Wrong : apply slownes 2 to target for 3s\n\
+             Right : apply slowness 2 to target for 3s",
         ),
         "E014" => Some(
-            "PSTDR-E014: Workspace PackStudio tidak terdeteksi.\n\
-             Penyebab: Folder 'BP/' maupun 'pstdr.toml' tidak ditemukan di direktori aktif.\n\
-             Benar : Jalankan di root proyek Add-On atau gunakan 'pstdr-c convert --from <file> to <out>'.",
+            "PSTDR-E014: PackStudio workspace not detected.\n\
+             Cause: Neither 'BP/' nor 'pstdr.toml' was found in the current directory.\n\
+             Right : Run inside the Add-On project root or use 'pstdr-c convert --from <file> to <out>'.",
         ),
         "E015" => Some(
-            "PSTDR-E015: Audit Gate gagal.\n\
-             Penyebab: 'min_engine_version' tidak berformat [1, x, x], UUID BP/RP bentrok, atau entri terlarang ditemukan.\n\
-             Aturan Resmi: Elemen pertama min_engine_version WAJIB bernilai 1 untuk semua versi Bedrock,\n\
-             termasuk Bedrock 26.60 (pakai [1, 26, 60]) maupun versi lama (mis. [1, 21, 50]).\n\
-             Format [26, 60, 0] TIDAK VALID — angka pertama selalu 1.\n\
-             Benar : Perbaiki BP/manifest.json agar memiliki \"min_engine_version\": [1, 26, 60] (target 26.60)\n\
-                     atau [1, 21, 50] (target 1.21.50 / lama).",
+            "PSTDR-E015: Audit Gate failed.\n\
+             Cause: 'min_engine_version' is not formatted as [1, x, x] (or \"1.x.x\" for v3), BP/RP UUIDs collide, or a forbidden entry was found.\n\
+             Official Rule: The first element of min_engine_version MUST be 1 for all Bedrock versions,\n\
+             including Bedrock 26.60 (use [1, 26, 60]) as well as older versions (e.g. [1, 21, 50]).\n\
+             Format [26, 60, 0] is INVALID — the first number is always 1.\n\
+             Right : Update BP/manifest.json to have \"min_engine_version\": [1, 26, 60] (for 26.60)\n\
+                     or [1, 21, 50] (for 1.21.50 / legacy).",
         ),
         "E016" => Some(
-            "PSTDR-E016: Kesalahan sintaks umum.\n\
-             Penyebab: Token tidak terduga, tanda kutip belum ditutup, atau struktur kalimat .pstdr belum lengkap.\n\
-             Benar : Periksa baris yang ditandai dan sesuaikan dengan tata bahasa .pstdr.",
+            "PSTDR-E016: General syntax error.\n\
+             Cause: Unexpected token, unclosed quote, or incomplete .pstdr statement structure.\n\
+             Right : Check the highlighted line and fix it to match .pstdr grammar.",
+        ),
+        "E017" => Some(
+            "PSTDR-E017: Invalid texture reference or missing image file.\n\
+             Cause: An item/block JSON file in BP references a custom texture alias without a Resource Pack (RP/),\n\
+             the alias is not registered in RP/textures/item_texture.json or terrain_texture.json,\n\
+             or the physical image file (.png/.tga) is missing inside RP/.\n\
+             Forbidden formats: alias cannot be empty, end with .png/.tga/.jpg, or contain paths ('/', '\\') or namespaces (':').\n\
+             Right : Create RP/textures/item_texture.json along with the corresponding image file, or use a valid vanilla alias (e.g. 'snowball', 'diamond').",
         ),
         _ => None,
     }

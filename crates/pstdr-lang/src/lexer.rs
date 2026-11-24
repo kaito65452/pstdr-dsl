@@ -198,8 +198,8 @@ pub fn tokenize_with_offset(
                 diags.push(Diagnostic::error(
                     DiagnosticCode::E016,
                     &Span::new(file, s_line, s_col, s_col + 2),
-                    "Komentar blok '/*' tidak ditutup.",
-                    "Tambahkan '*/' untuk menutup komentar blok.",
+                    "Unclosed block comment '/*'.",
+                    "Add '*/' to close the block comment.",
                 ));
             }
             continue;
@@ -264,8 +264,8 @@ pub fn tokenize_with_offset(
                 diags.push(Diagnostic::error(
                     DiagnosticCode::E016,
                     &Span::new(file, tok_line, tok_col, tok_col),
-                    "String literal '\"' tidak ditutup.",
-                    "Tambahkan tanda kutip penutup '\"' pada baris yang sama.",
+                    "Unclosed string literal '\"'.",
+                    "Add a closing '\"' quote on the same line.",
                 ));
             }
             continue;
@@ -338,8 +338,8 @@ pub fn tokenize_with_offset(
                     diags.push(Diagnostic::error(
                         DiagnosticCode::E016,
                         &Span::new(file, tok_line, tok_col, col.saturating_sub(1)),
-                        format!("Angka tidak valid '{num_str}'."),
-                        "Gunakan format angka desimal standar, mis. 5 atau 1.5.",
+                        format!("Invalid number '{num_str}'."),
+                        "Use standard decimal number format, e.g. 5 or 1.5.",
                     ));
                     continue;
                 }
@@ -378,8 +378,8 @@ pub fn tokenize_with_offset(
                     diags.push(Diagnostic::error(
                         DiagnosticCode::E016,
                         &Span::new(file, tok_line, tok_col, col.saturating_sub(1)),
-                        format!("Akhiran satuan tidak dikenal '{other}' pada '{num_str}{other}'."),
-                        "Gunakan satuan waktu (ms, s, m) atau jarak (b, blocks).",
+                        format!("Unknown unit suffix '{other}' on '{num_str}{other}'."),
+                        "Use time units (ms, s, m) or distance units (b, blocks).",
                     ));
                     continue;
                 }

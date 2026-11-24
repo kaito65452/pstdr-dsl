@@ -1,12 +1,15 @@
 use crate::ast::*;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{has_errors, Diagnostic};
 use crate::parser::parse_source;
 
-/// Memformat kode sumber `.pstdr` secara deterministik dan idempoten.
-/// Jika kode memiliki error sintaks (termasuk kurung `}` yang belum ditutup),
-/// formatter menolak memodifikasi file dan mengembalikan daftar diagnostik.
+/// Deterministically and idempotently formats `.pstdr` source code.
+/// If the source contains syntax errors (including unclosed `}` braces),
+/// the formatter refuses to modify the file and returns the list of diagnostics.
 pub fn format_source(source: &str, file: &str) -> Result<String, Vec<Diagnostic>> {
     let (program, diags) = parse_source(source, file);
+    if has_errors(&diags) {
+        return Err(diags);
+    }
     let Some(prog) = program else {
         return Err(diags);
     };
