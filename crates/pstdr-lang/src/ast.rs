@@ -106,6 +106,13 @@ pub enum EventKind {
     PlayerJoin {
         actor_var: String,
     },
+    PlayerLeave {
+        actor_var: String,
+    },
+    ChatSend {
+        msg_var: String,
+        actor_var: String,
+    },
     Hurt {
         target_var: String,
         attacker_var: Option<String>,

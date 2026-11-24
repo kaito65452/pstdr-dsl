@@ -176,6 +176,8 @@ world.afterEvents.entityHitEntity.subscribe((ev) => {
 - `func name(p1, p2) { ... }` declares a validated `.pstdr` function.
 - `unsafe name(p1, p2) { ... }` or `unsafe const/mut/var/let x = ...;` isolates raw JavaScript/TypeScript at the top level. `unsafe` cannot be used inside blocks or as an expression (`PSTDR-E006`).
 
+> **What `unsafe` bypasses:** Code inside an `unsafe` declaration is emitted verbatim as raw JavaScript/TypeScript, intentionally bypassing `.pstdr` static checks such as vanilla effect/sound ID validation (`PSTDR-E013`) and automatic `beforeEvents` `system.run(...)` wrapping. Keep `unsafe` helpers small, single-purpose, and declared at the top level so the rest of your add-on stays protected by safe-mode guarantees.
+
 ### Example
 ```pstdr
 func boost(p) {

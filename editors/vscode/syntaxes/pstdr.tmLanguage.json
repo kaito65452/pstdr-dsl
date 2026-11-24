@@ -142,7 +142,7 @@
         },
         {
           "name": "keyword.control.event.pstdr",
-          "match": "\\b(on|join|right|click|hit|break|hurt|die|consume|interact|tick|projectile|spawn|of|with|by|type)\\b"
+          "match": "\\b(on|join|leave|chat|right|click|hit|break|hurt|die|consume|interact|tick|projectile|spawn|of|with|by|type)\\b"
         },
         {
           "name": "support.function.action.pstdr",

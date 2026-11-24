@@ -35,6 +35,34 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
                 )));
             }
         }
+        match word {
+            "give_item" => {
+                return Some(mk_hover(
+                    "**Safe ItemStack Helper**\n\n`.give_item(item_id, amount?, name_tag?)` → `__pstdr_give_item(entity, itemId, amount = 1, nameTag = null)`\n\nConstructs `new ItemStack(...)` safely and inserts it into `minecraft:inventory` (auto-imports `ItemStack`).".to_string(),
+                ));
+            }
+            "spawn_item" => {
+                return Some(mk_hover(
+                    "**Safe ItemStack Helper**\n\n`.spawn_item(item_id, loc_or_entity, amount?)` → `__pstdr_spawn_item(dim, itemId, loc, amount = 1)`\n\nConstructs `new ItemStack(...)` when given a string ID and spawns it in the dimension (auto-imports `ItemStack`).".to_string(),
+                ));
+            }
+            "get_score" => {
+                return Some(mk_hover(
+                    "**Scoreboard Helper**\n\n`.get_score(objective)` → `__pstdr_get_score(target, objective)`\n\nReturns the participant's score as a `number`, defaulting to `0` if the objective or participant does not exist.".to_string(),
+                ));
+            }
+            "set_score" => {
+                return Some(mk_hover(
+                    "**Scoreboard Helper**\n\n`.set_score(objective, value)` → `__pstdr_set_score(target, objective, value)`\n\nSets the participant's score, automatically creating the objective if missing.".to_string(),
+                ));
+            }
+            "add_score" => {
+                return Some(mk_hover(
+                    "**Scoreboard Helper**\n\n`.add_score(objective, delta)` → `__pstdr_add_score(target, objective, delta)`\n\nAdds `delta` to the participant's score, automatically creating the objective if missing.".to_string(),
+                ));
+            }
+            _ => {}
+        }
         if let Some(mapped) = map_method(word) {
             return Some(mk_hover(format!(
                 "**Bedrock Method Helper**\n\n`.{word}(...)` → `.{mapped}(...)`"
@@ -65,7 +93,7 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
     // 4. Core DSL keywords
     let kw_doc = match word {
         "apply" => Some("**`apply <effect> <level> to <target> for <duration>`**\n\nApplies a status effect using 1-based levels (automatically converted to Bedrock 0-based `amplifier`)."),
-        "cancel" => Some("**`cancel event`**\n\nValid inside `on right click`, `on break`, and `on interact`. Automatically switches to `beforeEvents` and schedules mutations in `system.run(...)`."),
+        "cancel" => Some("**`cancel event`**\n\nValid inside `on right click`, `on break`, `on interact`, and `on chat`. Automatically switches to `beforeEvents` and schedules mutations in `system.run(...)`."),
         "every" => Some("**`every <duration> { ... }`**\n\nCompiles to `system.runInterval(..., ticks)`. Minimum interval is `50ms` (`1` tick)."),
         "after" => Some("**`after <duration> { ... }`**\n\nCompiles to `system.runTimeout(..., ticks)`."),
         "unsafe" => Some("**`unsafe`**\n\nIsolates raw JavaScript inside a `.pstdr` file without DSL keyword restrictions."),

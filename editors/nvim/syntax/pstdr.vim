@@ -22,7 +22,7 @@ syntax keyword pstdrBoolean true false
 syntax keyword pstdrConstant null
 
 " Events, Timers & Actions (Wave 1 + Wave 2)
-syntax keyword pstdrEvent on join right click hit break hurt die consume interact tick projectile spawn
+syntax keyword pstdrEvent on join leave chat right click hit break hurt die consume interact tick projectile spawn
 syntax keyword pstdrEvent of with by type
 syntax keyword pstdrTimer after every
 syntax keyword pstdrAction cancel event damage ignite apply to send particle at

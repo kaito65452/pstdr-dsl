@@ -193,6 +193,8 @@ mod tests {
         let top = completion::complete_at("", 0, 0, &spec);
         for ev in [
             "on join",
+            "on leave",
+            "on chat",
             "on hurt",
             "on die",
             "on consume",
@@ -205,6 +207,14 @@ mod tests {
             assert!(
                 top.iter().any(|i| i.label == ev),
                 "Missing top-level completion for '{ev}'"
+            );
+        }
+
+        let dot = completion::complete_at("player.", 0, 7, &spec);
+        for helper in ["give_item", "spawn_item", "get_score", "set_score", "add_score"] {
+            assert!(
+                dot.iter().any(|i| i.label == helper),
+                "Missing member completion for '{helper}'"
             );
         }
     }
@@ -232,6 +242,23 @@ mod tests {
         let h_state = hover::hover_at(src, 2, 5).expect("state hover");
         if let HoverContents::Markup(MarkupContent { value, .. }) = h_state.contents {
             assert!(value.contains("getDynamicProperty(\"pstdr:mana\")"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+
+        // give_item and scoreboard helper hovers
+        let h_give = hover::hover_at("player.give_item(\"minecraft:stick\")", 0, 10)
+            .expect("give_item hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_give.contents {
+            assert!(value.contains("__pstdr_give_item"), "got: {value}");
+        } else {
+            panic!("expected markup hover");
+        }
+
+        let h_score = hover::hover_at("player.get_score(\"kills\")", 0, 10)
+            .expect("get_score hover");
+        if let HoverContents::Markup(MarkupContent { value, .. }) = h_score.contents {
+            assert!(value.contains("__pstdr_get_score"), "got: {value}");
         } else {
             panic!("expected markup hover");
         }

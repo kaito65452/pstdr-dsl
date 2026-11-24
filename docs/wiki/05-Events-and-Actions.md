@@ -5,6 +5,8 @@
 | Event | Syntax | Scope Variables | Bedrock Bus / Component |
 | :--- | :--- | :--- | :--- |
 | **Player Join** | `on join of <actor> { ... }` | `<actor>` | `world.afterEvents.playerSpawn` (`ev.initialSpawn`) |
+| **Player Leave** | `on leave of <actor> { ... }` | `<actor>` | `world.beforeEvents.playerLeave` (auto `system.run` for mutations) |
+| **Chat Send** | `on chat <msg> by <actor> { ... }` | `<msg>`, `<actor>` | `world.beforeEvents.chatSend` (cancellable, auto `system.run` for mutations) |
 | **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
 | **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` (or item component `onHitEntity`) |
 | **Consume Item** | `on consume <item> by <actor> { ... }` | `<actor>` | `world.afterEvents.itemCompleteUse` (or item component `onConsume`) |
@@ -16,7 +18,7 @@
 | **Projectile Hit** | `on projectile hit <victim> [with <proj_id>] [by <shooter>] { ... }` | `<victim>`, `[<shooter>]`, `projectile` | `world.afterEvents.projectileHitEntity` |
 | **Entity Spawn** | `on spawn of <entity> [type <type_id>] { ... }` | `<entity>` | `world.afterEvents.entitySpawn` |
 
-> **Automatic `beforeEvents` Scheduling:** When `on right click`, `on break`, or `on interact` contains `cancel event`, `pstdr-c` subscribes to `beforeEvents` and automatically wraps world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `state` writes, expression statements) in `system.run(() => { ... })`.
+> **Automatic `beforeEvents` Read-Only Safety:** `on leave` and `on chat` always subscribe to `world.beforeEvents` (as do `on right click`, `on break`, and `on interact` when they contain `cancel event`). Because Bedrock 2.11.0 executes `beforeEvents` in read-only mode, `pstdr-c` keeps `ev.cancel = true`, `const`/`mut` bindings, and read-only checks (such as `.get_score(...)`, `player.name`, and tags) synchronous while automatically wrapping world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `state` writes, `give_item`, `set_score`, `add_score`, and expression statements) inside `system.run(() => { ... })`.
 
 ### Core & Combat Events Example
 
@@ -30,6 +32,23 @@ const ORE_ID = "example:ore"
 
 on join of player {
     send "Welcome, {player.name_tag}" to player
+    player.give_item("minecraft:blaze_rod", 1, "Starter Wand")
+    player.set_score("kills", 0)
+}
+
+on leave of player {
+    const leaving_name = player.name
+    send "{leaving_name} left the arena" to world
+}
+
+on chat msg by player {
+    if msg == "!kit" {
+        cancel event
+        player.give_item("minecraft:golden_apple", 2)
+        player.add_score("kits", 1)
+        const total = player.get_score("kits")
+        send "Kit granted (total: {total})" to player
+    }
 }
 
 on right click with WAND_ID by player {
@@ -127,7 +146,7 @@ every 5s {
 
 | Action | Syntax | Notes |
 | :--- | :--- | :--- |
-| **Cancel Event** | `cancel event` | Valid only in `on right click`, `on break`, and `on interact` (`PSTDR-E004` otherwise). |
+| **Cancel Event** | `cancel event` | Valid only in `on right click`, `on break`, `on interact`, and `on chat` (`PSTDR-E004` otherwise). |
 | **Damage** | `damage <target> by <amount>` | Emits `<target>.applyDamage(<amount>)`. |
 | **Ignite** | `ignite <target> for <duration>` | Emits `<target>.setOnFire(<seconds>, true)`. |
 | **Apply Effect** | `apply <effect> <level> to <target> for <duration>` | `<level>` is 1-based (`PSTDR-E011`); `<effect>` is checked against vanilla spec (`PSTDR-E013`). |
@@ -186,7 +205,11 @@ every 5s {
 | `set_on_fire(secs, ext)` / `extinguish_fire()` | `setOnFire` / `extinguishFire` |
 | `spawn_particle(id, loc)` | `spawnParticle(id, loc)` |
 | `spawn_entity(id, loc)` | `spawnEntity(id, loc)` |
-| `spawn_item(stack, loc)` | `spawnItem(stack, loc)` |
+| `spawn_item(item_id, loc_or_entity, amount?)` | `__pstdr_spawn_item(dim, itemId, loc, amount = 1)` *(auto-imports `ItemStack`)* |
+| `give_item(item_id, amount?, name_tag?)` | `__pstdr_give_item(entity, itemId, amount = 1, nameTag = null)` *(auto-imports `ItemStack`)* |
+| `get_score(objective)` | `__pstdr_get_score(target, objective)` *(null-safe, defaults to `0`)* |
+| `set_score(objective, value)` | `__pstdr_set_score(target, objective, value)` *(auto-creates objective)* |
+| `add_score(objective, delta)` | `__pstdr_add_score(target, objective, delta)` *(auto-creates objective)* |
 | `get_entities(opts)` / `get_players(opts)` | `getEntities(opts)` / `getPlayers(opts)` |
 | `teleport(loc)` | `teleport(loc)` |
 | `kill()` | `kill()` |

@@ -95,8 +95,14 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
+        needs_item_stack: false,
         needs_in_helper: false,
         needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
@@ -147,6 +153,9 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
     }
     if cg.needs_equipment_slot {
         imports.push("EquipmentSlot");
+    }
+    if cg.needs_item_stack {
+        imports.push("ItemStack");
     }
     if !imports.is_empty() {
         out.push_str(&format!(
@@ -219,6 +228,13 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         out.push_str("});\n\n");
     }
 
+    emit_runtime_helpers(&mut out, &cg, mode);
+
+    out.push_str(&cg.body);
+    out
+}
+
+fn emit_runtime_helpers(out: &mut String, cg: &Codegen<'_>, mode: EmitMode) {
     if cg.needs_in_helper {
         if mode == EmitMode::TypeScript {
             out.push_str("function __pstdr_in(item: any, container: any): boolean {\n");
@@ -244,8 +260,82 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         );
     }
 
-    out.push_str(&cg.body);
-    out
+    if cg.needs_give_item_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str(
+                "function __pstdr_give_item(entity: any, itemId: any, amount: number = 1, nameTag: any = null): void {\n",
+            );
+        } else {
+            out.push_str("function __pstdr_give_item(entity, itemId, amount = 1, nameTag = null) {\n");
+        }
+        out.push_str(
+            "    if (!entity) return;\n\
+             \x20   const stack = new ItemStack(itemId, amount);\n\
+             \x20   if (nameTag != null) stack.nameTag = nameTag;\n\
+             \x20   entity.getComponent(\"minecraft:inventory\")?.container?.addItem(stack);\n}\n\n",
+        );
+    }
+
+    if cg.needs_spawn_item_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str(
+                "function __pstdr_spawn_item(dim: any, itemOrId: any, locOrEntity: any, amount: number = 1): any {\n",
+            );
+        } else {
+            out.push_str("function __pstdr_spawn_item(dim, itemOrId, locOrEntity, amount = 1) {\n");
+        }
+        out.push_str(
+            "    const stack = typeof itemOrId === \"string\" ? new ItemStack(itemOrId, amount) : itemOrId;\n\
+             \x20   const loc = locOrEntity && locOrEntity.location ? locOrEntity.location : locOrEntity;\n\
+             \x20   return dim.spawnItem(stack, loc);\n}\n\n",
+        );
+    }
+
+    if cg.needs_get_score_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_get_score(target: any, objectiveId: any): number {\n");
+        } else {
+            out.push_str("function __pstdr_get_score(target, objectiveId) {\n");
+        }
+        out.push_str(
+            "    try {\n\
+             \x20       const obj = world.scoreboard.getObjective(objectiveId);\n\
+             \x20       if (!obj) return 0;\n\
+             \x20       const val = obj.getScore(target);\n\
+             \x20       return typeof val === \"number\" ? val : 0;\n\
+             \x20   } catch {\n\
+             \x20       return 0;\n\
+             \x20   }\n}\n\n",
+        );
+    }
+
+    if cg.needs_set_score_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str(
+                "function __pstdr_set_score(target: any, objectiveId: any, value: any): void {\n",
+            );
+        } else {
+            out.push_str("function __pstdr_set_score(target, objectiveId, value) {\n");
+        }
+        out.push_str(
+            "    const obj = world.scoreboard.getObjective(objectiveId) ?? world.scoreboard.addObjective(objectiveId, objectiveId);\n\
+             \x20   obj.setScore(target, value);\n}\n\n",
+        );
+    }
+
+    if cg.needs_add_score_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str(
+                "function __pstdr_add_score(target: any, objectiveId: any, delta: any): void {\n",
+            );
+        } else {
+            out.push_str("function __pstdr_add_score(target, objectiveId, delta) {\n");
+        }
+        out.push_str(
+            "    const obj = world.scoreboard.getObjective(objectiveId) ?? world.scoreboard.addObjective(objectiveId, objectiveId);\n\
+             \x20   obj.addScore(target, delta);\n}\n\n",
+        );
+    }
 }
 
 fn assemble_partitioned_module(
@@ -276,6 +366,9 @@ fn assemble_partitioned_module(
     if cg.needs_equipment_slot {
         mc_imports.push("EquipmentSlot");
     }
+    if cg.needs_item_stack {
+        mc_imports.push("ItemStack");
+    }
     let has_mc_imports = !mc_imports.is_empty();
     if has_mc_imports {
         out.push_str(&format!(
@@ -298,30 +391,7 @@ fn assemble_partitioned_module(
         out.push('\n');
     }
 
-    if cg.needs_in_helper {
-        if mode == EmitMode::TypeScript {
-            out.push_str("function __pstdr_in(item: any, container: any): boolean {\n");
-        } else {
-            out.push_str("function __pstdr_in(item, container) {\n");
-        }
-        out.push_str(
-            "    if (Array.isArray(container) || typeof container === \"string\") return container.includes(item);\n\
-             \x20   if (container && typeof container === \"object\") return item in container;\n\
-             \x20   return false;\n}\n\n",
-        );
-    }
-
-    if cg.needs_within_helper {
-        if mode == EmitMode::TypeScript {
-            out.push_str("function __pstdr_within(a: any, b: any): boolean {\n");
-        } else {
-            out.push_str("function __pstdr_within(a, b) {\n");
-        }
-        out.push_str(
-            "    if (!a || !b || !a.location || !b.location) return false;\n\
-             \x20   return Math.hypot(a.location.x - b.location.x, a.location.y - b.location.y, a.location.z - b.location.z) <= 5;\n}\n\n",
-        );
-    }
+    emit_runtime_helpers(&mut out, cg, mode);
 
     out.push_str(&cg.body);
     out
@@ -357,8 +427,14 @@ pub fn emit_shared_module(
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
+        needs_item_stack: false,
         needs_in_helper: false,
         needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
@@ -534,8 +610,14 @@ pub fn emit_item_component_module(
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
+        needs_item_stack: false,
         needs_in_helper: false,
         needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
@@ -683,8 +765,14 @@ pub fn emit_block_component_module(
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
+        needs_item_stack: false,
         needs_in_helper: false,
         needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
@@ -831,8 +919,14 @@ pub fn emit_world_module(
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
+        needs_item_stack: false,
         needs_in_helper: false,
         needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
@@ -870,8 +964,14 @@ struct Codegen<'a> {
     needs_world: bool,
     needs_system: bool,
     needs_equipment_slot: bool,
+    needs_item_stack: bool,
     needs_in_helper: bool,
     needs_within_helper: bool,
+    needs_give_item_helper: bool,
+    needs_spawn_item_helper: bool,
+    needs_get_score_helper: bool,
+    needs_set_score_helper: bool,
+    needs_add_score_helper: bool,
     in_before_event: bool,
     block_interact_callbacks: Vec<String>,
     block_tick_callbacks: Vec<String>,
@@ -1172,6 +1272,42 @@ impl<'a> Codegen<'a> {
                 self.line("if (!ev.initialSpawn) return;");
                 self.line(&format!("const {actor_var} = ev.player;"));
                 self.emit_block_stmts(&ev.body.stmts);
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::PlayerLeave { actor_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.beforeEvents.playerLeave.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(actor_var);
+                self.line(&format!("const {actor_var} = ev.player;"));
+                let prev = self.in_before_event;
+                self.in_before_event = true;
+                self.emit_block_stmts(&ev.body.stmts);
+                self.in_before_event = prev;
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::ChatSend { msg_var, actor_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.beforeEvents.chatSend.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(actor_var);
+                self.bind_local(msg_var);
+                self.line(&format!("const {actor_var} = ev.sender;"));
+                self.line(&format!("const {msg_var} = ev.message;"));
+                let prev = self.in_before_event;
+                self.in_before_event = true;
+                self.emit_block_stmts(&ev.body.stmts);
+                self.in_before_event = prev;
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
@@ -1725,6 +1861,37 @@ impl<'a> Codegen<'a> {
                         return format!(
                             "({obj_js}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.Mainhand)?.typeId === ({}))",
                             args_js[0]
+                        );
+                    }
+                    if field == "give_item" && !args_js.is_empty() && args_js.len() <= 3 {
+                        self.needs_item_stack = true;
+                        self.needs_give_item_helper = true;
+                        return format!("__pstdr_give_item({obj_js}, {})", args_js.join(", "));
+                    }
+                    if field == "spawn_item" && (args_js.len() == 2 || args_js.len() == 3) {
+                        self.needs_item_stack = true;
+                        self.needs_spawn_item_helper = true;
+                        return format!("__pstdr_spawn_item({obj_js}, {})", args_js.join(", "));
+                    }
+                    if field == "get_score" && args_js.len() == 1 {
+                        self.needs_world = true;
+                        self.needs_get_score_helper = true;
+                        return format!("__pstdr_get_score({obj_js}, {})", args_js[0]);
+                    }
+                    if field == "set_score" && args_js.len() == 2 {
+                        self.needs_world = true;
+                        self.needs_set_score_helper = true;
+                        return format!(
+                            "__pstdr_set_score({obj_js}, {}, {})",
+                            args_js[0], args_js[1]
+                        );
+                    }
+                    if field == "add_score" && args_js.len() == 2 {
+                        self.needs_world = true;
+                        self.needs_add_score_helper = true;
+                        return format!(
+                            "__pstdr_add_score({obj_js}, {}, {})",
+                            args_js[0], args_js[1]
                         );
                     }
                     let sep = if *optional { "?." } else { "." };

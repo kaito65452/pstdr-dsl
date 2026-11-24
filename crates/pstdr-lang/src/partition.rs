@@ -288,6 +288,8 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                         }
                     }
                     EventKind::PlayerJoin { .. }
+                    | EventKind::PlayerLeave { .. }
+                    | EventKind::ChatSend { .. }
                     | EventKind::Hurt { .. }
                     | EventKind::Die { .. }
                     | EventKind::ProjectileHit { .. }

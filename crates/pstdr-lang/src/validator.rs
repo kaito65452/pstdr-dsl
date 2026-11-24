@@ -37,6 +37,8 @@ enum EventCtx {
     ProjectileHit,
     EntitySpawn,
     PlayerJoin,
+    PlayerLeave,
+    ChatSend,
     Hurt,
     Die,
     Consume,
@@ -56,6 +58,8 @@ impl EventCtx {
             Self::ProjectileHit => "on projectile hit",
             Self::EntitySpawn => "on spawn",
             Self::PlayerJoin => "on join",
+            Self::PlayerLeave => "on leave",
+            Self::ChatSend => "on chat",
             Self::Hurt => "on hurt",
             Self::Die => "on die",
             Self::Consume => "on consume",
@@ -64,7 +68,10 @@ impl EventCtx {
     }
 
     fn is_cancellable(&self) -> bool {
-        matches!(self, Self::RightClick | Self::BreakBlock | Self::BlockInteract)
+        matches!(
+            self,
+            Self::RightClick | Self::BreakBlock | Self::BlockInteract | Self::ChatSend
+        )
     }
 }
 
@@ -371,6 +378,15 @@ impl<'a> Validator<'a> {
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::PlayerJoin;
             }
+            EventKind::PlayerLeave { actor_var } => {
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::PlayerLeave;
+            }
+            EventKind::ChatSend { msg_var, actor_var } => {
+                self.insert_binding(msg_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::ChatSend;
+            }
             EventKind::Hurt {
                 target_var,
                 attacker_var,
@@ -636,7 +652,7 @@ impl<'a> Validator<'a> {
                             "'cancel event' is not valid inside '{}' block.",
                             self.event_ctx.label()
                         ),
-                        "Move 'cancel event' into an 'on right click', 'on break', or 'on interact' block.",
+                        "Move 'cancel event' into an 'on right click', 'on break', 'on interact', or 'on chat' block.",
                     ));
                 }
             }

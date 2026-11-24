@@ -1759,4 +1759,196 @@ on tick of CHEST_ID {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // ─── BLIND-TEST FEEDBACK: Leave/Chat Events, Safe ItemStack & Scoreboard Helpers ───
+
+    #[test]
+    fn on_leave_codegen_system_run_and_format_roundtrip() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+state active[player] = true
+
+on leave of player {
+    const leaving_name = player.name
+    active[player] = false
+    send "{leaving_name} disconnected" to world
+}
+"#;
+        let res = compile_source(src, "leave_test.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { world, system } from \"@minecraft/server\";"), "js:\n{js}");
+        assert!(js.contains("world.beforeEvents.playerLeave.subscribe((ev) => {"), "js:\n{js}");
+        assert!(js.contains("const player = ev.player;"), "js:\n{js}");
+        assert!(js.contains("const leaving_name = player.name;"), "js:\n{js}");
+        assert!(
+            js.contains("system.run(() => {\n        __set_active(player, false);\n    });"),
+            "state write in on leave must be wrapped in system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n        world.sendMessage(`${leaving_name} disconnected`);\n    });"),
+            "send in on leave must be wrapped in system.run:\n{js}"
+        );
+
+        let fmt1 = format_source(src, "leave_test.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "leave_test.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for on leave");
+        assert!(fmt1.contains("on leave of player {"));
+
+        // `cancel event` is NOT valid in `on leave`
+        let bad = "on leave of player {\n    cancel event\n}\n";
+        let bad_res = compile_source(bad, "bad_leave.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            bad_res.diagnostics.iter().any(|d| d.code == "PSTDR-E004"),
+            "cancel event in on leave must emit PSTDR-E004: {:?}",
+            bad_res.diagnostics
+        );
+    }
+
+    #[test]
+    fn on_chat_cancel_sync_and_mutations_wrapped_in_system_run() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on chat msg by player {
+    if msg == "!kit" {
+        cancel event
+        send "Granting kit..." to player
+        player.give_item("minecraft:blaze_rod", 1, "Starter")
+    }
+}
+"#;
+        let res = compile_source(src, "chat_test.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(
+            js.contains("import { world, system, ItemStack } from \"@minecraft/server\";"),
+            "js:\n{js}"
+        );
+        assert!(js.contains("world.beforeEvents.chatSend.subscribe((ev) => {"), "js:\n{js}");
+        assert!(js.contains("const player = ev.sender;"), "js:\n{js}");
+        assert!(js.contains("const msg = ev.message;"), "js:\n{js}");
+        // ev.cancel = true must remain synchronous (NOT wrapped in system.run)
+        assert!(js.contains("        ev.cancel = true;\n"), "ev.cancel must be synchronous:\n{js}");
+        assert!(
+            js.contains("system.run(() => {\n            player.sendMessage(\"Granting kit...\");\n        });"),
+            "send must be wrapped in system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n            __pstdr_give_item(player, \"minecraft:blaze_rod\", 1, \"Starter\");\n        });"),
+            "give_item must be wrapped in system.run:\n{js}"
+        );
+
+        let fmt1 = format_source(src, "chat_test.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "chat_test.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for on chat");
+        assert!(fmt1.contains("on chat msg by player {"));
+    }
+
+    #[test]
+    fn safe_item_stack_give_item_and_spawn_item_single_and_partitioned() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on join of player {
+    player.give_item("minecraft:blaze_rod", 1, "Starter")
+    player.dimension.spawn_item("minecraft:diamond", player, 3)
+}
+"#;
+        let res = compile_source(src, "items_test.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { world, ItemStack } from \"@minecraft/server\";"), "js:\n{js}");
+        assert!(js.contains("function __pstdr_give_item(entity, itemId, amount = 1, nameTag = null)"), "js:\n{js}");
+        assert!(js.contains("const stack = new ItemStack(itemId, amount);"), "js:\n{js}");
+        assert!(js.contains("if (nameTag != null) stack.nameTag = nameTag;"), "js:\n{js}");
+        assert!(js.contains("function __pstdr_spawn_item(dim, itemOrId, locOrEntity, amount = 1)"), "js:\n{js}");
+        assert!(js.contains("__pstdr_give_item(player, \"minecraft:blaze_rod\", 1, \"Starter\");"), "js:\n{js}");
+        assert!(js.contains("__pstdr_spawn_item(player.dimension, \"minecraft:diamond\", player, 3);"), "js:\n{js}");
+
+        // Partitioned workspace test: give_item in item component + on leave / on chat in world module
+        let dir = temp_dir("safe_item_partitioned");
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("BP/items/kit_token.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"pack:kit_token"},"components":{"minecraft:icon":"diamond"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/arena.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+on right click with "pack:kit_token" by player {
+    player.give_item("minecraft:blaze_rod", 1, "Starter")
+}
+
+on leave of player {
+    send "{player.name} left" to world
+}
+
+on chat msg by player {
+    if msg == "!ping" {
+        cancel event
+        send "pong" to player
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "partitioned convert failed: {diags:?}");
+
+        let item_js = fs::read_to_string(dir.join("BP/scripts/generated/items/kit_token.js")).unwrap();
+        assert!(item_js.contains("import { ItemStack } from \"@minecraft/server\";"), "item_js:\n{item_js}");
+        assert!(item_js.contains("function __pstdr_give_item("), "item_js:\n{item_js}");
+        assert!(item_js.contains("__pstdr_give_item(player, \"minecraft:blaze_rod\", 1, \"Starter\");"), "item_js:\n{item_js}");
+
+        let world_js = fs::read_to_string(dir.join("BP/scripts/generated/world/arena.js")).unwrap();
+        assert!(world_js.contains("world.beforeEvents.playerLeave.subscribe"), "world_js:\n{world_js}");
+        assert!(world_js.contains("world.beforeEvents.chatSend.subscribe"), "world_js:\n{world_js}");
+        assert!(world_js.contains("ev.cancel = true;"), "world_js:\n{world_js}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoreboard_helpers_codegen_and_before_event_safety() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on chat msg by player {
+    const kills = player.get_score("kills")
+    if msg == "!reset" and kills > 0 {
+        cancel event
+        player.set_score("kills", 0)
+        player.add_score("resets", 1)
+    }
+}
+"#;
+        let res = compile_source(src, "scoreboard_test.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { world, system } from \"@minecraft/server\";"), "js:\n{js}");
+        assert!(js.contains("function __pstdr_get_score(target, objectiveId)"), "js:\n{js}");
+        assert!(js.contains("function __pstdr_set_score(target, objectiveId, value)"), "js:\n{js}");
+        assert!(js.contains("function __pstdr_add_score(target, objectiveId, delta)"), "js:\n{js}");
+        assert!(
+            js.contains("world.scoreboard.getObjective(objectiveId) ?? world.scoreboard.addObjective(objectiveId, objectiveId)"),
+            "set/add_score must auto-create missing objectives:\n{js}"
+        );
+        // get_score in const binding must be synchronous
+        assert!(js.contains("    const kills = __pstdr_get_score(player, \"kills\");\n"), "js:\n{js}");
+        // set_score and add_score must be wrapped in system.run inside beforeEvents
+        assert!(
+            js.contains("system.run(() => {\n            __pstdr_set_score(player, \"kills\", 0);\n        });"),
+            "set_score must be wrapped in system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n            __pstdr_add_score(player, \"resets\", 1);\n        });"),
+            "add_score must be wrapped in system.run:\n{js}"
+        );
+    }
 }

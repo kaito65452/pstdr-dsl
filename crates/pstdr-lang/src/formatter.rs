@@ -159,6 +159,12 @@ impl Formatter {
                     EventKind::PlayerJoin { actor_var } => {
                         format!("on join of {actor_var} {{")
                     }
+                    EventKind::PlayerLeave { actor_var } => {
+                        format!("on leave of {actor_var} {{")
+                    }
+                    EventKind::ChatSend { msg_var, actor_var } => {
+                        format!("on chat {msg_var} by {actor_var} {{")
+                    }
                     EventKind::Hurt {
                         target_var,
                         attacker_var,

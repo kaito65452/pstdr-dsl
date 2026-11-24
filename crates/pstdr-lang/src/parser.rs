@@ -608,6 +608,19 @@ impl<'a> Parser<'a> {
                 let (actor_var, _) = self.expect_user_ident("join event player")?;
                 EventKind::PlayerJoin { actor_var }
             }
+            TokenKind::Ident(w) if w == "leave" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (actor_var, _) = self.expect_user_ident("leave event player")?;
+                EventKind::PlayerLeave { actor_var }
+            }
+            TokenKind::Ident(w) if w == "chat" => {
+                self.advance();
+                let (msg_var, _) = self.expect_user_ident("chat event message")?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("chat event player")?;
+                EventKind::ChatSend { msg_var, actor_var }
+            }
             TokenKind::Ident(w) if w == "hurt" => {
                 self.advance();
                 let (target_var, _) = self.expect_user_ident("hurt event target")?;
@@ -706,7 +719,7 @@ impl<'a> Parser<'a> {
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
                 )));
             }
         };
