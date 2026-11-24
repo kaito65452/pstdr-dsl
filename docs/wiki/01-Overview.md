@@ -69,6 +69,10 @@ world.afterEvents.itemUse.subscribe((ev) => {
 6. **[CLI and Diagnostics](./06-CLI-and-Diagnostics.md)** — `pstdr-c` subcommands, Asset Guard, and `PSTDR-E001`–`E017` reference
 7. **[Editor Setup](./07-Editor-Setup.md)** — `pstdr-lsp` and syntax highlighting for Neovim and VS Code / Code - OSS
 
+### Real-World Example
+
+- **[Zombie Rush Minigame](../zombie-rush-example/README.md)** — A 106-line single-file minigame (`0 unsafe` blocks) authored in a blind test by Claude and verified in-game on Minecraft Bedrock 26.60.
+
 ---
 
 > **Next:** [Installation →](./02-Installation.md)

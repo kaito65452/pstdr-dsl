@@ -1,0 +1,106 @@
+@addon(target = "26.60", api = "2.11.0")
+
+// ─── Zombie Rush ─────────────────────────────────────────────
+// Right click the Starter to begin a 60s round. Kill as many
+// zombies as you can. Sneak + right click to stop a round.
+
+const STARTER_ID = "arena:starter"
+const ROUND_SECONDS = 60
+const MOB_TAG = "arena_mob"
+
+mut active = false
+mut time_left = 0
+
+state score[player] = 0
+state best[player] = 0
+state got_item[player] = 0
+
+func start_round() {
+    active = true
+    time_left = ROUND_SECONDS
+    for p in world.players() {
+        score[p] = 0
+        p.title("§c§lZOMBIE RUSH")
+        p.subtitle("§eSurvive and slay for {ROUND_SECONDS}s!")
+        apply resistance 2 to p for 10s
+        p.play_sound("random.levelup")
+    }
+}
+
+func end_round() {
+    active = false
+    mut top_name = "nobody"
+    mut top_score = 0
+    for p in world.players() {
+        if score[p] > top_score {
+            top_score = score[p]
+            top_name = p.name_tag
+        }
+        if score[p] > best[p] {
+            best[p] = score[p]
+            send "§6New personal best: §e{score[p]}" to p
+        }
+        p.play_sound("random.toast")
+    }
+    world.send_message("§a§lRound over! §fWinner: §e{top_name} §f({top_score} kills)")
+    for z in world.dimension("overworld").get_entities({ tags = [MOB_TAG] }) {
+        z.kill()
+    }
+}
+
+on join of player {
+    send "§aWelcome to §cZombie Rush§a!" to player
+    send "§7Right click the §6Starter§7 to begin. Sneak + right click stops the round." to player
+    if got_item[player] == 0 {
+        got_item[player] = 1
+        player.run_command("give @s arena:starter 1")
+    }
+}
+
+on right click with STARTER_ID by player {
+    if active {
+        if player is sneaking {
+            end_round()
+        } else {
+            player.actionbar("§cA round is already running!")
+        }
+    } else {
+        start_round()
+    }
+}
+
+// Countdown + scoreboard on the action bar
+every 1s {
+    if active {
+        time_left -= 1
+        for p in world.players() {
+            p.actionbar("§eTime: §f{time_left}s   §aKills: §f{score[p]}   §7Best: §f{best[p]}")
+        }
+        if time_left <= 0 {
+            end_round()
+        }
+    }
+}
+
+// Spawn waves of zombies around every player
+every 3s {
+    if active {
+        for p in world.players() {
+            for i in [0, 1] {
+                const offset = i == 0 ? 6 : -6
+                const z = p.dimension.spawn_entity("minecraft:zombie", { x = p.location.x + offset, y = p.location.y, z = p.location.z + offset })
+                z.add_tag(MOB_TAG)
+            }
+        }
+    }
+}
+
+// Score points for every zombie kill
+on die of victim by killer {
+    if active and killer != null {
+        if victim.has_tag(MOB_TAG) and killer.type_id == "minecraft:player" {
+            score[killer] += 1
+            killer.play_sound("random.orb")
+        }
+    }
+}

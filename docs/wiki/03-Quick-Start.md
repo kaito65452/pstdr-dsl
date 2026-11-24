@@ -155,6 +155,8 @@ When `BP/items/wand.json` (`example:wand`) and `BP/blocks/altar.json` (`example:
 - `BP/scripts/generated/world/pack_logic.js` — global events (`on join`, timers, unbound or cancellable `beforeEvents`)
 - `BP/scripts/generated/_registry.js` — single centralized `system.beforeEvents.startup` (or `worldInitialize` for `< 1.21.90`) registration callback imported by `BP/scripts/main.js`
 
+For a full playable single-file example tested in-game on Minecraft Bedrock 26.60, see **[Zombie Rush](../zombie-rush-example/README.md)**.
+
 ---
 
 > [← Previous: Installation](./02-Installation.md) | [Next: Language Guide →](./04-Language-Guide.md)
