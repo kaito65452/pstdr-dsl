@@ -31,6 +31,10 @@ enum EventCtx {
     RightClick,
     HitTarget,
     BreakBlock,
+    BlockInteract,
+    BlockTick,
+    ProjectileHit,
+    EntitySpawn,
     PlayerJoin,
     Hurt,
     Die,
@@ -46,6 +50,10 @@ impl EventCtx {
             Self::RightClick => "on right click",
             Self::HitTarget => "on hit",
             Self::BreakBlock => "on break",
+            Self::BlockInteract => "on interact",
+            Self::BlockTick => "on tick",
+            Self::ProjectileHit => "on projectile hit",
+            Self::EntitySpawn => "on spawn",
             Self::PlayerJoin => "on join",
             Self::Hurt => "on hurt",
             Self::Die => "on die",
@@ -55,7 +63,7 @@ impl EventCtx {
     }
 
     fn is_cancellable(&self) -> bool {
-        matches!(self, Self::RightClick | Self::BreakBlock)
+        matches!(self, Self::RightClick | Self::BreakBlock | Self::BlockInteract)
     }
 }
 
@@ -86,6 +94,7 @@ pub fn validate_program(
         diagnostics: Vec::new(),
         bound_item_ids: Vec::new(),
         bound_block_ids: Vec::new(),
+        has_block_bind_target: false,
         static_event_item_ids: Vec::new(),
         static_event_block_ids: Vec::new(),
     };
@@ -116,6 +125,7 @@ struct Validator<'a> {
     diagnostics: Vec<Diagnostic>,
     bound_item_ids: Vec<(String, String, Span)>,
     bound_block_ids: Vec<(String, String, Span)>,
+    has_block_bind_target: bool,
     static_event_item_ids: Vec<(String, Span)>,
     static_event_block_ids: Vec<(String, Span)>,
 }
@@ -174,6 +184,10 @@ impl<'a> Validator<'a> {
                 continue;
             }
 
+            if bt.path.contains("blocks/") || bt.path.contains("blocks\\") {
+                self.has_block_bind_target = true;
+            }
+
             let Some(root) = self.ctx.workspace_root else {
                 continue;
             };
@@ -221,6 +235,7 @@ impl<'a> Validator<'a> {
                     {
                         self.bound_block_ids
                             .push((bt.path.clone(), id.to_string(), bt.span.clone()));
+                        self.has_block_bind_target = true;
                     }
                 }
             }
@@ -377,6 +392,67 @@ impl<'a> Validator<'a> {
                 }
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::Consume;
+            }
+            EventKind::BlockInteract {
+                block_id,
+                actor_var,
+            } => {
+                self.validate_expr(block_id);
+                if let Some(s) = eval_static_string(block_id, &self.const_strings) {
+                    self.static_event_block_ids
+                        .push((s, block_id.span().clone()));
+                }
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("block", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::BlockInteract;
+            }
+            EventKind::BlockTick { block_id } => {
+                self.validate_expr(block_id);
+                if let Some(s) = eval_static_string(block_id, &self.const_strings) {
+                    self.static_event_block_ids
+                        .push((s, block_id.span().clone()));
+                }
+                let has_bound_block = if self.ctx.workspace_root.is_some() {
+                    !self.bound_block_ids.is_empty()
+                } else {
+                    self.has_block_bind_target
+                };
+                if !has_bound_block {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E007,
+                        &ev.span,
+                        "'on tick' requires a bound block target via bind_target(\"BP/blocks/...\").",
+                        "Add bind_target(\"BP/blocks/<block>.json\") at the top of the file matching the block identifier.",
+                    ));
+                }
+                self.insert_binding("block", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("dimension", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::BlockTick;
+            }
+            EventKind::ProjectileHit {
+                target_var,
+                projectile_id,
+                shooter_var,
+            } => {
+                if let Some(proj) = projectile_id {
+                    self.validate_expr(proj);
+                }
+                self.insert_binding(target_var, BindingKind::ContextVar, ev.span.line);
+                if let Some(shooter) = shooter_var {
+                    self.insert_binding(shooter, BindingKind::ContextVar, ev.span.line);
+                }
+                self.insert_binding("projectile", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::ProjectileHit;
+            }
+            EventKind::EntitySpawn {
+                entity_var,
+                entity_type,
+            } => {
+                if let Some(ty) = entity_type {
+                    self.validate_expr(ty);
+                }
+                self.insert_binding(entity_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::EntitySpawn;
             }
         }
 
@@ -547,7 +623,7 @@ impl<'a> Validator<'a> {
                             "'cancel event' is not valid inside '{}' block.",
                             self.event_ctx.label()
                         ),
-                        "Move 'cancel event' into an 'on right click' or 'on break' block.",
+                        "Move 'cancel event' into an 'on right click', 'on break', or 'on interact' block.",
                     ));
                 }
             }

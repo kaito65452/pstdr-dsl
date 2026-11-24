@@ -690,6 +690,7 @@ on hit target with SWORD_ID by player {
             source_file: "v1.pstdr".to_string(),
             source_map_comments: false,
             custom_components: vec![("pstdr:iron_sword".to_string(), ComponentKind::Item)],
+            bound_block_ids: vec![],
         };
         let js = emit_code(&prog, &opts, EmitMode::JavaScript);
         assert!(
@@ -724,6 +725,7 @@ on right click with WAND_ID by player {
             source_file: "v2.pstdr".to_string(),
             source_map_comments: false,
             custom_components: vec![("pstdr:ice_wand".to_string(), ComponentKind::Item)],
+            bound_block_ids: vec![],
         };
         let js = emit_code(&prog, &opts, EmitMode::JavaScript);
         assert!(
@@ -1180,5 +1182,237 @@ on consume "example:apple" by player {
         assert!(!has_errors(&diags), "Registered namespaced alias & variations must pass: {diags:?}");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── WAVE 2A: Custom Block Events, Projectile Hit, Entity Spawn & Spawn Particle ───
+
+    #[test]
+    fn wave_2a_block_interact_and_tick_custom_component_wiring_v2() {
+        let dir = temp_dir("wave2a_block_v2");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/blocks")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        fs::write(
+            dir.join("BP/blocks/berry_bush.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:block": {
+    "description": { "identifier": "my_pack:berry_bush" },
+    "components": {}
+  }
+}"#,
+        )
+        .unwrap();
+
+        let script = r#"@addon(target = "26.60", api = "2.11.0")
+
+bind_target("BP/blocks/berry_bush.json")
+
+const BUSH_ID = "my_pack:berry_bush"
+
+on interact of BUSH_ID by player {
+    send "Harvested berries!" to player
+}
+
+on tick of BUSH_ID {
+    spawn particle "minecraft:villager_happy" at block.location in dimension
+}
+"#;
+        fs::write(dir.join("src/berry_bush.pstdr"), script).unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags),
+            "convert_workspace must succeed for custom block interact + tick: {diags:?}"
+        );
+
+        let js = fs::read_to_string(dir.join("BP/scripts/generated/berry_bush.js")).unwrap();
+        assert!(
+            js.contains("system.beforeEvents.startup.subscribe((initEv) => {"),
+            "Bedrock 26.60 must use system.beforeEvents.startup:\n{js}"
+        );
+        assert!(
+            js.contains("initEv.blockComponentRegistry.registerCustomComponent(\"pstdr:berry_bush\", {"),
+            "Must register custom block component:\n{js}"
+        );
+        assert!(
+            js.contains("onPlayerInteract(ev) {"),
+            "Must emit onPlayerInteract:\n{js}"
+        );
+        assert!(
+            js.contains("const player = ev.player;") && js.contains("const block = ev.block;"),
+            "onPlayerInteract must bind actor and block:\n{js}"
+        );
+        assert!(
+            js.contains("onTick(ev) {"),
+            "Must emit onTick:\n{js}"
+        );
+        assert!(
+            js.contains("const dimension = ev.dimension;"),
+            "onTick must bind dimension:\n{js}"
+        );
+        assert!(
+            js.contains("dimension.spawnParticle(\"minecraft:villager_happy\", block.location);"),
+            "onTick must emit spawnParticle:\n{js}"
+        );
+
+        let ts = fs::read_to_string(dir.join("build/ts/berry_bush.ts")).unwrap();
+        assert!(ts.contains("onPlayerInteract(ev: any) {"));
+        assert!(ts.contains("onTick(ev: any) {"));
+
+        // Verify BP/blocks/berry_bush.json got V2 component key wired
+        let wired_json = fs::read_to_string(dir.join("BP/blocks/berry_bush.json")).unwrap();
+        assert!(
+            wired_json.contains("\"pstdr:berry_bush\": {}"),
+            "V2 block JSON must receive direct component key:\n{wired_json}"
+        );
+
+        // Verify formatter round-trip
+        let fmt1 = format_source(script, "berry_bush.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "berry_bush.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for block interact & tick");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_2a_unbound_block_interact_before_and_after_events() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on interact of "minecraft:chest" by player {
+    send "Opened chest!" to player
+}
+
+on interact of "minecraft:tnt" by player {
+    cancel event
+    send "TNT is disabled!" to player
+}
+"#;
+        let res = compile_source(src, "vanilla_interact.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(
+            js.contains("world.afterEvents.playerInteractWithBlock.subscribe((ev) => {"),
+            "Unbound non-cancellable interact must use afterEvents:\n{js}"
+        );
+        assert!(
+            js.contains("if (ev.block.typeId !== (\"minecraft:chest\")) return;"),
+            "Must filter by ev.block.typeId:\n{js}"
+        );
+        assert!(
+            js.contains("world.beforeEvents.playerInteractWithBlock.subscribe((ev) => {"),
+            "Unbound cancellable interact must use beforeEvents:\n{js}"
+        );
+        assert!(
+            js.contains("ev.cancel = true;") && js.contains("system.run(() => {"),
+            "Before-event interact must set ev.cancel and wrap mutations in system.run:\n{js}"
+        );
+    }
+
+    #[test]
+    fn wave_2a_block_tick_requires_bound_block_target() {
+        let spec = BedrockSpec::bundled();
+        let bad = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on tick of "my_pack:unbound_block" {
+    spawn particle "minecraft:villager_happy" at block.location in dimension
+}
+"#;
+        let res = compile_source(bad, "bad_tick.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            res.diagnostics.iter().any(|d| d.code == "PSTDR-E007"),
+            "on tick without bind_target(\"BP/blocks/...\") must emit validator error: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn wave_2a_projectile_hit_and_entity_spawn_codegen_ts_and_fmt() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+const SPEAR_ID = "hfrlc:diamond_spear"
+
+on projectile hit victim with SPEAR_ID by shooter {
+    damage victim by 6
+    if shooter != null {
+        send "Direct hit with {projectile.typeId}!" to shooter
+    }
+}
+
+on projectile hit victim {
+    ignite victim for 2s
+}
+
+on spawn of mob type "minecraft:zombie" {
+    apply strength 1 to mob for 10s
+}
+
+on spawn of entity {
+    spawn particle "minecraft:totem_particle" at entity
+}
+"#;
+        let res = compile_source(src, "proj_spawn.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+
+        let js = res.js.unwrap();
+        assert!(js.contains("world.afterEvents.projectileHitEntity.subscribe((ev) => {"));
+        assert!(js.contains("const victim = ev.getEntityHit()?.entity;"));
+        assert!(js.contains("if (!victim) return;"));
+        assert!(js.contains("if (!ev.projectile || ev.projectile.typeId !== (SPEAR_ID)) return;"));
+        assert!(js.contains("const shooter = ev.source;"));
+        assert!(js.contains("const projectile = ev.projectile;"));
+
+        assert!(js.contains("world.afterEvents.entitySpawn.subscribe((ev) => {"));
+        assert!(js.contains("const mob = ev.entity;"));
+        assert!(js.contains("if (mob.typeId !== (\"minecraft:zombie\")) return;"));
+        assert!(js.contains("const entity = ev.entity;"));
+
+        let ts = res.ts.unwrap();
+        assert!(ts.contains("world.afterEvents.projectileHitEntity.subscribe((ev: any) => {"));
+        assert!(ts.contains("world.afterEvents.entitySpawn.subscribe((ev: any) => {"));
+
+        let fmt1 = format_source(src, "proj_spawn.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "proj_spawn.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for projectile hit and entity spawn");
+    }
+
+    #[test]
+    fn wave_2a_spawn_particle_coordinate_literal_vs_entity() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on die of dead {
+    const dim = dead.dimension
+    spawn particle "minecraft:basic_flame_particle" at { x = 10, y = 64, z = -5 }
+    spawn particle "minecraft:basic_flame_particle" at { x = 1, y = 2, z = 3 } in dim
+    spawn particle "minecraft:totem_particle" at dead
+    spawn particle "minecraft:heart_particle" at dead in dim
+}
+"#;
+        let res = compile_source(src, "particles.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(
+            js.contains("world.getDimension(\"overworld\").spawnParticle(\"minecraft:basic_flame_particle\", { x: 10, y: 64, z: -5 });"),
+            "Object literal without dim must NOT append .location:\n{js}"
+        );
+        assert!(
+            js.contains("dim.spawnParticle(\"minecraft:basic_flame_particle\", { x: 1, y: 2, z: 3 });"),
+            "Object literal with dim must NOT append .location:\n{js}"
+        );
+        assert!(
+            js.contains("dead.dimension.spawnParticle(\"minecraft:totem_particle\", dead.location);"),
+            "Entity identifier without dim must emit entity.dimension and entity.location:\n{js}"
+        );
+        assert!(
+            js.contains("dim.spawnParticle(\"minecraft:heart_particle\", dead.location);"),
+            "Entity identifier with explicit dim must still append .location:\n{js}"
+        );
     }
 }

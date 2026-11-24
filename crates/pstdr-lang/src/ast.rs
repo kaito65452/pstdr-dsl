@@ -118,6 +118,22 @@ pub enum EventKind {
         item: Expr,
         actor_var: String,
     },
+    BlockInteract {
+        block_id: Expr,
+        actor_var: String,
+    },
+    BlockTick {
+        block_id: Expr,
+    },
+    ProjectileHit {
+        target_var: String,
+        projectile_id: Option<Expr>,
+        shooter_var: Option<String>,
+    },
+    EntitySpawn {
+        entity_var: String,
+        entity_type: Option<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

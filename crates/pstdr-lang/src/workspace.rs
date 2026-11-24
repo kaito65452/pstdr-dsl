@@ -165,8 +165,10 @@ pub fn compile_source(
         spec,
         strict_vanilla_ids,
     };
+    let mut bound_block_ids = Vec::new();
     if let Some(prog) = &program {
-        let (_info, val_diags) = validate_program(prog, &vctx);
+        let (info, val_diags) = validate_program(prog, &vctx);
+        bound_block_ids = info.bound_block_ids.into_iter().map(|(_, id, _)| id).collect();
         diags.extend(val_diags);
     }
     sort_and_dedup_diags(&mut diags);
@@ -184,6 +186,7 @@ pub fn compile_source(
         source_file: file.to_string(),
         source_map_comments,
         custom_components,
+        bound_block_ids,
     };
     let js = emit_code(&prog, &opts, EmitMode::JavaScript);
     let ts = emit_code(&prog, &opts, EmitMode::TypeScript);
@@ -280,6 +283,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             .to_string();
 
         let (prog_opt, mut file_diags) = parse_source(&source, &rel);
+        let mut bound_block_ids = Vec::new();
         if let Some(prog) = &prog_opt {
             if let Some(h) = &prog.header {
                 target_ver = h.target.clone();
@@ -291,7 +295,8 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
                 spec,
                 strict_vanilla_ids: cfg.strict_vanilla_ids,
             };
-            let (_info, val_diags) = validate_program(prog, &vctx);
+            let (info, val_diags) = validate_program(prog, &vctx);
+            bound_block_ids = info.bound_block_ids.into_iter().map(|(_, id, _)| id).collect();
             file_diags.extend(val_diags);
         }
         sort_and_dedup_diags(&mut file_diags);
@@ -316,6 +321,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             source_file: rel,
             source_map_comments: cfg.source_map_comments,
             custom_components: registered,
+            bound_block_ids,
         };
         let js = emit_code(&prog, &opts, EmitMode::JavaScript);
         let ts = emit_code(&prog, &opts, EmitMode::TypeScript);

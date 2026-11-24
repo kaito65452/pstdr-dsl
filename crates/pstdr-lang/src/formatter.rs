@@ -176,6 +176,37 @@ impl Formatter {
                     EventKind::Consume { item, actor_var } => {
                         format!("on consume {} by {actor_var} {{", fmt_expr(item))
                     }
+                    EventKind::BlockInteract {
+                        block_id,
+                        actor_var,
+                    } => {
+                        format!("on interact of {} by {actor_var} {{", fmt_expr(block_id))
+                    }
+                    EventKind::BlockTick { block_id } => {
+                        format!("on tick of {} {{", fmt_expr(block_id))
+                    }
+                    EventKind::ProjectileHit {
+                        target_var,
+                        projectile_id,
+                        shooter_var,
+                    } => {
+                        let mut header = format!("on projectile hit {target_var}");
+                        if let Some(proj) = projectile_id {
+                            header.push_str(&format!(" with {}", fmt_expr(proj)));
+                        }
+                        if let Some(shooter) = shooter_var {
+                            header.push_str(&format!(" by {shooter}"));
+                        }
+                        header.push_str(" {");
+                        header
+                    }
+                    EventKind::EntitySpawn {
+                        entity_var,
+                        entity_type,
+                    } => match entity_type {
+                        Some(ty) => format!("on spawn of {entity_var} type {} {{", fmt_expr(ty)),
+                        None => format!("on spawn of {entity_var} {{"),
+                    },
                 };
                 self.line(&header);
                 self.indent += 1;

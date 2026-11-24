@@ -646,12 +646,67 @@ impl<'a> Parser<'a> {
                 let (actor_var, _) = self.expect_user_ident("consume event actor")?;
                 EventKind::Consume { item, actor_var }
             }
+            TokenKind::Ident(w) if w == "interact" => {
+                self.advance();
+                self.expect_word("of")?;
+                let block_id = self.parse_expr(false)?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("interact event actor")?;
+                EventKind::BlockInteract {
+                    block_id,
+                    actor_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "tick" => {
+                self.advance();
+                self.expect_word("of")?;
+                let block_id = self.parse_expr(false)?;
+                EventKind::BlockTick { block_id }
+            }
+            TokenKind::Ident(w) if w == "projectile" => {
+                self.advance();
+                self.expect_word("hit")?;
+                let (target_var, _) = self.expect_user_ident("projectile hit target")?;
+                let projectile_id = if self.is_ident_word("with") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                let shooter_var = if self.is_ident_word("by") {
+                    self.advance();
+                    let (s, _) = self.expect_user_ident("projectile hit shooter")?;
+                    Some(s)
+                } else {
+                    None
+                };
+                EventKind::ProjectileHit {
+                    target_var,
+                    projectile_id,
+                    shooter_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "spawn" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (entity_var, _) = self.expect_user_ident("spawn event entity")?;
+                let entity_type = if self.is_ident_word("type") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                EventKind::EntitySpawn {
+                    entity_var,
+                    entity_type,
+                }
+            }
             _ => {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on join of player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
                 )));
             }
         };
