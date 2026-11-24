@@ -10,4 +10,4 @@ curl -fsSL https://raw.githubusercontent.com/kaito65452/pstdr-dsl/main/install.s
 
 ## Documentation
 
-Read the beginner-friendly guide in **[docs/wiki/01-Home.md](./docs/wiki/01-Home.md)** to get started in 5 minutes.
+Read the structured DSL reference in **[docs/wiki/01-Overview.md](./docs/wiki/01-Overview.md)** to get started.
