@@ -15,6 +15,7 @@
 | `pstdr-c init [pack_name]` | Initialize a new `.pstdr` workspace. |
 | `pstdr-c new <script_name>` | Create `src/<script_name>.pstdr` from template. |
 | `pstdr-c spec [info\|dump] [--spec <file>]` | Show or dump the active Bedrock specification. |
+| `node scripts/sync_bedrock_spec.mjs [--offline <dir>]` | Sync `data/spec/bedrock_api_latest.json` from Mojang `bedrock-samples` (`main` vs `preview`). |
 | `pstdr-c doctor [--spec <file>]` | Print environment, spec, and workspace status. |
 
 **Exit Codes:** `0` = Success · `1` = Compile/Audit error · `2` = Invalid arguments/workspace · `3` = I/O error

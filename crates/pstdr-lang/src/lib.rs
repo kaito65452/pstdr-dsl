@@ -787,7 +787,7 @@ on hit target with SCYTHE_ID by player { damage target by 5 }
             "Compilation must stop and NOT emit generated JS when asset errors exist"
         );
 
-        // Also test diamond_sword (not a valid vanilla item_textures alias in 26.60)
+        // Also test an unknown alias not in RP or Mojang vanilla catalog
         fs::write(
             dir.join("BP/items/frost_scythe.json"),
             r#"{
@@ -795,7 +795,7 @@ on hit target with SCYTHE_ID by player { damage target by 5 }
   "minecraft:item": {
     "description": { "identifier": "my_pack:frost_scythe" },
     "components": {
-      "minecraft:icon": "diamond_sword"
+      "minecraft:icon": "unknown_mythic_blade"
     }
   }
 }"#,
@@ -803,7 +803,7 @@ on hit target with SCYTHE_ID by player { damage target by 5 }
         let diags2 = convert_workspace(&dir, &spec).unwrap();
         assert!(
             diags2.iter().any(|d| d.code == "PSTDR-E017"),
-            "diamond_sword is not a valid vanilla alias in 26.60, must emit PSTDR-E017: {diags2:?}"
+            "unknown_mythic_blade is not a valid vanilla alias, must emit PSTDR-E017: {diags2:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -2023,6 +2023,103 @@ on chat msg by player {
         assert!(
             audit_bad.iter().any(|d| d.code == "PSTDR-E018"),
             "audit_workspace must emit PSTDR-E018 when manifest uses stable API with chatSend: {audit_bad:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bulk_beta_apis_detected_in_audit_workspace_on_stable_manifest() {
+        let dir = temp_dir("bulk_beta_apis_audit");
+        let spec = BedrockSpec::from_json_str(
+            r#"{
+  "bedrock_version": "26.60",
+  "script_api_version": "2.11.0",
+  "min_engine_version": [1, 26, 60],
+  "beta_events": ["chatSend"],
+  "beta_apis": ["World.betaOnlyFeature", "System.experimentalTick"],
+  "effects": ["speed"],
+  "sounds": ["random.orb"],
+  "vanilla_items": ["acacia_boat"],
+  "vanilla_blocks": ["amethyst_block"]
+}"#,
+            "test:bulk_beta",
+        )
+        .unwrap();
+
+        assert!(spec.is_beta_api("World.betaOnlyFeature"));
+        assert!(!spec.is_beta_api("World.getAllPlayers"));
+
+        init_workspace(&dir, "BulkBetaPack", &spec).unwrap();
+        fs::write(
+            dir.join("src/beta_check.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+unsafe call_beta_api() {
+    return world.betaOnlyFeature();
+}
+
+on join of player {
+    call_beta_api()
+}
+"#,
+        )
+        .unwrap();
+
+        let conv_diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&conv_diags), "convert_workspace failed: {conv_diags:?}");
+
+        let audit_diags = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            audit_diags.iter().any(|d| d.code == "PSTDR-E018"),
+            "audit_workspace must flag Beta-only API in unsafe/generated JS on stable manifest: {audit_diags:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spec_driven_vanilla_items_and_blocks_accepted_by_asset_guard() {
+        let dir = temp_dir("spec_vanilla_assets");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("BP/blocks")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // Use official Mojang vanilla item & block IDs populated from bedrock-samples
+        fs::write(
+            dir.join("BP/items/acacia_relic.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "pack:acacia_relic" },
+    "components": {
+      "minecraft:icon": "acacia_boat"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("BP/blocks/crystal_shrine.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:block": {
+    "description": { "identifier": "pack:crystal_shrine" },
+    "components": {
+      "minecraft:material_instances": {
+        "*": { "texture": "amethyst_block" }
+      }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let diags = validate_workspace_assets(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags),
+            "Official vanilla_items/vanilla_blocks must pass Asset Guard without RP: {diags:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);

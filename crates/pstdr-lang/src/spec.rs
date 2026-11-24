@@ -19,15 +19,31 @@ pub struct BedrockSpecRaw {
     /// `format_version` for block JSON (e.g. `"1.21.90"`).
     #[serde(default)]
     pub block_format_version: Option<String>,
+    /// Stable `world.beforeEvents` names from Mojang metadata.
+    #[serde(default)]
+    pub stable_before_events: Vec<String>,
+    /// Stable `world.afterEvents` names from Mojang metadata.
+    #[serde(default)]
+    pub stable_after_events: Vec<String>,
     /// `@minecraft/server` event names that require a `-beta` Script API version.
     #[serde(default)]
     pub beta_events: Option<Vec<String>>,
+    /// Event names executed in read-only / restricted execution mode.
+    #[serde(default)]
+    pub read_only_events: Vec<String>,
+    /// Class-qualified Beta-only APIs (`ClassName.memberName`).
+    #[serde(default)]
+    pub beta_apis: Vec<String>,
     pub effects: Vec<String>,
     pub sounds: Vec<String>,
     #[serde(default)]
     pub item_textures: Vec<String>,
     #[serde(default)]
     pub terrain_textures: Vec<String>,
+    #[serde(default)]
+    pub vanilla_items: Vec<String>,
+    #[serde(default)]
+    pub vanilla_blocks: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,12 +56,22 @@ pub struct BedrockSpec {
     pub item_format_version: String,
     /// `format_version` for block JSON.
     pub block_format_version: String,
+    /// Stable `world.beforeEvents` names (lowercased).
+    pub stable_before_events: HashSet<String>,
+    /// Stable `world.afterEvents` names (lowercased).
+    pub stable_after_events: HashSet<String>,
     /// Lowercased `@minecraft/server` event names that require a `-beta` API version.
     pub beta_events: HashSet<String>,
+    /// Lowercased event names executed in read-only mode.
+    pub read_only_events: HashSet<String>,
+    /// Class-qualified Beta-only APIs (`ClassName.memberName`, exact case preserved).
+    pub beta_apis: HashSet<String>,
     pub effects: HashSet<String>,
     pub sounds: HashSet<String>,
     pub item_textures: HashSet<String>,
     pub terrain_textures: HashSet<String>,
+    pub vanilla_items: HashSet<String>,
+    pub vanilla_blocks: HashSet<String>,
     pub source_label: String,
 }
 
@@ -75,11 +101,52 @@ impl BedrockSpec {
             block_format_version: raw
                 .block_format_version
                 .unwrap_or_else(|| "1.21.90".to_string()),
+            stable_before_events: raw
+                .stable_before_events
+                .into_iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect(),
+            stable_after_events: raw
+                .stable_after_events
+                .into_iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect(),
             beta_events,
+            read_only_events: raw
+                .read_only_events
+                .into_iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect(),
+            beta_apis: raw
+                .beta_apis
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             effects: raw.effects.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             sounds: raw.sounds.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             item_textures: raw.item_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             terrain_textures: raw.terrain_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            vanilla_items: raw
+                .vanilla_items
+                .into_iter()
+                .map(|s| {
+                    s.trim()
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(s.trim())
+                        .to_ascii_lowercase()
+                })
+                .collect(),
+            vanilla_blocks: raw
+                .vanilla_blocks
+                .into_iter()
+                .map(|s| {
+                    s.trim()
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(s.trim())
+                        .to_ascii_lowercase()
+                })
+                .collect(),
             source_label: source_label.into(),
         })
     }
@@ -130,7 +197,7 @@ impl BedrockSpec {
             .strip_prefix("minecraft:")
             .unwrap_or(alias.trim())
             .to_ascii_lowercase();
-        self.item_textures.contains(&norm)
+        self.item_textures.contains(&norm) || self.vanilla_items.contains(&norm)
     }
 
     pub fn is_valid_vanilla_terrain_texture(&self, alias: &str) -> bool {
@@ -139,12 +206,21 @@ impl BedrockSpec {
             .strip_prefix("minecraft:")
             .unwrap_or(alias.trim())
             .to_ascii_lowercase();
-        self.terrain_textures.contains(&norm)
+        self.terrain_textures.contains(&norm) || self.vanilla_blocks.contains(&norm)
     }
 
     pub fn is_beta_event(&self, event_name: &str) -> bool {
         self.beta_events
             .contains(&event_name.trim().to_ascii_lowercase())
+    }
+
+    pub fn is_beta_api(&self, symbol: &str) -> bool {
+        let trimmed = symbol.trim();
+        self.beta_apis.contains(trimmed)
+            || self
+                .beta_apis
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(trimmed))
     }
 }
 
