@@ -617,8 +617,16 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     }
 
     if !main_modules.is_empty() {
+        let active_profile = ApiProfile::resolve_or_default(&api_ver);
+        let effective_target = if active_profile == ApiProfile::Legacy1x
+            && resolve_min_engine_version(&target_ver).is_ok_and(|v| v[1] >= 26)
+        {
+            active_profile.default_target_version().to_string()
+        } else {
+            target_ver.clone()
+        };
         update_main_js(root, &main_modules)?;
-        update_manifest_with_ui(root, &target_ver, &api_ver, workspace_uses_ui)?;
+        update_manifest_with_ui(root, &effective_target, &api_ver, workspace_uses_ui)?;
     }
 
     sort_and_dedup_diags(&mut all_diags);
@@ -1022,6 +1030,20 @@ fn audit_beta_api_usage(
                                     "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
                                 ),
                                 "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
+                            ));
+                        }
+                        crate::ast::TopLevelItem::EventHandler(ev)
+                            if spec.is_beta_before_event("playerPlaceBlock")
+                                && matches!(ev.kind, crate::ast::EventKind::PlaceBlock { .. })
+                                && crate::codegen::block_contains_cancel(&ev.body) =>
+                        {
+                            diags.push(Diagnostic::error(
+                                DiagnosticCode::E018,
+                                &ev.span,
+                                format!(
+                                    "Audit Gate failed: 'on place' with 'cancel event' uses Beta-only 'beforeEvents.playerPlaceBlock', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                                ),
+                                "Remove 'cancel event' to use stable 'afterEvents.playerPlaceBlock', or re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' and enable Beta APIs.",
                             ));
                         }
                         crate::ast::TopLevelItem::UnsafeFuncDecl(u) => {

@@ -103,7 +103,7 @@
     "playerCraftRecipe",
     "playerCursorItemGrab",
     "playerCursorItemRelease",
-    "playerPlaceBlock",
+    "before:playerPlaceBlock",
     "playerUseNameTag",
     "portalActivate",
     "virtualContainerClose",

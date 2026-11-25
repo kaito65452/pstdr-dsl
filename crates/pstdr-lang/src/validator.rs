@@ -784,6 +784,20 @@ impl<'a> Validator<'a> {
                 block_var,
                 actor_var,
             } => {
+                if crate::codegen::block_contains_cancel(&ev.body)
+                    && self.ctx.spec.is_beta_before_event("playerPlaceBlock")
+                    && !is_beta_api_version(&self.active_api)
+                {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E018,
+                        &ev.span,
+                        format!(
+                            "'on place' with 'cancel event' compiles to 'world.beforeEvents.playerPlaceBlock', which is Beta-only and unavailable in stable '@minecraft/server' '{}'.",
+                            self.active_api
+                        ),
+                        "Remove 'cancel event' to use stable 'world.afterEvents.playerPlaceBlock', or set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' and enable the Beta APIs experiment in world settings.",
+                    ));
+                }
                 self.insert_binding(block_var, BindingKind::ContextVar, ev.span.line);
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::PlaceBlock;

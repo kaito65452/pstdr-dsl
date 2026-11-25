@@ -3058,7 +3058,7 @@ on join of player {
     #[test]
     fn wave_3b_ten_survival_events_and_before_event_routing() {
         let spec = BedrockSpec::bundled();
-        let src = r#"@addon(target = "26.60", api = "2.11.0")
+        let src = r#"@addon(target = "26.60", api = "2.11.0-beta")
 
 on place of block by player {
     send "Placed {block.type_id}" to player
@@ -3465,5 +3465,146 @@ on chat msg by player {
             leg_res.diagnostics
         );
         assert!(leg_res.js.unwrap().contains("player.runCommandAsync"));
+    }
+
+    #[test]
+    fn qa_on_place_bus_scoped_beta_guard() {
+        let spec = BedrockSpec::bundled();
+
+        // 1. `on place` WITHOUT `cancel event` (afterEvents.playerPlaceBlock) passes on Stable 2.11.0
+        let stable_v2_dir = temp_dir("on_place_stable_v2");
+        fs::create_dir_all(stable_v2_dir.join("src")).unwrap();
+        fs::write(
+            stable_v2_dir.join("src/place.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+on place of block by player {
+    send "Placed {block.type_id}" to player
+}
+"#,
+        )
+        .unwrap();
+        let check_v2 = check_path(&stable_v2_dir.join("src"), Some(&stable_v2_dir), &spec).unwrap();
+        assert!(!has_errors(&check_v2), "Stable 2.x on place (after) must pass check: {check_v2:?}");
+        let conv_v2 = convert_workspace(&stable_v2_dir, &spec).unwrap();
+        assert!(!has_errors(&conv_v2), "Stable 2.x on place (after) must pass convert: {conv_v2:?}");
+        let audit_v2 = audit_workspace(&stable_v2_dir, &spec).unwrap();
+        assert!(!has_errors(&audit_v2), "Stable 2.x on place (after) must pass audit: {audit_v2:?}");
+        let _ = fs::remove_dir_all(&stable_v2_dir);
+
+        // 2. `on place` WITHOUT `cancel event` passes on Legacy 1.x Stable
+        let stable_v1_dir = temp_dir("on_place_stable_v1");
+        fs::create_dir_all(stable_v1_dir.join("src")).unwrap();
+        fs::write(
+            stable_v1_dir.join("src/place.pstdr"),
+            r#"@addon(target = "1.21.50", api = "1.16.0")
+
+on place of block by player {
+    send "Placed {block.type_id}" to player
+}
+"#,
+        )
+        .unwrap();
+        let conv_v1 = convert_workspace(&stable_v1_dir, &spec).unwrap();
+        assert!(!has_errors(&conv_v1), "Stable 1.x on place (after) must pass convert: {conv_v1:?}");
+        let audit_v1 = audit_workspace(&stable_v1_dir, &spec).unwrap();
+        assert!(!has_errors(&audit_v1), "Stable 1.x on place (after) must pass audit: {audit_v1:?}");
+        let _ = fs::remove_dir_all(&stable_v1_dir);
+
+        // 3. `on place` WITH `cancel event` (beforeEvents.playerPlaceBlock) fails with E018 on Stable 2.11.0
+        let cancel_stable = r#"@addon(target = "26.60", api = "2.11.0")
+
+on place of block by player {
+    cancel event
+    send "Blocked {block.type_id}" to player
+}
+"#;
+        let cancel_stable_res =
+            compile_source(cancel_stable, "cancel_place.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            cancel_stable_res.diagnostics.iter().any(|d| d.code == "PSTDR-E018"),
+            "Stable on place with cancel event must emit PSTDR-E018: {:?}",
+            cancel_stable_res.diagnostics
+        );
+
+        // 4. `on place` WITH `cancel event` passes on `2.11.0-beta`
+        let beta_dir = temp_dir("on_place_beta_v2");
+        fs::create_dir_all(beta_dir.join("src")).unwrap();
+        fs::write(
+            beta_dir.join("src/place_beta.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0-beta")
+
+on place of block by player {
+    cancel event
+    send "Blocked {block.type_id}" to player
+}
+"#,
+        )
+        .unwrap();
+        let conv_beta = convert_workspace(&beta_dir, &spec).unwrap();
+        assert!(!has_errors(&conv_beta), "Beta on place with cancel event must pass convert: {conv_beta:?}");
+        let audit_beta = audit_workspace(&beta_dir, &spec).unwrap();
+        assert!(!has_errors(&audit_beta), "Beta on place with cancel event must pass audit: {audit_beta:?}");
+        let _ = fs::remove_dir_all(&beta_dir);
+    }
+
+    #[test]
+    fn qa_manifest_min_engine_version_syncs_on_profile_switch() {
+        let dir = temp_dir("manifest_profile_switch");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "SwitchPack", &spec).unwrap();
+
+        let initial_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let orig_uuid = initial_manifest["header"]["uuid"].as_str().unwrap().to_string();
+        let orig_name = initial_manifest["header"]["name"].as_str().unwrap().to_string();
+        let orig_desc = initial_manifest["header"]["description"].as_str().unwrap().to_string();
+        assert_eq!(initial_manifest["header"]["min_engine_version"], serde_json::json!([1, 26, 60]));
+
+        // Switch workspace script to Legacy 1.x LTS (1.21.50 / 1.16.0)
+        fs::write(
+            dir.join("src/welcome.pstdr"),
+            "@addon(target = \"1.21.50\", api = \"1.16.0\")\n\non join of player {\n    send \"Legacy\" to player\n}\n",
+        )
+        .unwrap();
+        let diags_v1 = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags_v1), "diags_v1: {diags_v1:?}");
+
+        let legacy_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_manifest["header"]["min_engine_version"],
+            serde_json::json!([1, 21, 50]),
+            "Switching to Legacy 1.x must update min_engine_version to [1, 21, 50]"
+        );
+        assert_eq!(legacy_manifest["header"]["uuid"].as_str(), Some(orig_uuid.as_str()));
+        assert_eq!(legacy_manifest["header"]["name"].as_str(), Some(orig_name.as_str()));
+        assert_eq!(legacy_manifest["header"]["description"].as_str(), Some(orig_desc.as_str()));
+
+        // Switch back to Modern 2.x (26.60 / 2.11.0)
+        fs::write(
+            dir.join("src/welcome.pstdr"),
+            "@addon(target = \"26.60\", api = \"2.11.0\")\n\non join of player {\n    send \"Modern\" to player\n}\n",
+        )
+        .unwrap();
+        let diags_v2 = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags_v2), "diags_v2: {diags_v2:?}");
+
+        let modern_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("BP/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            modern_manifest["header"]["min_engine_version"],
+            serde_json::json!([1, 26, 60]),
+            "Switching back to Modern 2.x must update min_engine_version to [1, 26, 60]"
+        );
+        assert_eq!(modern_manifest["header"]["uuid"].as_str(), Some(orig_uuid.as_str()));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

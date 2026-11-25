@@ -317,24 +317,11 @@ pub fn update_manifest_with_ui(
                 .or_insert_with(|| mod_ver.clone());
 
             if fmt_ver == 3 {
-                let is_valid = h
-                    .get("min_engine_version")
-                    .and_then(|v| v.as_str())
-                    .map(is_valid_v3_min_engine)
-                    .unwrap_or(false);
-                if !is_valid {
-                    let semver_str =
-                        format!("{}.{}.{}", min_engine[0], min_engine[1], min_engine[2]);
-                    h.insert("min_engine_version".to_string(), json!(semver_str));
-                }
+                let semver_str =
+                    format!("{}.{}.{}", min_engine[0], min_engine[1], min_engine[2]);
+                h.insert("min_engine_version".to_string(), json!(semver_str));
             } else {
-                let needs_min = !matches!(
-                    h.get("min_engine_version").and_then(|v| v.as_array()),
-                    Some(arr) if arr.len() == 3 && arr[0].as_u64() == Some(1)
-                );
-                if needs_min {
-                    h.insert("min_engine_version".to_string(), json!(min_engine));
-                }
+                h.insert("min_engine_version".to_string(), json!(min_engine));
             }
         }
 

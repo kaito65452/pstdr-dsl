@@ -318,6 +318,16 @@ impl BedrockSpec {
                 .any(|e| e.eq_ignore_ascii_case(trimmed))
     }
 
+    pub fn is_beta_before_event(&self, event_name: &str) -> bool {
+        let trimmed = event_name.trim();
+        self.is_beta_event(&format!("before:{trimmed}")) || self.is_beta_event(trimmed)
+    }
+
+    pub fn is_beta_after_event(&self, event_name: &str) -> bool {
+        let trimmed = event_name.trim();
+        self.is_beta_event(&format!("after:{trimmed}")) || self.is_beta_event(trimmed)
+    }
+
     pub fn is_beta_api(&self, symbol: &str) -> bool {
         let trimmed = symbol.trim();
         self.beta_apis.contains(trimmed)
@@ -463,12 +473,21 @@ pub fn contains_ident_token(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Returns true when `text` references `beforeEvents.<beta_ev>` or `afterEvents.<beta_ev>`.
+/// Returns true when `text` references a Beta-only event.
+///
+/// `beta_ev` may be bus-scoped (`"before:playerPlaceBlock"` or `"after:foo"`) or bare
+/// (`"chatSend"`, which matches both `beforeEvents.<ev>` and `afterEvents.<ev>`).
 pub fn text_uses_beta_event(text: &str, beta_ev: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    let ev_lower = beta_ev.to_ascii_lowercase();
-    contains_ident_token(&lower, &format!("beforeevents.{ev_lower}"))
-        || contains_ident_token(&lower, &format!("afterevents.{ev_lower}"))
+    let ev_lower = beta_ev.trim().to_ascii_lowercase();
+    if let Some(name) = ev_lower.strip_prefix("before:") {
+        contains_ident_token(&lower, &format!("beforeevents.{name}"))
+    } else if let Some(name) = ev_lower.strip_prefix("after:") {
+        contains_ident_token(&lower, &format!("afterevents.{name}"))
+    } else {
+        contains_ident_token(&lower, &format!("beforeevents.{ev_lower}"))
+            || contains_ident_token(&lower, &format!("afterevents.{ev_lower}"))
+    }
 }
 
 /// Returns true when `text` references a class-qualified Beta-only API (`ClassName.memberName`),

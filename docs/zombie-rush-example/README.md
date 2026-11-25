@@ -100,10 +100,10 @@ The following is a direct summary of Claude's feedback after building Zombie Rus
 - Both per-player `state` (Dynamic Properties) and cross-module top-level `mut` held up cleanly in the generated JavaScript.
 - The syntax was easy to guess (`snake_case` helpers, `send ... to`, `apply ... for 5s`), and the wiki documentation was sufficient to write ~100 lines without trial and error.
 
-### Key Takeaways & Limitations Noted
+### Key Takeaways & Limitations Noted *(Wave 1 Blind Test)*
 - `pstdr-c check` and `pstdr-c audit` validate static concerns (syntax, variable scope, vanilla effect/sound IDs, manifest and asset checks) rather than runtime gameplay balance or mob spawn placement.
-- The current built-in event catalog is concise (11 events); areas such as player leave, chat, scoreboards, and UI forms are not covered natively yet.
-- The toolchain targets **Minecraft Bedrock 26.60** with `@minecraft/server` `2.11.0` (`0.1.0-pre-beta.1`), so a matching Bedrock version is required.
+- At the time of this **Wave 1** blind test, the event catalog was 11 events and player leave, chat, scoreboards, and UI forms were not covered natively yet. **Update (Wave 3):** `on leave`, `on chat` / Stable 2.x `on cmd`, native `score[...][...]` / `scoreboard show|hide`, and native `ui action|message|modal` forms are now fully supported — see [`docs/LANGUAGE_REFERENCE.md`](../LANGUAGE_REFERENCE.md) and [`llms.txt`](../../llms.txt).
+- The toolchain targets **Minecraft Bedrock 26.60** (`@minecraft/server 2.11.0`) by default and also supports **Legacy 1.x LTS** (`1.21.50+`, `@minecraft/server 1.15.0`–`1.19.x`) in `0.1.0-pre-beta.1`.
 
 ### Zero `unsafe` Usage
 - **No `unsafe` blocks were needed** to build the entire minigame.
