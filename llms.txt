@@ -1,0 +1,186 @@
+# pstdr-dsl — Language Specification for LLMs & Agents
+
+> Authoritative, compiler-verified reference for **pstdr-dsl** (targeting **Minecraft Bedrock 26.60**, `@minecraft/server` `2.11.0`).
+> Derived directly from `crates/pstdr-lang/src/` (`lexer.rs`, `parser.rs`, `validator.rs`, `codegen.rs`, `spec.rs`, `diagnostics.rs`).
+> Full reference: `docs/LANGUAGE_REFERENCE.md`.
+
+## 1. File Header & Directives
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/frost_blade.json")
+```
+
+- `@addon(target = "...", api = "...")`: Optional, at most one per file. Defaults to `target = "26.60"`, `api = "2.11.0"`. Only `target` and `api` attributes are valid.
+- **Stable vs. Beta API (`PSTDR-E018`):**
+  - Use `api = "2.11.0"` for all stable events and actions.
+  - `on chat` compiles to `world.beforeEvents.chatSend`, which is **Beta-only** in Bedrock 2.x. Using `on chat` (or Beta APIs inside `unsafe`) with a stable `api` fails compilation with `PSTDR-E018`. To use `on chat`, set `api = "2.11.0-beta"` and enable the **Beta APIs** experiment in world settings.
+- `bind_target("<relative_path>")`: Optional (multiple allowed). Links `BP/items/*.json` or `BP/blocks/*.json` for custom component wiring and `"identifier"` verification (`PSTDR-E007`, `PSTDR-E008`, `PSTDR-E009`).
+
+## 2. Valid Top-Level Items
+
+Only these declarations are legal at top level:
+- `const <name> = <expr>` — immutable binding.
+- `mut <name> = <expr>` — mutable binding (file/world-scoped).
+- `state <name>[<owner>] = <default_expr>` — persistent per-entity Dynamic Property (`pstdr:<name>`).
+- `func <name>(<p1>, <p2>) { ... }` — validated `.pstdr` function.
+- `mcfunction "<folder/name>" { ... }` — *(Wave 3A)* inline `.mcfunction` block emitted to `BP/functions/<folder/name>.mcfunction` (raw Minecraft commands, one per line; `//` comments stripped).
+- `every <duration> { ... }` — repeating timer (`system.runInterval`, minimum `50ms` / 1 tick, else `PSTDR-E010`).
+- `after <duration> { ... }` — one-shot delayed timer (`system.runTimeout`).
+- `on <event_signature> { ... }` — event handler (see Section 3).
+- `unsafe <name>(<p1>, ...) { ...raw JS... }` or `unsafe const|mut|var|let <name> = ...;` — top-level raw JS escape hatch (never inside blocks or expressions, `PSTDR-E006`).
+
+## 3. Valid Event Signatures (Wave 1–3A)
+
+| Event | Exact Syntax | Bound Scope Variables | Notes |
+| :--- | :--- | :--- | :--- |
+| Right Click | `on right click with <item> by <actor> { ... }` | `<actor>` | Cancellable |
+| Hit Entity | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `entityHitEntity` |
+| Consume Item | `on consume <item> by <actor> { ... }` | `<actor>` | `itemCompleteUse` |
+| Break Block | `on break of <block_id> by <actor> { ... }` | `<actor>`, `block` | Cancellable |
+| Block Interact | `on interact of <block_id> by <actor> { ... }` | `<actor>`, `block` | Cancellable |
+| Block Tick | `on tick of <block_id> { ... }` | `block`, `dimension` | Needs `BP/blocks/*.json` (`E007`) |
+| Player Join | `on join of <actor> { ... }` | `<actor>` | `playerSpawn` (`initialSpawn`) |
+| Player Leave | `on leave of <actor> { ... }` | `<actor>` | `beforeEvents.playerLeave` |
+| Chat Send | `on chat <msg> by <actor> { ... }` | `<msg>`, `<actor>` | Cancellable; **Beta-only (`E018`)** |
+| Entity Hurt | `on hurt <target> [by <attacker>] { ... }` | `<target>`, `[<attacker>]` | `entityHurt` |
+| Entity Die | `on die of <target> [by <killer>] { ... }` | `<target>`, `[<killer>]` | `entityDie` |
+| Projectile Hit | `on projectile hit <target> [with <proj>] [by <shooter>] { ... }` | `<target>`, `[<shooter>]`, `projectile` | `projectileHitEntity` |
+| Entity Spawn | `on spawn of <entity> [type <type_id>] { ... }` | `<entity>` | `entitySpawn` |
+| Script Event *(3A)* | `on script_event "<ns>:<id>" { ... }` | `event`, `source`, `source_block` | Static `"ns:id"` required (`E016`) |
+| Entity Trigger *(3A)* | `on entity_trigger "<ev_id>" [for "<entity_type>"] { ... }` | `entity`, `event_id` | `dataDrivenEntityTrigger` |
+
+> `beforeEvents` (`on leave`, `on chat`, and `on right click`/`on break`/`on interact` containing `cancel event`) automatically wrap world-mutating actions in `system.run(() => { ... })`.
+
+## 4. Valid Statements & Actions
+
+- **Declarations & Assignment:** `const x = ...`, `mut x = ...`, `x = ...`, `x += ...`, `x -= ...`, `x *= ...`, `x /= ...` (semicolons optional).
+- **Control Flow:** `if <cond> { ... } else if <cond> { ... } else { ... }`, `for <v> in <iterable> { ... }`, `while <cond> { ... }`, `return [<expr>]`.
+- **Nested Timers:** `after <duration> { ... }`, `every <duration> { ... }` (valid inside events/functions as well as top level).
+- **Messages:** `send <msg> to <target>` → `<target>.sendMessage(<msg>)` (`<target>` can be a player or `world`).
+- **Effects:** `apply <effect> <level> to <target> for <duration>` — `<level>` is **1-based** (`>= 1`, `PSTDR-E011`); `<effect>` is validated against vanilla spec (`PSTDR-E013`).
+- **Combat:** `damage <target> by <amount>` → `applyDamage`; `ignite <target> for <duration>` → `setOnFire(secs, true)`.
+- **Particles:** `spawn particle <id> at <entity_or_loc> [in <dimension>]` → `<dim>.spawnParticle(<id>, <loc>)`.
+- **Commands *(Wave 3A)*:** `command "<cmd>"` (runs on overworld) or `command on <target> "<cmd>"` → `<target>.runCommand(<cmd>)`.
+- **Functions *(Wave 3A)*:** `run_fn "<path>"` or `run_fn on <target> "<path>"` → runs `function <path>`; validates that `BP/functions/<path>.mcfunction` or inline `mcfunction "<path>"` exists (`PSTDR-E017`).
+- **Cancel:** `cancel event` — ONLY legal in `on right click`, `on break`, `on interact`, `on chat` (`PSTDR-E004` otherwise).
+
+## 5. Literals, Operators, Predicates & Mapped APIs
+
+- **Units:** Durations `50ms`, `3s`, `2m` (`1s` = `20` ticks). Distances `5b`, `5blocks`.
+- **Strings:** Double quotes ONLY with `{expr}` interpolation (`"Score: {score[p]}"`). Escape literal braces as `\{` / `\}`.
+- **Objects & Arrays:** `{ x = 0, y = 64, z = 0 }` (or `:` instead of `=`), `[1, 2, 3]`.
+- **Operators:** `+ - * / %`, `== != < <= > >=`, `and` (`&&`), `or` (`||`), `not` (`!`), `?.`, `??`, `cond ? a : b`, `x in container`, `a within b` (distance `<= 5` blocks).
+- **`is` / `is not` Predicates:** `sneaking`, `sprinting`, `swimming`, `flying`, `sleeping`, `on_ground` (`on ground`), `in_water` (`in water`), `holding <item_id>`.
+- **Built-in Globals:** `world`, `system`, `console`, `Math`, `JSON`, `String`, `Number`, `Boolean`, `Array`, `Object`, `Date`, `parseInt`, `parseFloat`, `isNaN`.
+- **Mapped `world` Methods:** `world.players()` (`getAllPlayers`), `world.send_message(m)`, `world.dimension(id)` (`getDimension`), `world.play_sound(id, loc)`.
+- **Mapped Entity/Player Properties:** `name_tag`, `type_id`, `is_sneaking`, `is_sprinting`, `is_swimming`, `is_flying`, `is_sleeping`, `is_on_ground`, `is_in_water`, `is_climbing`, `is_falling`, `is_valid`, `selected_slot`, `head_location`, `view_direction`, `hp`, `max_hp`, `holding` / `mainhand` (item sub-props: `.id`, `.type_id`, `.name_tag`).
+- **Mapped Entity/Player/Dimension Methods:**
+  - UI/Audio: `actionbar(msg)`, `title(msg)` (**1 arg only**), `subtitle(msg)`, `send_message(msg)`, `play_sound(id)` (checked by `E013`).
+  - Tags/Combat: `add_tag(t)`, `remove_tag(t)`, `has_tag(t)`, `get_tags()`, `apply_damage(n)`, `apply_impulse(v)`, `apply_knockback(x, z, h, v)`, `add_effect(id, dur, opts)`, `remove_effect(id)`, `set_on_fire(s, ext)`, `extinguish_fire()`, `teleport(loc)`, `kill()`.
+  - World/Inventory/Scoreboard: `spawn_particle(id, loc)`, `spawn_entity(id, loc)`, `spawn_item(item_id, loc_or_entity, amount?)`, `give_item(item_id, amount?, name_tag?)`, `get_entities(opts)`, `get_players(opts)`, `get_score(obj)`, `set_score(obj, val)`, `add_score(obj, delta)`, `holding(item_id)`, `run_command(cmd)`.
+
+## 6. Multiplayer State Rule
+
+**ALWAYS** use `state <key>[player] = <default>` for per-player cooldowns, timers, scores, ranks, or flags. **NEVER** store per-player values in a single top-level `mut` variable (which collides across players in multiplayer).
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+state cooldown[player] = 0
+
+on right click with "minecraft:feather" by player {
+    if cooldown[player] > 0 {
+        player.actionbar("Ready in {cooldown[player]}s")
+        return
+    }
+    cooldown[player] = 5
+    apply speed 2 to player for 2s
+    player.play_sound("random.orb")
+}
+
+every 1s {
+    for p in world.players() {
+        if cooldown[p] > 0 {
+            cooldown[p] -= 1
+        }
+    }
+}
+```
+
+## 7. Wave 3A Patterns (`mcfunction`, `command`, `run_fn`, `script_event`, `entity_trigger`)
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+mcfunction "arena/reset" {
+    effect @s clear
+    clear @s
+}
+
+on script_event "my_pack:reset" {
+    if source != null {
+        run_fn on source "arena/reset"
+        command on source "gamemode adventure @s"
+        send "Arena reset complete." to source
+    }
+}
+
+on entity_trigger "my_pack:enrage" for "minecraft:zombie" {
+    apply strength 2 to entity for 10s
+}
+```
+
+## 8. Custom Item JSON Requirement (`BP/items/<name>.json`)
+
+Every custom item ID (e.g. `"my_pack:wand"`) referenced in `.pstdr` MUST have a `BP/items/<name>.json` file with matching `"identifier"` and a valid `minecraft:icon`:
+- Either a valid vanilla alias (e.g. `"blaze_rod"`, `"iron_sword"`, `"snowball"`) — no `RP/` needed.
+- Or a custom alias registered in `RP/textures/item_texture.json` pointing to an existing `.png`/`.tga` file in `RP/`.
+- NEVER put paths (`/` or `\`), namespaces (`:`), or file extensions (`.png`) inside `minecraft:icon` (`PSTDR-E017`).
+
+```json
+{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "my_pack:wand" },
+    "components": { "minecraft:icon": "blaze_rod" }
+  }
+}
+```
+
+## 9. Strict Forbidden Syntax & Common AI Hallucinations
+
+**Forbidden in safe mode (`PSTDR-E001`):**
+`class`, `extends`, `super`, `new`, `this`, `constructor`, `var`, `let`, `function`, `nil`, `then`, `end`, `import`, `export`, `require`, `eval`, `~=`, `..`.
+Single-quoted (`'...'`) and backtick (`` `...` ``) strings are forbidden outside `unsafe` (`PSTDR-E016`).
+
+**Do NOT hallucinate these invalid APIs / patterns:**
+1. **NO `world.get_time()` / `world.getTime()`** — does not exist in `.pstdr` or Bedrock 2.x. Use `every 1s { ... }`, `after 5s { ... }`, or `system.currentTick`.
+2. **NO 2-argument `p.title("Main", "Sub")`** — `title(msg)` takes **1 argument** (`setTitle`). Call `p.title("Main")` followed by `p.subtitle("Sub")`.
+3. **NO `runCommandAsync(...)`** — removed in Bedrock 2.x. Prefer Wave 3A `command on player "..."` and `run_fn on player "folder/fn"` (auto-wrapped for `beforeEvents`) over raw `player.run_command(...)`.
+4. **NO `player` directly inside `every`/`after` top-level blocks** — fails `PSTDR-E005`. Iterate with `for p in world.players() { ... }`.
+5. **NO `on chat` on stable `api = "2.11.0"`** — fails `PSTDR-E018`. Use `api = "2.11.0-beta"` (and enable Beta APIs in world settings) or use item/sneak interactions (`on right click` + `player is sneaking`).
+6. **Custom items MUST have `BP/items/<name>.json` + valid `minecraft:icon`** — never invent `"ns:item"` without its JSON (`PSTDR-E017`).
+7. **Manifest `min_engine_version` MUST start with `1`** — e.g. `[1, 26, 60]` for Bedrock 26.60, NEVER `[26, 60, 0]` (`PSTDR-E015`).
+8. **Do NOT copy-paste `Zombie Rush`** — `Zombie Rush` is one wave-defense example, not a template for unrelated add-ons.
+
+## 10. Compiler Error Codes (`PSTDR-E001` – `PSTDR-E018`)
+
+- `E001`: Forbidden JS/Lua keyword or operator (`let`, `var`, `function`, `class`, `~=`, `..`) in safe mode.
+- `E002`: Reassignment to a `const` variable (use `mut`).
+- `E003`: Reserved `.pstdr` keyword used as identifier.
+- `E004`: `cancel event` outside `on right click` / `on break` / `on interact` / `on chat`.
+- `E005`: Variable not in scope (e.g., `player` inside `every 1s`).
+- `E006`: `unsafe` used as anonymous block or expression (must be top-level declaration).
+- `E007`: `bind_target()` file missing, or `on tick` missing a `BP/blocks/*.json` target.
+- `E008`: `"identifier"` in bound JSON does not match ID used in `.pstdr`.
+- `E009`: Path traversal (`..`) or absolute path in `bind_target`, `mcfunction`, or `run_fn`.
+- `E010`: `every` interval `< 50ms` (1 tick).
+- `E011`: `apply` status effect level `< 1` (must be 1-based).
+- `E012`: Unclosed `{` brace in block, object, interpolation, `unsafe`, or `mcfunction`.
+- `E013`: Unknown vanilla effect (`apply`) or sound (`play_sound`) ID.
+- `E014`: Workspace not detected (`BP/` and `pstdr.toml` missing).
+- `E015`: Audit Gate failed (bad `min_engine_version` or BP/RP UUID collision).
+- `E016`: General syntax error (unexpected token, unclosed quote, non-namespaced `script_event` ID).
+- `E017`: Invalid texture alias, missing RP image/registry entry, or missing `.mcfunction` target for `run_fn`.
+- `E018`: Beta-only API (`on chat` / `chatSend` / Beta API in `unsafe`) used with a stable `api` version.

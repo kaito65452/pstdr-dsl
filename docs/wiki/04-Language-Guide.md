@@ -217,7 +217,30 @@ world.afterEvents.playerSpawn.subscribe((ev) => {
 
 ---
 
-## 7. Forbidden Keywords in Safe Mode
+## 7. Inline `mcfunction` Blocks (Wave 3A)
+
+Top-level `mcfunction "<relative/path>" { ... }` blocks let you author Bedrock `.mcfunction` files directly inside `.pstdr` sources. During `pstdr-c convert --workspace`, each block is emitted to `BP/functions/<relative/path>.mcfunction` (with `//` comments stripped) and emits no JavaScript.
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+mcfunction "arena/reset" {
+    // Line comments are stripped in the generated .mcfunction
+    effect @s clear
+    tp @s 0 64 0
+}
+
+on join of player {
+    run_fn on player "arena/reset"
+}
+```
+
+- Paths must be non-empty relative paths without `..` or leading slashes (`PSTDR-E009`).
+- Inline `mcfunction` declarations are automatically recognized when validating `run_fn` targets (`PSTDR-E017`).
+
+---
+
+## 8. Forbidden Keywords in Safe Mode
 
 Using the following keywords or operators outside `unsafe` triggers **`PSTDR-E001`**:
 

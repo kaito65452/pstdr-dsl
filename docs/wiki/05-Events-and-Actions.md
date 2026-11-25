@@ -17,10 +17,12 @@
 | **Entity Die** | `on die of <victim> [by <killer>] { ... }` | `<victim>`, `[<killer>]` | `world.afterEvents.entityDie` |
 | **Projectile Hit** | `on projectile hit <victim> [with <proj_id>] [by <shooter>] { ... }` | `<victim>`, `[<shooter>]`, `projectile` | `world.afterEvents.projectileHitEntity` |
 | **Entity Spawn** | `on spawn of <entity> [type <type_id>] { ... }` | `<entity>` | `world.afterEvents.entitySpawn` |
+| **Script Event** *(Wave 3A)* | `on script_event "<namespace>:<id>" { ... }` | `event`, `source`, `source_block` | `system.afterEvents.scriptEventReceive` (namespace + ID filter) |
+| **Entity Trigger** *(Wave 3A)* | `on entity_trigger "<event_id>" [for "<entity_type>"] { ... }` | `entity`, `event_id` | `world.afterEvents.dataDrivenEntityTrigger` |
 
-> **Automatic `beforeEvents` Read-Only Safety:** `on leave` and `on chat` always subscribe to `world.beforeEvents` (as do `on right click`, `on break`, and `on interact` when they contain `cancel event`). Because Bedrock 2.11.0 executes `beforeEvents` in read-only mode, `pstdr-c` keeps `ev.cancel = true`, `const`/`mut` bindings, and read-only checks (such as `.get_score(...)`, `player.name`, and tags) synchronous while automatically wrapping world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `state` writes, `give_item`, `set_score`, `add_score`, and expression statements) inside `system.run(() => { ... })`.
+> **Automatic `beforeEvents` Read-Only Safety:** `on leave` and `on chat` always subscribe to `world.beforeEvents` (as do `on right click`, `on break`, and `on interact` when they contain `cancel event`). Because Bedrock 2.11.0 executes `beforeEvents` in read-only mode, `pstdr-c` keeps `ev.cancel = true`, `const`/`mut` bindings, and read-only checks (such as `.get_score(...)`, `player.name`, and tags) synchronous while automatically wrapping world-mutating actions (`damage`, `ignite`, `apply`, `send`, `spawn particle`, `command`, `run_fn`, `state` writes, `give_item`, `set_score`, `add_score`, and expression statements) inside `system.run(() => { ... })`.
 >
-> **Stable vs. Beta APIs (`PSTDR-E018`):** All 12 non-chat events work on stable `@minecraft/server` `2.11.0`. `on chat` compiles to `world.beforeEvents.chatSend`, which is **Beta-only** in Bedrock 2.x; using it without a `-beta` API version fails compilation with `PSTDR-E018` to prevent runtime `undefined.subscribe` crashes. Set `@addon(target = "26.60", api = "2.11.0-beta")` and enable the **Beta APIs** experiment in world settings to use `on chat`.
+> **Stable vs. Beta APIs (`PSTDR-E018`):** All 14 non-chat events work on stable `@minecraft/server` `2.11.0`. `on chat` compiles to `world.beforeEvents.chatSend`, which is **Beta-only** in Bedrock 2.x; using it without a `-beta` API version fails compilation with `PSTDR-E018` to prevent runtime `undefined.subscribe` crashes. Set `@addon(target = "26.60", api = "2.11.0-beta")` and enable the **Beta APIs** experiment in world settings to use `on chat`.
 
 ### Core & Combat Events Example
 
@@ -128,6 +130,34 @@ on tick of ALTAR_ID {
 }
 ```
 
+### Wave 3A: `mcfunction`, `command`, `run_fn`, `on script_event` & `on entity_trigger`
+
+Use `command` and `run_fn` to execute Bedrock slash commands and `.mcfunction` files cleanly (automatically wrapped in `system.run(...)` inside `beforeEvents`), and bridge back from command blocks / behavior-pack entity events via `on script_event` and `on entity_trigger`:
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+mcfunction "arena/reset" {
+    effect @s clear
+    clear @s
+}
+
+on script_event "my_pack:reset" {
+    if source != null {
+        run_fn on source "arena/reset"
+        command on source "gamemode adventure @s"
+        send "Arena reset ({event.message})" to source
+    }
+}
+
+on entity_trigger "my_pack:enrage" for "minecraft:zombie" {
+    apply strength 2 to entity for 10s
+}
+```
+
+- `on script_event` requires a static string literal or `const` in `"<namespace>:<id>"` format (`PSTDR-E016`).
+- `run_fn` validates that the target exists either as `BP/functions/<path>.mcfunction` or as an inline `mcfunction "<path>" { ... }` block (`PSTDR-E017`).
+
 ---
 
 ## Timers (`after` and `every`)
@@ -162,6 +192,8 @@ every 5s {
 | **Apply Effect** | `apply <effect> <level> to <target> for <duration>` | `<level>` is 1-based (`PSTDR-E011`); `<effect>` is checked against vanilla spec (`PSTDR-E013`). |
 | **Send Message** | `send <message> to <target>` | Emits `<target>.sendMessage(<message>)`. |
 | **Spawn Particle** | `spawn particle <id> at <entity_or_loc> [in <dimension>]` | Emits `<dim>.spawnParticle(<id>, <loc>)`. Accepts an entity (`target`), `.location`, or `{ x = 0, y = 64, z = 0 }`. |
+| **Run Command** *(Wave 3A)* | `command [on <target>] <cmd_expr>` | Emits `<target>.runCommand(<cmd>)` (or `world.getDimension("overworld").runCommand(<cmd>)` if `on <target>` is omitted). |
+| **Run Function** *(Wave 3A)* | `run_fn [on <target>] <path_expr>` | Runs `function <path>` on `<target>` (or overworld). Validates `BP/functions/<path>.mcfunction` or inline `mcfunction` (`PSTDR-E017`). |
 
 ---
 

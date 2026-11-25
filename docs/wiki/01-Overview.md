@@ -10,6 +10,7 @@
 src/*.pstdr ──▶ pstdr-c (parse + semantic & asset checks) ──▶ BP/scripts/generated/*.js
                                                             ├── build/ts/*.ts
                                                             ├── BP/scripts/main.js
+                                                            ├── BP/functions/*.mcfunction (inline mcfunction blocks)
                                                             ├── BP/manifest.json
                                                             └── BP/items|blocks/*.json (component wiring)
 ```
@@ -64,10 +65,11 @@ world.afterEvents.itemUse.subscribe((ev) => {
 1. **[Overview](./01-Overview.md)** — Target engine, compilation pipeline, and toolchain components
 2. **[Installation](./02-Installation.md)** — One-line installer, non-interactive flags, manual Cargo build, and `PATH` setup
 3. **[Quick Start](./03-Quick-Start.md)** — Workspace layout and end-to-end `init` → `check` → `convert` → `audit` walkthrough
-4. **[Language Guide](./04-Language-Guide.md)** — Directives, variables, `state`, units, control flow, operators, `func`, and `unsafe`
-5. **[Events and Actions](./05-Events-and-Actions.md)** — Supported events, timers, built-in actions, and `snake_case` API mappings
-6. **[CLI and Diagnostics](./06-CLI-and-Diagnostics.md)** — `pstdr-c` subcommands, Asset Guard, and `PSTDR-E001`–`E017` reference
+4. **[Language Guide](./04-Language-Guide.md)** — Directives, variables, `state`, units, control flow, operators, `func`, `mcfunction`, and `unsafe`
+5. **[Events and Actions](./05-Events-and-Actions.md)** — Supported events (Wave 1–3A), timers, built-in actions (`command`, `run_fn`, etc.), and `snake_case` API mappings
+6. **[CLI and Diagnostics](./06-CLI-and-Diagnostics.md)** — `pstdr-c` subcommands, Asset Guard, and `PSTDR-E001`–`E018` reference
 7. **[Editor Setup](./07-Editor-Setup.md)** — `pstdr-lsp` and syntax highlighting for Neovim and VS Code / Code - OSS
+8. **[Full Language Reference](../LANGUAGE_REFERENCE.md)** & **[`llms.txt`](../../llms.txt)** — Complete compiler-verified spec and compact LLM reference
 
 ### Real-World Example
 

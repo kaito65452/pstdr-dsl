@@ -12,6 +12,7 @@ example-pack/
 │   ├── manifest.json        # Behavior Pack manifest (data + script modules)
 │   ├── items/               # Item JSON definitions
 │   ├── blocks/              # Block JSON definitions
+│   ├── functions/           # .mcfunction files (hand-written or emitted from mcfunction blocks)
 │   └── scripts/
 │       ├── main.js          # Auto-generated entry point
 │       └── generated/       # Compiled .js modules

@@ -24,12 +24,14 @@
 
 ## Asset Guard (`PSTDR-E017`)
 
-During `convert --workspace` and `audit --workspace`, `pstdr-c` inspects `minecraft:icon` in `BP/items/*.json` and `minecraft:material_instances` in `BP/blocks/*.json`:
-- Rejects forbidden aliases containing `/`, `\`, `:`, or file extensions (`.png`, `.tga`, `.jpg`).
-- Allows valid vanilla texture aliases (e.g. `"blaze_rod"`, `"snowball"`, `"stone"`) without requiring `RP/`.
-- If a custom alias is used, verifies that it is registered in `RP/textures/item_texture.json` or `terrain_texture.json` and that the physical image file exists under `RP/`.
+During `check`, `convert --workspace`, and `audit --workspace`, `pstdr-c` validates texture and function assets:
+- Inspects `minecraft:icon` in `BP/items/*.json` and `minecraft:material_instances` in `BP/blocks/*.json`:
+  - Rejects forbidden aliases containing `/`, `\`, `:`, or file extensions (`.png`, `.tga`, `.jpg`).
+  - Allows valid vanilla texture aliases (e.g. `"blaze_rod"`, `"snowball"`, `"stone"`) without requiring `RP/`.
+  - If a custom alias is used, verifies that it is registered in `RP/textures/item_texture.json` or `terrain_texture.json` and that the physical image file exists under `RP/`.
+- Validates static `run_fn` paths against `BP/functions/<path>.mcfunction` and inline `mcfunction "<path>" { ... }` declarations.
 
-To disable Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` (default: `true`).
+To disable texture Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` (default: `true`).
 
 ---
 
@@ -47,15 +49,15 @@ To disable Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` (default
 | **`PSTDR-E006`** | `unsafe` used as an anonymous block or expression value. | Declare `unsafe name() { ... }` at top level. |
 | **`PSTDR-E007`** | File passed to `bind_target()` not found on disk, or `on tick` has no matching block JSON. | Fix the workspace-relative path or add a matching block JSON in `BP/blocks/`. |
 | **`PSTDR-E008`** | JSON `"identifier"` differs from the ID used in `.pstdr`. | Match the `"identifier"` in `BP/items/*.json` or `BP/blocks/*.json` with the script ID. |
-| **`PSTDR-E009`** | Path traversal (`..`) or absolute path in `bind_target()`. | Use a relative path inside the workspace root. |
+| **`PSTDR-E009`** | Path traversal (`..`) or absolute path in `bind_target()`, `mcfunction`, or `run_fn`. | Use a non-empty relative path inside the workspace root. |
 | **`PSTDR-E010`** | `every` interval `< 50ms` (`1` tick). | Increase interval to at least `50ms` or `1s`. |
 | **`PSTDR-E011`** | Status effect level `< 1`. | Use 1-based levels starting at `1`. |
 | **`PSTDR-E012`** | Unclosed `{` brace in block, object, interpolation, or `unsafe`. | Add the matching closing `}`. |
 | **`PSTDR-E013`** | Vanilla effect or sound ID not found in active spec. | Check spelling against `data/spec/bedrock_api_latest.json`. |
 | **`PSTDR-E014`** | Workspace not detected (`BP/` and `pstdr.toml` missing). | Run in project root, run `pstdr-c init`, or use `convert --from ... to ...`. |
 | **`PSTDR-E015`** | Audit Gate failed: invalid `min_engine_version` or BP/RP UUID collision. | Use `[1, 26, 60]` (or `"1.26.60"` for v3) and unique BP/RP UUIDs. |
-| **`PSTDR-E016`** | General syntax error (unexpected token, unclosed quote, etc.). | Check the highlighted line and fix grammar. |
-| **`PSTDR-E017`** | Invalid texture alias, missing RP registry entry, or missing `.png`/`.tga` file. | Use a valid vanilla alias or register the texture + image file in `RP/`. |
+| **`PSTDR-E016`** | General syntax error (unexpected token, unclosed quote, non-namespaced `script_event` ID). | Check the highlighted line and fix grammar (use `"ns:id"` for `script_event`). |
+| **`PSTDR-E017`** | Invalid texture alias, missing RP registry/image file, or missing `.mcfunction` target for `run_fn`. | Use a valid vanilla alias, register the texture in `RP/`, or define the `.mcfunction` file / inline `mcfunction` block. |
 | **`PSTDR-E018`** | Beta-only `@minecraft/server` API (such as `on chat` / `chatSend`) used while targeting a stable API version. | Set `@addon(target = "26.60", api = "2.11.0-beta")` (and enable Beta APIs in world settings), or use stable item/sneak interactions. |
 
 ---
