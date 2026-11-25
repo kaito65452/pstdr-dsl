@@ -80,7 +80,15 @@ on right click with WAND_ID by player {
 
 ---
 
-## Step 4: Check, Convert, and Audit
+## Step 4: Build (Check, Convert, and Audit)
+
+Run the full pipeline in one command:
+
+```sh
+pstdr-c build --workspace
+```
+
+Or run each stage individually:
 
 ```sh
 pstdr-c check --workspace
@@ -90,6 +98,7 @@ pstdr-c audit --workspace
 
 ### Expected Output
 
+- `pstdr-c build --workspace` → `Build succeeded (check -> convert -> audit): 0 errors.`
 - `pstdr-c check --workspace` → `Check passed: 0 errors.`
 - `pstdr-c convert --workspace` → `Workspace conversion succeeded -> BP/scripts/generated/ & build/ts/`
 - `pstdr-c audit --workspace` → `Audit Gate passed: all scripts and manifests are valid.`
@@ -153,8 +162,9 @@ When `BP/items/wand.json` (`example:wand`) and `BP/blocks/altar.json` (`example:
 - `BP/scripts/generated/_shared/pack_logic.shared.js` — shared `const`, `state`, `func`, and `export const __pstdr_mut = { uses: 0 };`
 - `BP/scripts/generated/items/wand.js` — merged item custom component (`onUse`, `onHitEntity`, `onConsume`)
 - `BP/scripts/generated/blocks/altar.js` — merged block custom component (`onPlayerInteract`, `onTick`, `onPlayerBreak`)
+- `BP/scripts/generated/commands/<stem>.js` — custom slash commands (`on cmd`) registered via `customCommandRegistry`
 - `BP/scripts/generated/world/pack_logic.js` — global events (`on join`, timers, unbound or cancellable `beforeEvents`)
-- `BP/scripts/generated/_registry.js` — single centralized `system.beforeEvents.startup` (or `worldInitialize` for `< 1.21.90`) registration callback imported by `BP/scripts/main.js`
+- `BP/scripts/generated/_registry.js` — single centralized `system.beforeEvents.startup` (`Modern 2.x`) or `world.beforeEvents.worldInitialize` (`Legacy 1.x LTS`) registration callback imported by `BP/scripts/main.js`
 
 For a full playable single-file example tested in-game on Minecraft Bedrock 26.60, see **[Zombie Rush](../zombie-rush-example/README.md)**.
 

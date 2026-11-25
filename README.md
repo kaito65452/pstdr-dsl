@@ -1,6 +1,6 @@
 # pstdr-dsl
 
-A beginner-friendly DSL and toolchain for building **Minecraft Bedrock 26.60** add-ons without boilerplate JavaScript or manual manifest wiring.
+A beginner-friendly DSL and toolchain for building **Minecraft Bedrock** add-ons targeting both **Modern 2.x** (Bedrock `26.60`, `@minecraft/server 2.11.0`) and **Legacy 1.x LTS** (Bedrock `1.21.50+`, `@minecraft/server 1.15.0`–`1.19.x`) without boilerplate JavaScript or manual manifest wiring.
 
 > ### For AI / LLM Code Generation
 >
@@ -8,26 +8,50 @@ A beginner-friendly DSL and toolchain for building **Minecraft Bedrock 26.60** a
 >
 > **Strict Syntax & Anti-Hallucination Rules:**
 > - **No JS/Lua keywords in safe mode (`PSTDR-E001`):** Use `const`, `mut`, `func`, `null`, `!=`, and `"{expr}"` — never `let`, `var`, `function`, `class`, `new`, `~=`, `..`, or single/backtick quotes outside top-level `unsafe`.
+> - **Exact duration units:** `ms`, `s`, `m` ONLY (there is NO `t` tick suffix; use `50ms` for 1 tick).
 > - **Use per-player `state key[player] = default`:** Never store per-player timers, cooldowns, or scores in a single global `mut` variable.
-> - **No invented Bedrock/DSL APIs:** There is NO `world.get_time()` (use `every`/`after` or `system.currentTick`), NO 2-arg `p.title(a, b)` (call `p.title(a)` then `p.subtitle(b)`), and NO `runCommandAsync`.
-> - **Use Wave 3A commands & bridges:** Prefer `command on player "..."`, `run_fn on player "folder/fn"`, inline `mcfunction "folder/fn" { ... }`, and `on script_event "ns:id"` over raw `run_command(...)`.
-> - **Stable vs. Beta & Assets:** `on chat` requires `api = "2.11.0-beta"` (`PSTDR-E018`); every custom item needs a `BP/items/*.json` with a valid vanilla `minecraft:icon` alias or registered `RP/` texture (`PSTDR-E017`).
+> - **No invented Bedrock/DSL APIs:** There is NO `world.get_time()` (use `every`/`after` or `system.current_tick`), NO 2-arg `p.title(a, b)` (call `p.title(a)` then `p.subtitle(b)`), and NO `runCommandAsync` on `2.x` (use `command on player "..."` or `run_fn`).
+> - **Commands, UI & Profiles:** Use **`on cmd`** for Stable `2.x` slash commands (`on chat` is `2.x` Beta-only / `1.x` Stable), `ui action/message/modal` (auto-injects `@minecraft/server-ui` only when used), and `pstdr-c build --workspace` to check, compile, and audit in one command.
 
-## Quick Install
+## Quick Install & Build
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/kaito65452/pstdr-dsl/main/install.sh | sh
+
+# Validate, compile, and audit a workspace in one step:
+pstdr-c build --workspace
 ```
 
 ## Documentation
 
 - **[`llms.txt`](./llms.txt)** — Compact, high-signal language specification for LLMs and coding agents.
-- **[`docs/LANGUAGE_REFERENCE.md`](./docs/LANGUAGE_REFERENCE.md)** — Complete in-repo language, event, action, and error-code reference (`PSTDR-E001`–`PSTDR-E018`).
+- **[`docs/LANGUAGE_REFERENCE.md`](./docs/LANGUAGE_REFERENCE.md)** — Complete in-repo language, event, UI, scoreboard, `ApiProfile`, and error-code reference (`PSTDR-E001`–`PSTDR-E018`).
 - **[`docs/wiki/01-Overview.md`](./docs/wiki/01-Overview.md)** — Step-by-step tutorials and installation guides.
 
 ## Contrasting Patterns
 
-### 1. Per-Player `state[player]` Cooldown Mechanic
+### 1. Stable `2.11.0` Custom Command (`on cmd`) + Native UI (`ui action`) + Scoreboard
+
+```pstdr
+@addon(target = "26.60", api = "2.11.0")
+
+on cmd "my_pack:kit" description "Open kit menu" permission any by player {
+    ui action "Starter Kits" body "Choose your loadout:" to player {
+        button "Warrior" icon "textures/items/iron_sword" {
+            player.give_item("minecraft:iron_sword", 1, "§bStarter Blade")
+            score["kits"][player] += 1
+            scoreboard show "kits" title "Kits Claimed" slot sidebar
+            player.play_sound("random.levelup")
+        }
+        button "Runner" icon "textures/items/feather" {
+            apply speed 2 to player for 10s
+            player.play_sound("random.orb")
+        }
+    }
+}
+```
+
+### 2. Per-Player `state[player]` Cooldown Mechanic
 
 ```pstdr
 @addon(target = "26.60", api = "2.11.0")
@@ -53,7 +77,7 @@ every 1s {
 }
 ```
 
-### 2. Wave 3A `mcfunction` + `on script_event` Bridge
+### 3. Wave 3A `mcfunction` + `on script_event` Bridge
 
 ```pstdr
 @addon(target = "26.60", api = "2.11.0")
@@ -72,8 +96,13 @@ on script_event "my_pack:reset" {
 }
 ```
 
+## Editor LSP Support
+
+- **PackStudio IDE:** Powered by the built-in `builtin.pstdr` language server automatically.
+- **External Editors (`pstdr-lsp`):** The workspace builds a standard stdio LSP binary (`pstdr-lsp`) with diagnostics, hover, completions, formatting, and quick fixes. See [`docs/LANGUAGE_REFERENCE.md#editor-lsp-setup-pstdr-lsp`](./docs/LANGUAGE_REFERENCE.md#editor-lsp-setup-pstdr-lsp) for Helix, Neovim, and VS Code configs.
+
 ## Showcase / Real-World Example
 
-> **Note:** **Zombie Rush** is only *one* wave-defense minigame example — it is **not** a universal template for all add-ons or minigames. For custom items, per-player mechanics, block ticks, or command/`mcfunction` bridges, design from **[`llms.txt`](./llms.txt)** and **[`docs/LANGUAGE_REFERENCE.md`](./docs/LANGUAGE_REFERENCE.md)** instead of reskinning `Zombie Rush`.
+> **Note:** **Zombie Rush** is only *one* wave-defense minigame example — it is **not** a universal template for all add-ons or minigames. For custom commands, UI menus, scoreboards, per-player mechanics, or `mcfunction` bridges, design from **[`llms.txt`](./llms.txt)** and **[`docs/LANGUAGE_REFERENCE.md`](./docs/LANGUAGE_REFERENCE.md)** instead of reskinning `Zombie Rush`.
 
 See **[Zombie Rush](./docs/zombie-rush-example/README.md)** — a 106-line minigame built in a blind test by Claude, using `0 unsafe` blocks, and verified in-game on Minecraft Bedrock 26.60.

@@ -1,7 +1,10 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Span};
 use crate::partition::TargetRegistry;
-use crate::spec::{is_beta_api_version, text_uses_beta_api, text_uses_beta_event, BedrockSpec};
+use crate::spec::{
+    contains_ident_token, is_beta_api_version, text_uses_beta_api, text_uses_beta_event,
+    BedrockSpec,
+};
 use crate::workspace::WorkspaceConfig;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -144,14 +147,34 @@ pub fn validate_program(
         })
         .unwrap_or_else(|| ctx.spec.script_api_version.clone());
 
+    let mut initial_diags = Vec::new();
+    let profile = match ApiProfile::from_api_version(&active_api) {
+        Ok(p) => p,
+        Err(msg) => {
+            let span = program
+                .header
+                .as_ref()
+                .map(|h| h.span.clone())
+                .unwrap_or_else(|| Span::file_only("<input>"));
+            initial_diags.push(Diagnostic::error(
+                DiagnosticCode::E016,
+                &span,
+                msg,
+                "Set '@addon(target = \"26.60\", api = \"2.11.0\")' for Modern 2.x or '@addon(target = \"1.21.50\", api = \"1.16.0\")' for Legacy 1.x LTS.",
+            ));
+            ApiProfile::Modern2x
+        }
+    };
+
     let mut v = Validator {
         ctx,
         active_api,
+        profile,
         scopes: vec![HashMap::new()],
         const_strings: HashMap::new(),
         state_names: HashSet::new(),
         event_ctx: EventCtx::TopLevel,
-        diagnostics: Vec::new(),
+        diagnostics: initial_diags,
         bound_item_ids: Vec::new(),
         bound_block_ids: Vec::new(),
         has_block_bind_target: false,
@@ -181,6 +204,7 @@ pub fn validate_program(
 struct Validator<'a> {
     ctx: &'a ValidationContext<'a>,
     active_api: String,
+    profile: ApiProfile,
     scopes: Vec<HashMap<String, BindingInfo>>,
     const_strings: HashMap<String, String>,
     state_names: HashSet<String>,
@@ -410,12 +434,33 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_unsafe_beta_usage(&mut self, name: &str, raw_code: &str, span: &Span) {
+        if self.profile == ApiProfile::Modern2x {
+            let mut deprecated: Vec<&String> = self.ctx.spec.deprecated_apis.iter().collect();
+            deprecated.sort();
+            for dep_sym in deprecated {
+                if contains_ident_token(raw_code, dep_sym) {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E016,
+                        span,
+                        format!(
+                            "Unsafe declaration '{name}' uses removed/deprecated API '{dep_sym}', which is unavailable in '@minecraft/server' '{}' ({}).",
+                            self.active_api,
+                            self.profile.label()
+                        ),
+                        "In @minecraft/server 2.x, replace 'runCommandAsync(...)' with 'runCommand(...)' (or use .pstdr 'command on <target> \"...\"' / 'run_fn'), or target Legacy 1.x LTS ('1.16.0').",
+                    ));
+                }
+            }
+        }
         if is_beta_api_version(&self.active_api) {
             return;
         }
         let mut beta_events: Vec<&String> = self.ctx.spec.beta_events.iter().collect();
         beta_events.sort();
         for beta_ev in beta_events {
+            if !self.profile.is_chat_send_beta_only() && beta_ev.eq_ignore_ascii_case("chatSend") {
+                continue;
+            }
             if text_uses_beta_event(raw_code, beta_ev) {
                 self.diagnostics.push(Diagnostic::error(
                     DiagnosticCode::E018,
@@ -495,7 +540,9 @@ impl<'a> Validator<'a> {
                 self.event_ctx = EventCtx::PlayerLeave;
             }
             EventKind::ChatSend { msg_var, actor_var } => {
-                if self.ctx.spec.is_beta_event("chatSend") && !is_beta_api_version(&self.active_api)
+                if self.profile.is_chat_send_beta_only()
+                    && self.ctx.spec.is_beta_event("chatSend")
+                    && !is_beta_api_version(&self.active_api)
                 {
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::E018,
@@ -504,7 +551,7 @@ impl<'a> Validator<'a> {
                             "'on chat' compiles to 'world.beforeEvents.chatSend', which is Beta-only and unavailable in stable '@minecraft/server' '{}'.",
                             self.active_api
                         ),
-                        "Set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' and enable the Beta APIs experiment in world settings, or use stable item/sneak interactions ('on right click' with 'player is sneaking').",
+                        "Use 'on cmd' for stable 2.x slash commands, set '@addon(target = \"26.60\", api = \"2.11.0-beta\")' (+ enable Beta APIs), or target Legacy 1.x LTS ('api = \"1.16.0\"') where 'chatSend' is stable.",
                     ));
                 }
                 self.insert_binding(msg_var, BindingKind::ContextVar, ev.span.line);
@@ -661,6 +708,17 @@ impl<'a> Validator<'a> {
                 actor_var,
                 ..
             } => {
+                if !self.profile.supports_custom_commands() {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E016,
+                        &ev.span,
+                        format!(
+                            "'on cmd' (customCommandRegistry) is not supported on Legacy 1.x ('@minecraft/server' '{}').",
+                            self.active_api
+                        ),
+                        "Use 'on chat' on Legacy 1.x LTS, or upgrade your target to '@addon(target = \"26.60\", api = \"2.11.0\")' to use 'on cmd'.",
+                    ));
+                }
                 self.validate_expr(command_id);
                 self.validate_expr(description);
                 match eval_static_string(command_id, &self.const_strings) {
@@ -1354,6 +1412,23 @@ impl<'a> Validator<'a> {
                             ));
                         }
                         _ => {}
+                    }
+
+                    // Reject removed/deprecated runCommandAsync in Modern 2.x
+                    if self.profile == ApiProfile::Modern2x
+                        && (field == "runCommandAsync"
+                            || field == "run_command_async"
+                            || self.ctx.spec.is_deprecated_api(field))
+                    {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            span,
+                            format!(
+                                "Method '{field}()' was removed in '@minecraft/server' '{}' (Modern 2.x).",
+                                self.active_api
+                            ),
+                            "Use 'command on <target> \"...\"', 'run_fn', or '.run_command(...)' (which emits 'runCommand' on 2.x), or target Legacy 1.x LTS ('api = \"1.16.0\"').",
+                        ));
                     }
 
                     // Validate world.* and system.* method calls against BedrockSpec

@@ -1,5 +1,126 @@
 use crate::diagnostics::Span;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApiProfile {
+    #[default]
+    Modern2x,
+    Legacy1x,
+}
+
+impl ApiProfile {
+    /// Resolves an `ApiProfile` from a `@minecraft/server` version string (e.g. `"2.11.0"`,
+    /// `"2.11.0-beta"`, `"1.16.0"`, `"1.19.0-beta"`).
+    ///
+    /// Versions below `1.15.0` (or unsupported `1.20+`) return an explicit error directing users
+    /// to `1.15.0+` (Legacy 1.x LTS) or `2.11.0` (Modern 2.x).
+    pub fn from_api_version(api: &str) -> Result<Self, String> {
+        let trimmed = api.trim();
+        if trimmed.is_empty() {
+            return Err(
+                "Empty '@minecraft/server' API version. Use '2.11.0' (Modern 2.x) or '1.15.0'–'1.19.x' (Legacy 1.x LTS)."
+                    .to_string(),
+            );
+        }
+        let base = trimmed
+            .strip_suffix("-beta")
+            .or_else(|| trimmed.strip_suffix("-BETA"))
+            .unwrap_or(trimmed);
+        let parts: Vec<&str> = base.split('.').collect();
+        if parts.len() < 2 || parts.len() > 3 {
+            return Err(format!(
+                "Invalid '@minecraft/server' API version '{trimmed}'. Use '2.11.0' (Modern 2.x) or '1.15.0'–'1.19.x' (Legacy 1.x LTS)."
+            ));
+        }
+        let major = parts[0].parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid '@minecraft/server' API version '{trimmed}'. Use '2.11.0' (Modern 2.x) or '1.15.0'–'1.19.x' (Legacy 1.x LTS)."
+            )
+        })?;
+        let minor = parts[1].parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid '@minecraft/server' API version '{trimmed}'. Use '2.11.0' (Modern 2.x) or '1.15.0'–'1.19.x' (Legacy 1.x LTS)."
+            )
+        })?;
+        if parts.len() == 3 && parts[2].parse::<u64>().is_err() {
+            return Err(format!(
+                "Invalid '@minecraft/server' API version '{trimmed}'. Use '2.11.0' (Modern 2.x) or '1.15.0'–'1.19.x' (Legacy 1.x LTS)."
+            ));
+        }
+
+        match major {
+            2 => Ok(Self::Modern2x),
+            1 if (15..=19).contains(&minor) => Ok(Self::Legacy1x),
+            1 if minor < 15 => Err(format!(
+                "Unsupported '@minecraft/server' version '{trimmed}': versions below 1.15.0 are not supported. Upgrade to '1.15.0'–'1.19.x' (Legacy 1.x LTS) or '2.11.0' (Modern 2.x)."
+            )),
+            0 => Err(format!(
+                "Unsupported '@minecraft/server' version '{trimmed}': versions below 1.15.0 are not supported. Upgrade to '1.15.0'–'1.19.x' (Legacy 1.x LTS) or '2.11.0' (Modern 2.x)."
+            )),
+            _ => Err(format!(
+                "Unsupported '@minecraft/server' version '{trimmed}'. Supported profiles are '1.15.0'–'1.19.x' (Legacy 1.x LTS) and '2.0.0'–'2.11.x' (Modern 2.x)."
+            )),
+        }
+    }
+
+    pub fn resolve_or_default(api: &str) -> Self {
+        Self::from_api_version(api).unwrap_or(Self::Modern2x)
+    }
+
+    pub fn uses_startup_event(self) -> bool {
+        matches!(self, Self::Modern2x)
+    }
+
+    pub fn command_method(self) -> &'static str {
+        match self {
+            Self::Modern2x => "runCommand",
+            Self::Legacy1x => "runCommandAsync",
+        }
+    }
+
+    pub fn server_ui_version(self) -> &'static str {
+        match self {
+            Self::Modern2x => "2.0.0",
+            Self::Legacy1x => "1.3.0",
+        }
+    }
+
+    pub fn is_chat_send_beta_only(self) -> bool {
+        matches!(self, Self::Modern2x)
+    }
+
+    pub fn supports_custom_commands(self) -> bool {
+        matches!(self, Self::Modern2x)
+    }
+
+    pub fn default_target_version(self) -> &'static str {
+        match self {
+            Self::Modern2x => "26.60",
+            Self::Legacy1x => "1.21.50",
+        }
+    }
+
+    pub fn default_api_version(self) -> &'static str {
+        match self {
+            Self::Modern2x => "2.11.0",
+            Self::Legacy1x => "1.16.0",
+        }
+    }
+
+    pub fn default_component_format_version(self) -> &'static str {
+        match self {
+            Self::Modern2x => "1.21.90",
+            Self::Legacy1x => "1.21.50",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Modern2x => "Modern 2.x",
+            Self::Legacy1x => "Legacy 1.x LTS",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub header: Option<AddonDirective>,

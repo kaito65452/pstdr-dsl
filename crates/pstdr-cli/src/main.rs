@@ -37,7 +37,7 @@ fn main() -> ExitCode {
 fn version_string() -> String {
     let spec = BedrockSpec::bundled();
     format!(
-        "pstdr-c {VERSION} (spec: Bedrock {} / @minecraft/server {})",
+        "pstdr-c {VERSION} (spec: Bedrock {} / @minecraft/server {} / 1.15–1.19 LTS)",
         spec.bedrock_version, spec.script_api_version
     )
 }
@@ -539,7 +539,10 @@ mod tests {
     fn wave_3a_end_cli_build_workspace_and_version_string() {
         let ver = version_string();
         assert!(
-            ver.contains(VERSION) && ver.contains("Bedrock 26.60") && ver.contains("@minecraft/server 2.11.0"),
+            ver.contains(VERSION)
+                && ver.contains("Bedrock 26.60")
+                && ver.contains("@minecraft/server 2.11.0")
+                && ver.contains("1.15–1.19 LTS"),
             "Unexpected version string: {ver}"
         );
 

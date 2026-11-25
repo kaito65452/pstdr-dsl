@@ -1,3 +1,4 @@
+use crate::ast::{AddonDirective, ApiProfile};
 use crate::codegen::{
     emit_block_component_module, emit_code, emit_commands_module, emit_item_component_module,
     emit_shared_module, emit_world_module, program_uses_ui, CodegenOptions, ComponentKind,
@@ -10,7 +11,7 @@ use crate::partition::{partition_program, TargetRegistry};
 use crate::spec::BedrockSpec;
 use crate::validator::{validate_program, ValidationContext};
 use crate::wiring::{
-    emit_registry_module_with_commands, generate_uuid_v4, is_valid_v3_min_engine,
+    emit_registry_module_for_profile, generate_uuid_v4, is_valid_v3_min_engine,
     resolve_min_engine_version, update_main_js, update_manifest_with_ui, wire_bind_targets,
     wire_target_json, RegistryEntry,
 };
@@ -400,21 +401,30 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             }
         }
 
+        let fallback_header = AddonDirective {
+            target: target_ver.clone(),
+            api: api_ver.clone(),
+            span: Span::file_only(&vf.rel),
+        };
         let should_partition = part.should_partition(vf.prog.bind_targets.len())
             || (merge_commands_into_registry && !part.commands.is_empty());
         if !should_partition {
             let registered = wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?;
+            let mut prog_for_emit = vf.prog;
+            if prog_for_emit.header.is_none() {
+                prog_for_emit.header = Some(fallback_header);
+            }
             let opts = CodegenOptions {
                 source_file: vf.rel,
                 source_map_comments: cfg.source_map_comments,
                 custom_components: registered,
                 bound_block_ids: vf.bound_block_ids,
             };
-            let js = emit_code(&vf.prog, &opts, EmitMode::JavaScript);
+            let js = emit_code(&prog_for_emit, &opts, EmitMode::JavaScript);
             write_generated_file(&js_dir.join(format!("{}.js", vf.stem)), &js)?;
 
             if cfg.emit_ts {
-                let ts = emit_code(&vf.prog, &opts, EmitMode::TypeScript);
+                let ts = emit_code(&prog_for_emit, &opts, EmitMode::TypeScript);
                 write_generated_file(&ts_dir.join(format!("{}.ts", vf.stem)), &ts)?;
             }
 
@@ -422,7 +432,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             continue;
         }
 
-        let header = vf.prog.header.as_ref();
+        let header = Some(vf.prog.header.as_ref().unwrap_or(&fallback_header));
         let has_shared = !part.shared.is_empty();
         let shared_ctx_js = SharedContext::from_shared_items(
             &part.shared,
@@ -586,18 +596,19 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     }
 
     if !registry_entries.is_empty() || !command_modules.is_empty() {
-        let reg_js = emit_registry_module_with_commands(
+        let profile = ApiProfile::resolve_or_default(&api_ver);
+        let reg_js = emit_registry_module_for_profile(
             &registry_entries,
             &command_modules,
-            &target_ver,
+            profile,
             EmitMode::JavaScript,
         );
         write_generated_file(&js_dir.join("_registry.js"), &reg_js)?;
         if cfg.emit_ts {
-            let reg_ts = emit_registry_module_with_commands(
+            let reg_ts = emit_registry_module_for_profile(
                 &registry_entries,
                 &command_modules,
-                &target_ver,
+                profile,
                 EmitMode::TypeScript,
             );
             write_generated_file(&ts_dir.join("_registry.ts"), &reg_ts)?;
@@ -911,7 +922,13 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
             }
         }
         if !crate::spec::is_beta_api_version(api_ver) {
-            audit_beta_api_usage(root, &cfg, &scan_target, api_ver, spec, &mut diags)?;
+            let audit_profile = ApiProfile::resolve_or_default(api_ver);
+            if audit_profile == ApiProfile::Legacy1x {
+                let legacy_spec = BedrockSpec::for_profile(ApiProfile::Legacy1x);
+                audit_beta_api_usage(root, &cfg, &scan_target, api_ver, &legacy_spec, &mut diags)?;
+            } else {
+                audit_beta_api_usage(root, &cfg, &scan_target, api_ver, spec, &mut diags)?;
+            }
         }
     }
 

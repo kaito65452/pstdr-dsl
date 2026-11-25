@@ -8,8 +8,21 @@
 bind_target("<relative_bp_json_path>")
 ```
 
-- `@addon(...)` sets the target Bedrock version and `@minecraft/server` API version (optional; defaults to `26.60` / `2.11.0`). Only one `@addon` directive is allowed per file.
+- `@addon(...)` sets the target Bedrock version and `@minecraft/server` API version (optional; defaults to `26.60` / `2.11.0`; can also be set workspace-wide in `pstdr.toml`). Only one `@addon` directive is allowed per file.
 - `bind_target(...)` links a `BP/items/*.json` or `BP/blocks/*.json` file so `pstdr-c` wires custom components and validates the JSON `"identifier"`.
+
+### Multi-Target `ApiProfile` (`Modern 2.x` vs `Legacy 1.x LTS`)
+
+Versions below `1.15.0` are rejected (`PSTDR-E016`).
+
+| Feature | Modern 2.x (`2.0.0`–`2.11.x`, default) | Legacy 1.x LTS (`1.15.0`–`1.19.x`) |
+| :--- | :--- | :--- |
+| Default Target / Manifest | `26.60` (`[1, 26, 60]`), JSON `1.21.90` | `1.21.50` (`[1, 21, 50]`), JSON `1.21.50` |
+| Component Registration | `system.beforeEvents.startup` | `world.beforeEvents.worldInitialize` |
+| `command` / `run_fn` / `.run_command()` | `.runCommand(...)` | `.runCommandAsync(...)` |
+| `on cmd` (`customCommandRegistry`) | **Supported (Stable)** | **Rejected (`PSTDR-E016`)** — use `on chat` |
+| `on chat` (`chatSend`) | **Beta-only (`2.11.0-beta`, `PSTDR-E018`)** | **Stable** (no `-beta` required) |
+| `@minecraft/server-ui` (conditional) | `"2.0.0"` | `"1.3.0"` |
 
 ### Example
 ```pstdr
@@ -64,7 +77,7 @@ world.afterEvents.playerSpawn.subscribe((ev) => {
 | Feature | Syntax | Notes |
 | :--- | :--- | :--- |
 | Numbers & Booleans | `42`, `1.5`, `true`, `false`, `null` | `==` / `!=` with `null` emit JS `==` / `!=`; otherwise `===` / `!==`. |
-| Durations | `50ms`, `3s`, `2m` | Converted to ticks (`50ms` = `1` tick, `1s` = `20` ticks, `1m` = `1200` ticks). |
+| Durations | `50ms`, `3s`, `2m` | Converted to ticks (`50ms` = `1` tick, `1s` = `20` ticks, `1m` = `1200` ticks). **No `t` suffix** — use `50ms` for 1 tick. |
 | Distances | `5b`, `5blocks` | Emitted as numeric block count. |
 | Objects | `{ key = val }`, `{ "k": val }` | Key-value pairs separated by `,` (`=` or `:`). |
 | Arrays | `[1, "a", true]` | Zero-indexed lists. |

@@ -90,9 +90,18 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         }
     }
 
+    let default_spec = crate::spec::BedrockSpec::bundled();
+    let api_ver = program
+        .header
+        .as_ref()
+        .map(|h| h.api.as_str())
+        .unwrap_or(&default_spec.script_api_version);
+    let profile = ApiProfile::resolve_or_default(api_ver);
+
     let mut cg = Codegen {
         opts,
         mode,
+        profile,
         state_names,
         const_strings,
         shared: SharedContext::default(),
@@ -127,12 +136,11 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
 
     cg.emit_program(program);
 
-    let default_spec = crate::spec::BedrockSpec::bundled();
     let target_ver = program
         .header
         .as_ref()
         .map(|h| h.target.as_str())
-        .unwrap_or(&default_spec.bedrock_version);
+        .unwrap_or(profile.default_target_version());
 
     let mut out = String::new();
     if opts.source_map_comments {
@@ -142,18 +150,8 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         ));
     }
 
-    let api_ver = program
-        .header
-        .as_ref()
-        .map(|h| h.api.as_str())
-        .unwrap_or(&default_spec.script_api_version);
-    let api_major: u64 = api_ver
-        .split('.')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
     let use_v2_startup =
-        api_major >= 2 && crate::wiring::uses_custom_components_v2(target_ver);
+        profile.uses_startup_event() && crate::wiring::uses_custom_components_v2(target_ver);
 
     let has_components = !opts.custom_components.is_empty();
     let has_cmds = !cg.cmd_registrations.is_empty();
@@ -513,10 +511,14 @@ pub fn emit_shared_module(
     };
     let shared_ctx = SharedContext::from_shared_items(shared_items, None);
     let state_names = shared_ctx.shared_states.clone();
+    let profile = header
+        .map(|h| ApiProfile::resolve_or_default(&h.api))
+        .unwrap_or(ApiProfile::Modern2x);
 
     let mut cg = Codegen {
         opts: &opts,
         mode,
+        profile,
         state_names,
         const_strings: HashMap::new(),
         shared: shared_ctx,
@@ -705,9 +707,13 @@ pub fn emit_item_component_module(
         custom_components: Vec::new(),
         bound_block_ids: Vec::new(),
     };
+    let profile = header
+        .map(|h| ApiProfile::resolve_or_default(&h.api))
+        .unwrap_or(ApiProfile::Modern2x);
     let mut cg = Codegen {
         opts: &opts,
         mode,
+        profile,
         state_names: shared.shared_states.clone(),
         const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
@@ -868,9 +874,13 @@ pub fn emit_block_component_module(
         custom_components: Vec::new(),
         bound_block_ids: Vec::new(),
     };
+    let profile = header
+        .map(|h| ApiProfile::resolve_or_default(&h.api))
+        .unwrap_or(ApiProfile::Modern2x);
     let mut cg = Codegen {
         opts: &opts,
         mode,
+        profile,
         state_names: shared.shared_states.clone(),
         const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
@@ -1030,9 +1040,13 @@ pub fn emit_world_module(
         custom_components: Vec::new(),
         bound_block_ids: Vec::new(),
     };
+    let profile = header
+        .map(|h| ApiProfile::resolve_or_default(&h.api))
+        .unwrap_or(ApiProfile::Modern2x);
     let mut cg = Codegen {
         opts: &opts,
         mode,
+        profile,
         state_names: shared.shared_states.clone(),
         const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
@@ -1091,9 +1105,13 @@ pub fn emit_commands_module(
         custom_components: Vec::new(),
         bound_block_ids: Vec::new(),
     };
+    let profile = header
+        .map(|h| ApiProfile::resolve_or_default(&h.api))
+        .unwrap_or(ApiProfile::Modern2x);
     let mut cg = Codegen {
         opts: &opts,
         mode,
+        profile,
         state_names: shared.shared_states.clone(),
         const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
@@ -1147,6 +1165,7 @@ pub fn emit_commands_module(
 struct Codegen<'a> {
     opts: &'a CodegenOptions,
     mode: EmitMode,
+    profile: ApiProfile,
     state_names: HashSet<String>,
     const_strings: HashMap<String, String>,
     shared: SharedContext,
@@ -2337,12 +2356,13 @@ impl<'a> Codegen<'a> {
                 target, command, ..
             } => {
                 let cmd_js = self.emit_expr(command);
+                let run_method = self.profile.command_method();
                 let call = if let Some(t) = target {
                     let t_js = self.emit_expr(t);
-                    format!("{t_js}.runCommand({cmd_js});")
+                    format!("{t_js}.{run_method}({cmd_js});")
                 } else {
                     self.needs_world = true;
-                    format!("world.getDimension(\"overworld\").runCommand({cmd_js});")
+                    format!("world.getDimension(\"overworld\").{run_method}({cmd_js});")
                 };
                 self.wrap_before_event_mutation(call);
             }
@@ -2379,12 +2399,13 @@ impl<'a> Codegen<'a> {
                         format!("`function ${{{p_js}}}`")
                     }
                 };
+                let run_method = self.profile.command_method();
                 let call = if let Some(t) = target {
                     let t_js = self.emit_expr(t);
-                    format!("{t_js}.runCommand({fn_cmd_js});")
+                    format!("{t_js}.{run_method}({fn_cmd_js});")
                 } else {
                     self.needs_world = true;
-                    format!("world.getDimension(\"overworld\").runCommand({fn_cmd_js});")
+                    format!("world.getDimension(\"overworld\").{run_method}({fn_cmd_js});")
                 };
                 self.wrap_before_event_mutation(call);
             }
@@ -2927,8 +2948,9 @@ impl<'a> Codegen<'a> {
                         );
                     }
                     let sep = if *optional { "?." } else { "." };
-                    let mapped_method = if matches!(object.as_ref(), Expr::Ident(w, _) if w == "world")
-                    {
+                    let mapped_method = if field == "run_command" {
+                        Some(self.profile.command_method())
+                    } else if matches!(object.as_ref(), Expr::Ident(w, _) if w == "world") {
                         map_world_method(field).or_else(|| map_method(field))
                     } else if matches!(object.as_ref(), Expr::Ident(s, _) if s == "system") {
                         map_system_method(field).or_else(|| map_method(field))

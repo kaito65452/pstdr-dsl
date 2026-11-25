@@ -4,6 +4,7 @@
 
 | Command | Description |
 | :--- | :--- |
+| `pstdr-c build --workspace [--format pretty\|compact\|json] [--spec <file>]` | Run `check` → `convert` → `audit` sequentially (recommended). |
 | `pstdr-c fmt <path> [--check]` | Format `.pstdr` files in a file or directory (`--check` exits `1` if unformatted). |
 | `pstdr-c fmt --workspace [--check]` | Format all `.pstdr` files in the workspace. |
 | `pstdr-c convert --from <in.pstdr> to <out.js> [--ts] [--spec <file>]` | Compile a single `.pstdr` file to `.js` (and `.ts` with `--ts`). |
@@ -44,7 +45,7 @@ To disable texture Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` 
 | **`PSTDR-E001`** | Forbidden keyword (`let`, `var`, `class`, `function`, `nil`, `~=`, `..`, etc.) in safe mode. | Replace with `.pstdr` syntax (`const`, `mut`, `func`, `null`, `!=`, `"{a}{b}"`) or move into `unsafe`. |
 | **`PSTDR-E002`** | Assignment (`=`, `+=`, `-=`, `*=`, `/=`) to a `const` variable. | Declare with `mut` instead of `const`. |
 | **`PSTDR-E003`** | Reserved `.pstdr` keyword used as an identifier. | Rename the variable, parameter, or function. |
-| **`PSTDR-E004`** | `cancel event` used in a non-cancellable block (`func`, `after`, `every`, `on hit`, `on join`, `on leave`, `on hurt`, `on die`, `on consume`, etc.). | Only use `cancel event` inside `on right click`, `on break`, `on interact`, or `on chat` (Beta). |
+| **`PSTDR-E004`** | `cancel event` used in a non-cancellable block (`func`, `after`, `every`, `on hit`, `on join`, `on leave`, `on hurt`, `on die`, `on consume`, etc.). | Only use `cancel event` inside `on right click`, `on break`, `on place`, `on interact`, `on interact_entity`, `on explosion`, or `on chat`. |
 | **`PSTDR-E005`** | Context variable (`player`, `target`, etc.) not available in scope. | Declare it or iterate `for p in world.players()` inside `every`/`after`. |
 | **`PSTDR-E006`** | `unsafe` used as an anonymous block or expression value. | Declare `unsafe name() { ... }` at top level. |
 | **`PSTDR-E007`** | File passed to `bind_target()` not found on disk, or `on tick` has no matching block JSON. | Fix the workspace-relative path or add a matching block JSON in `BP/blocks/`. |
@@ -55,10 +56,10 @@ To disable texture Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` 
 | **`PSTDR-E012`** | Unclosed `{` brace in block, object, interpolation, or `unsafe`. | Add the matching closing `}`. |
 | **`PSTDR-E013`** | Vanilla effect or sound ID not found in active spec. | Check spelling against `data/spec/bedrock_api_latest.json`. |
 | **`PSTDR-E014`** | Workspace not detected (`BP/` and `pstdr.toml` missing). | Run in project root, run `pstdr-c init`, or use `convert --from ... to ...`. |
-| **`PSTDR-E015`** | Audit Gate failed: invalid `min_engine_version` or BP/RP UUID collision. | Use `[1, 26, 60]` (or `"1.26.60"` for v3) and unique BP/RP UUIDs. |
-| **`PSTDR-E016`** | General syntax error (unexpected token, unclosed quote, non-namespaced `script_event` ID). | Check the highlighted line and fix grammar (use `"ns:id"` for `script_event`). |
-| **`PSTDR-E017`** | Invalid texture alias, missing RP registry/image file, or missing `.mcfunction` target for `run_fn`. | Use a valid vanilla alias, register the texture in `RP/`, or define the `.mcfunction` file / inline `mcfunction` block. |
-| **`PSTDR-E018`** | Beta-only `@minecraft/server` API (such as `on chat` / `chatSend`) used while targeting a stable API version. | Set `@addon(target = "26.60", api = "2.11.0-beta")` (and enable Beta APIs in world settings), or use stable item/sneak interactions. |
+| **`PSTDR-E015`** | Audit Gate failed: invalid `min_engine_version`, BP/RP UUID collision, or stale `BP/manifest.json` `@minecraft/server` mismatch. | Run `pstdr-c build --workspace`, use `[1, 26, 60]` / `[1, 21, 50]` (or `"1.26.60"` for v3), and unique BP/RP UUIDs. |
+| **`PSTDR-E016`** | Syntax or API error (unexpected token, helper arity, unknown `world.*`/`system.*`, `< 1.15.0` API, `on cmd` on `1.x`, `runCommandAsync` on `2.x`, non-namespaced `on cmd`/`on script_event` ID). | Check the highlighted line, fix grammar/helper arity, or update `@addon(api = "...")` to a supported profile. |
+| **`PSTDR-E017`** | Invalid texture alias, missing RP registry/image/UI icon file, or missing `.mcfunction` target for `run_fn`. | Use a valid vanilla alias, register the texture in `RP/`, or define the `.mcfunction` file / inline `mcfunction` block. |
+| **`PSTDR-E018`** | Beta-only `@minecraft/server` API (such as `on chat` / `chatSend` on `2.x`) used while targeting a stable API version. | Use `on cmd` (Stable `2.x`), set `@addon(target = "26.60", api = "2.11.0-beta")` (+ Beta APIs), or target Legacy `1.x` LTS (`api = "1.16.0"`). |
 
 ---
 

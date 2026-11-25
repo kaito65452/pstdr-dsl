@@ -1,4 +1,4 @@
-use crate::ast::BindTargetStmt;
+use crate::ast::{ApiProfile, BindTargetStmt};
 use crate::codegen::ComponentKind;
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -242,14 +242,17 @@ pub fn update_manifest(
     update_manifest_with_ui(workspace_root, target_version, script_api_version, false)
 }
 
-/// Same as `update_manifest`, with optional `@minecraft/server-ui` (`"2.0.0"`) dependency injection
-/// when at least one `ui` form block is used in the workspace.
+/// Same as `update_manifest`, with optional `@minecraft/server-ui` dependency injection
+/// (`"2.0.0"` for Modern 2.x, `"1.3.0"` for Legacy 1.x LTS) when at least one `ui` form block is
+/// used in the workspace.
 pub fn update_manifest_with_ui(
     workspace_root: &Path,
     target_version: &str,
     script_api_version: &str,
     needs_server_ui: bool,
 ) -> Result<(), String> {
+    let profile = ApiProfile::resolve_or_default(script_api_version);
+    let ui_api_version = profile.server_ui_version();
     let bp_dir = workspace_root.join("BP");
     fs::create_dir_all(&bp_dir)
         .map_err(|e| format!("Failed to create directory '{}': {e}", bp_dir.display()))?;
@@ -393,7 +396,10 @@ pub fn update_manifest_with_ui(
                         == Some("@minecraft/server-ui")
                     {
                         if let Some(obj) = dep.as_object_mut() {
-                            obj.insert("version".to_string(), Value::String("2.0.0".to_string()));
+                            obj.insert(
+                                "version".to_string(),
+                                Value::String(ui_api_version.to_string()),
+                            );
                         }
                         ui_updated = true;
                     }
@@ -401,7 +407,7 @@ pub fn update_manifest_with_ui(
                 if !ui_updated {
                     arr.push(json!({
                         "module_name": "@minecraft/server-ui",
-                        "version": "2.0.0"
+                        "version": ui_api_version
                     }));
                 }
             }
@@ -464,7 +470,23 @@ pub fn emit_registry_module_with_commands(
     target_version: &str,
     mode: crate::codegen::EmitMode,
 ) -> String {
-    let use_v2_startup = uses_custom_components_v2(target_version);
+    let profile = if uses_custom_components_v2(target_version) {
+        ApiProfile::Modern2x
+    } else {
+        ApiProfile::Legacy1x
+    };
+    emit_registry_module_for_profile(entries, command_modules, profile, mode)
+}
+
+/// Emits `_registry.js` / `_registry.ts` using the resolved `ApiProfile` (`startup` on Modern 2.x,
+/// `worldInitialize` on Legacy 1.x LTS).
+pub fn emit_registry_module_for_profile(
+    entries: &[RegistryEntry],
+    command_modules: &[String],
+    profile: ApiProfile,
+    mode: crate::codegen::EmitMode,
+) -> String {
+    let use_v2_startup = profile.uses_startup_event();
     let init_ev_param = if mode == crate::codegen::EmitMode::TypeScript {
         "(initEv: any)"
     } else {

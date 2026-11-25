@@ -1,6 +1,6 @@
 # `.pstdr` Language & Toolchain Overview
 
-**`.pstdr`** is a domain-specific language (DSL) and compiler toolchain for **Minecraft Bedrock 26.60+** (`@minecraft/server 2.11.0`, with backward compatibility for legacy `1.21.x` targets).
+**`.pstdr`** is a domain-specific language (DSL) and compiler toolchain for **Minecraft Bedrock** supporting both **Modern 2.x** (Bedrock `26.60`, `@minecraft/server 2.11.0`, `@minecraft/server-ui 2.0.0`) and **Legacy 1.x LTS** (Bedrock `1.21.50+`, `@minecraft/server 1.15.0`–`1.19.x`, `@minecraft/server-ui 1.3.0`).
 
 ---
 
@@ -64,11 +64,11 @@ world.afterEvents.itemUse.subscribe((ev) => {
 
 1. **[Overview](./01-Overview.md)** — Target engine, compilation pipeline, and toolchain components
 2. **[Installation](./02-Installation.md)** — One-line installer, non-interactive flags, manual Cargo build, and `PATH` setup
-3. **[Quick Start](./03-Quick-Start.md)** — Workspace layout and end-to-end `init` → `check` → `convert` → `audit` walkthrough
-4. **[Language Guide](./04-Language-Guide.md)** — Directives, variables, `state`, units, control flow, operators, `func`, `mcfunction`, and `unsafe`
-5. **[Events and Actions](./05-Events-and-Actions.md)** — Supported events (Wave 1–3A), timers, built-in actions (`command`, `run_fn`, etc.), and `snake_case` API mappings
-6. **[CLI and Diagnostics](./06-CLI-and-Diagnostics.md)** — `pstdr-c` subcommands, Asset Guard, and `PSTDR-E001`–`E018` reference
-7. **[Editor Setup](./07-Editor-Setup.md)** — `pstdr-lsp` and syntax highlighting for Neovim and VS Code / Code - OSS
+3. **[Quick Start](./03-Quick-Start.md)** — Workspace layout and end-to-end `init` → `build --workspace` (`check` → `convert` → `audit`) walkthrough
+4. **[Language Guide](./04-Language-Guide.md)** — Directives, `ApiProfile` (`2.x` vs `1.x` LTS), variables, `state`, units, control flow, operators, `func`, `mcfunction`, and `unsafe`
+5. **[Events and Actions](./05-Events-and-Actions.md)** — All 26 events (Wave 1–3C including `on cmd` & 10 survival events), native UI forms, scoreboards, timers, actions, and `snake_case` helpers
+6. **[CLI and Diagnostics](./06-CLI-and-Diagnostics.md)** — `pstdr-c` subcommands (`build --workspace`), Asset Guard, and `PSTDR-E001`–`E018` reference
+7. **[Editor Setup](./07-Editor-Setup.md)** — PackStudio `builtin.pstdr` and `pstdr-lsp` setup for Helix, Neovim, and VS Code / Code - OSS
 8. **[Full Language Reference](../LANGUAGE_REFERENCE.md)** & **[`llms.txt`](../../llms.txt)** — Complete compiler-verified spec and compact LLM reference
 
 ### Real-World Example

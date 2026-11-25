@@ -1,12 +1,23 @@
+use crate::ast::ApiProfile;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 pub const BUNDLED_SPEC_JSON: &str = include_str!("../../../data/spec/bedrock_api_latest.json");
+pub const BUNDLED_LEGACY_SPEC_JSON: &str =
+    include_str!("../../../data/spec/bedrock_api_v1_legacy.json");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BedrockSpecRaw {
+    #[serde(default)]
+    pub spec_version: Option<String>,
+    #[serde(default)]
+    pub minecraft_version: Option<String>,
+    #[serde(default)]
+    pub server_api: Option<String>,
+    #[serde(default)]
+    pub server_ui_api: Option<String>,
     pub bedrock_version: String,
     pub script_api_version: String,
     /// Official `min_engine_version` for Bedrock manifests — always starts with 1,
@@ -34,12 +45,21 @@ pub struct BedrockSpecRaw {
     /// Class-qualified Beta-only APIs (`ClassName.memberName`).
     #[serde(default)]
     pub beta_apis: Vec<String>,
+    /// Removed/deprecated APIs in this profile (e.g. `runCommandAsync` in 2.x).
+    #[serde(default)]
+    pub deprecated_apis: Vec<String>,
     /// Valid `@minecraft/server` `World` methods (canonical camelCase).
     #[serde(default)]
     pub world_methods: Option<Vec<String>>,
     /// Valid `@minecraft/server` `System` methods (canonical camelCase).
     #[serde(default)]
     pub system_methods: Option<Vec<String>>,
+    /// Symbol catalog keyed by `@minecraft/server` class/enum name.
+    #[serde(default)]
+    pub server_symbols: HashMap<String, Vec<String>>,
+    /// Supported `@minecraft/server-ui` form classes.
+    #[serde(default)]
+    pub server_ui_classes: Vec<String>,
     pub effects: Vec<String>,
     pub sounds: Vec<String>,
     #[serde(default)]
@@ -54,6 +74,9 @@ pub struct BedrockSpecRaw {
 
 #[derive(Debug, Clone)]
 pub struct BedrockSpec {
+    pub spec_version: String,
+    pub minecraft_version: String,
+    pub server_ui_api_version: String,
     pub bedrock_version: String,
     pub script_api_version: String,
     /// `min_engine_version` for `BP/manifest.json` — always `[1, x, x]`.
@@ -72,10 +95,16 @@ pub struct BedrockSpec {
     pub read_only_events: HashSet<String>,
     /// Class-qualified Beta-only APIs (`ClassName.memberName`, exact case preserved).
     pub beta_apis: HashSet<String>,
+    /// Removed/deprecated APIs in this profile (exact case preserved).
+    pub deprecated_apis: HashSet<String>,
     /// Valid `@minecraft/server` `World` methods (canonical camelCase).
     pub world_methods: HashSet<String>,
     /// Valid `@minecraft/server` `System` methods (canonical camelCase).
     pub system_methods: HashSet<String>,
+    /// Symbol catalog keyed by `@minecraft/server` class/enum name.
+    pub server_symbols: HashMap<String, Vec<String>>,
+    /// Supported `@minecraft/server-ui` form classes.
+    pub server_ui_classes: HashSet<String>,
     pub effects: HashSet<String>,
     pub sounds: HashSet<String>,
     pub item_textures: HashSet<String>,
@@ -116,16 +145,43 @@ impl BedrockSpec {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let profile = ApiProfile::resolve_or_default(
+            raw.server_api.as_deref().unwrap_or(&raw.script_api_version),
+        );
+        let spec_version = raw
+            .spec_version
+            .unwrap_or_else(|| raw.script_api_version.clone());
+        let minecraft_version = raw
+            .minecraft_version
+            .unwrap_or_else(|| raw.bedrock_version.clone());
+        let server_ui_api_version = raw
+            .server_ui_api
+            .unwrap_or_else(|| profile.server_ui_version().to_string());
+        let deprecated_apis: HashSet<String> = raw
+            .deprecated_apis
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let server_ui_classes: HashSet<String> = raw
+            .server_ui_classes
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         Ok(Self {
+            spec_version,
+            minecraft_version,
+            server_ui_api_version,
             bedrock_version: raw.bedrock_version,
             script_api_version: raw.script_api_version,
             min_engine_version,
             item_format_version: raw
                 .item_format_version
-                .unwrap_or_else(|| "1.21.90".to_string()),
+                .unwrap_or_else(|| profile.default_component_format_version().to_string()),
             block_format_version: raw
                 .block_format_version
-                .unwrap_or_else(|| "1.21.90".to_string()),
+                .unwrap_or_else(|| profile.default_component_format_version().to_string()),
             stable_before_events: raw
                 .stable_before_events
                 .into_iter()
@@ -148,8 +204,11 @@ impl BedrockSpec {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            deprecated_apis,
             world_methods,
             system_methods,
+            server_symbols: raw.server_symbols,
+            server_ui_classes,
             effects: raw.effects.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             sounds: raw.sounds.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             item_textures: raw.item_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
@@ -179,8 +238,22 @@ impl BedrockSpec {
     }
 
     pub fn bundled() -> Self {
-        Self::from_json_str(BUNDLED_SPEC_JSON, "embedded:data/spec/bedrock_api_latest.json")
-            .expect("Bundled bedrock_api_latest.json must be valid JSON")
+        Self::for_profile(ApiProfile::Modern2x)
+    }
+
+    pub fn for_profile(profile: ApiProfile) -> Self {
+        match profile {
+            ApiProfile::Modern2x => Self::from_json_str(
+                BUNDLED_SPEC_JSON,
+                "embedded:data/spec/bedrock_api_latest.json",
+            )
+            .expect("Bundled bedrock_api_latest.json must be valid JSON"),
+            ApiProfile::Legacy1x => Self::from_json_str(
+                BUNDLED_LEGACY_SPEC_JSON,
+                "embedded:data/spec/bedrock_api_v1_legacy.json",
+            )
+            .expect("Bundled bedrock_api_v1_legacy.json must be valid JSON"),
+        }
     }
 
     pub fn load(custom_spec: Option<&Path>, workspace_root: Option<&Path>) -> Result<Self, String> {
@@ -252,6 +325,25 @@ impl BedrockSpec {
                 .beta_apis
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case(trimmed))
+    }
+
+    pub fn is_deprecated_api(&self, symbol: &str) -> bool {
+        let trimmed = symbol.trim();
+        self.deprecated_apis.contains(trimmed)
+            || self
+                .deprecated_apis
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(trimmed))
+    }
+
+    pub fn has_server_symbol(&self, class_name: &str, member: &str) -> bool {
+        self.server_symbols
+            .get(class_name)
+            .is_some_and(|members| members.iter().any(|m| m == member))
+    }
+
+    pub fn has_server_ui_class(&self, class_name: &str) -> bool {
+        self.server_ui_classes.contains(class_name.trim())
     }
 
     pub fn is_valid_world_method(&self, method: &str) -> bool {

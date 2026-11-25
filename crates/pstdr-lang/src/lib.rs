@@ -12,6 +12,7 @@ pub mod wiring;
 pub mod workspace;
 
 pub use assets::validate_workspace_assets;
+pub use ast::ApiProfile;
 pub use codegen::{emit_code, CodegenOptions, ComponentKind, EmitMode};
 pub use diagnostics::{
     diagnostics_to_json, explain_code, format_diagnostics_compact, format_diagnostics_pretty,
@@ -3183,5 +3184,286 @@ on join of player {
             "Contextual keywords must be usable as variables: {:?}",
             res.diagnostics
         );
+    }
+
+    // ─── WAVE 3C: Multi-Target ApiProfile, Spec Resync & Doc-Snippet Verification ───
+
+    #[test]
+    fn wave_3c_api_profile_modern_2x_vs_legacy_1x_codegen_and_validation() {
+        let spec = BedrockSpec::bundled();
+
+        // 1. Profile resolution and < 1.15.0 rejection
+        assert_eq!(ApiProfile::from_api_version("2.11.0"), Ok(ApiProfile::Modern2x));
+        assert_eq!(ApiProfile::from_api_version("2.11.0-beta"), Ok(ApiProfile::Modern2x));
+        assert_eq!(ApiProfile::from_api_version("1.15.0"), Ok(ApiProfile::Legacy1x));
+        assert_eq!(ApiProfile::from_api_version("1.16.0"), Ok(ApiProfile::Legacy1x));
+        assert_eq!(ApiProfile::from_api_version("1.19.0-beta"), Ok(ApiProfile::Legacy1x));
+        let err_old = ApiProfile::from_api_version("1.14.0").unwrap_err();
+        assert!(err_old.contains("1.15.0") && err_old.contains("2.11.0"), "err_old: {err_old}");
+
+        let old_src = "@addon(target = \"1.21.20\", api = \"1.14.0\")\non join of player {\n    send \"hi\" to player\n}\n";
+        let old_res = compile_source(old_src, "old.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            old_res.diagnostics.iter().any(|d| d.code == "PSTDR-E016" && d.message.contains("1.15.0")),
+            "Expected < 1.15.0 diagnostic: {:?}",
+            old_res.diagnostics
+        );
+
+        // 2. Modern 2.x vs Legacy 1.x command / run_fn codegen (runCommand vs runCommandAsync)
+        let cmd_v2 = r#"@addon(target = "26.60", api = "2.11.0")
+mcfunction "test/ping" {
+    say pong
+}
+on join of player {
+    command on player "say hi"
+    run_fn on player "test/ping"
+}
+"#;
+        let res_v2 = compile_source(cmd_v2, "v2_cmd.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res_v2.diagnostics), "v2 diags: {:?}", res_v2.diagnostics);
+        let js_v2 = res_v2.js.unwrap();
+        assert!(js_v2.contains("player.runCommand(\"say hi\");"), "js_v2:\n{js_v2}");
+        assert!(js_v2.contains("player.runCommand(\"function test/ping\");"), "js_v2:\n{js_v2}");
+        assert!(!js_v2.contains("runCommandAsync"), "js_v2:\n{js_v2}");
+
+        let cmd_v1 = r#"@addon(target = "1.21.50", api = "1.16.0")
+mcfunction "test/ping" {
+    say pong
+}
+on join of player {
+    command on player "say hi"
+    run_fn on player "test/ping"
+}
+"#;
+        let res_v1 = compile_source(cmd_v1, "v1_cmd.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res_v1.diagnostics), "v1 diags: {:?}", res_v1.diagnostics);
+        let js_v1 = res_v1.js.unwrap();
+        assert!(js_v1.contains("player.runCommandAsync(\"say hi\");"), "js_v1:\n{js_v1}");
+        assert!(js_v1.contains("player.runCommandAsync(\"function test/ping\");"), "js_v1:\n{js_v1}");
+
+        // 3. on chat is Stable on Legacy 1.x (no E018), Beta-only on Modern 2.x
+        let chat_v1 = r#"@addon(target = "1.21.50", api = "1.16.0")
+on chat msg by player {
+    cancel event
+    send "Echo: {msg}" to player
+}
+"#;
+        let chat_v1_res = compile_source(chat_v1, "chat_v1.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&chat_v1_res.diagnostics), "Legacy 1.x on chat must pass: {:?}", chat_v1_res.diagnostics);
+
+        let chat_v2 = r#"@addon(target = "26.60", api = "2.11.0")
+on chat msg by player {
+    send "Echo: {msg}" to player
+}
+"#;
+        let chat_v2_res = compile_source(chat_v2, "chat_v2.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            chat_v2_res.diagnostics.iter().any(|d| d.code == "PSTDR-E018"),
+            "Modern 2.x stable on chat must emit E018: {:?}",
+            chat_v2_res.diagnostics
+        );
+
+        // 4. on cmd rejected on Legacy 1.x
+        let on_cmd_v1 = r#"@addon(target = "1.21.50", api = "1.16.0")
+on cmd "my_pack:ping" description "Ping" by player {
+    send "pong" to player
+}
+"#;
+        let on_cmd_v1_res = compile_source(on_cmd_v1, "cmd_v1.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            on_cmd_v1_res.diagnostics.iter().any(|d| d.code == "PSTDR-E016" && d.message.contains("on cmd")),
+            "Legacy 1.x must reject on cmd: {:?}",
+            on_cmd_v1_res.diagnostics
+        );
+
+        // 5. runCommandAsync rejected on Modern 2.x (safe and unsafe)
+        let bad_async_v2 = r#"@addon(target = "26.60", api = "2.11.0")
+unsafe raw_cmd(p) {
+    p.runCommandAsync("say bad");
+}
+"#;
+        let bad_async_res = compile_source(bad_async_v2, "bad_async.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            bad_async_res.diagnostics.iter().any(|d| d.code == "PSTDR-E016" && d.message.contains("runCommandAsync")),
+            "Modern 2.x must reject runCommandAsync: {:?}",
+            bad_async_res.diagnostics
+        );
+
+        // 6. Legacy 1.x workspace: conditional @minecraft/server-ui "1.3.0" + worldInitialize + audit passes for Stable on chat
+        let dir_v1 = temp_dir("legacy_1x_ws");
+        fs::create_dir_all(dir_v1.join("src")).unwrap();
+        fs::write(
+            dir_v1.join("src/legacy_ui.pstdr"),
+            r#"@addon(target = "1.21.50", api = "1.16.0")
+
+on chat msg by player {
+    if msg == "!menu" {
+        cancel event
+        ui action "Legacy Menu" to player {
+            button "Ping" {
+                command on player "say pong"
+            }
+        }
+    }
+}
+"#,
+        ).unwrap();
+        let diags_v1 = convert_workspace(&dir_v1, &spec).unwrap();
+        assert!(!has_errors(&diags_v1), "diags_v1: {diags_v1:?}");
+        let manifest_v1: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir_v1.join("BP/manifest.json")).unwrap(),
+        ).unwrap();
+        let deps_v1 = manifest_v1["dependencies"].as_array().unwrap();
+        assert!(
+            deps_v1.iter().any(|d| d["module_name"] == "@minecraft/server" && d["version"] == "1.16.0"),
+            "Expected @minecraft/server 1.16.0: {deps_v1:?}"
+        );
+        assert!(
+            deps_v1.iter().any(|d| d["module_name"] == "@minecraft/server-ui" && d["version"] == "1.3.0"),
+            "Expected @minecraft/server-ui 1.3.0 for Legacy 1.x: {deps_v1:?}"
+        );
+        let audit_v1 = audit_workspace(&dir_v1, &spec).unwrap();
+        assert!(
+            !has_errors(&audit_v1),
+            "Legacy 1.x stable on chat must pass audit_workspace: {audit_v1:?}"
+        );
+        let _ = fs::remove_dir_all(&dir_v1);
+    }
+
+    #[test]
+    fn wave_3c_resynced_bedrock_spec_validation() {
+        let modern = BedrockSpec::bundled();
+        assert_eq!(modern.minecraft_version, "26.60");
+        assert_eq!(modern.script_api_version, "2.11.0");
+        assert_eq!(modern.server_ui_api_version, "2.0.0");
+        assert!(!modern.spec_version.is_empty());
+        for snd in [
+            "random.levelup",
+            "random.orb",
+            "random.toast",
+            "note.pling",
+            "mob.wither.hurt",
+            "mob.enderdragon.growl",
+        ] {
+            assert!(modern.is_valid_sound(snd), "Missing required vanilla sound '{snd}'");
+        }
+        assert!(modern.has_server_symbol("CustomCommandRegistry", "registerCommand"));
+        assert!(modern.has_server_symbol("CustomCommandParamType", "PlayerSelector"));
+        assert!(modern.has_server_symbol("CommandPermissionLevel", "Any"));
+        assert!(modern.has_server_symbol("DisplaySlotId", "Sidebar"));
+        assert!(modern.has_server_ui_class("ActionFormData"));
+        assert!(modern.has_server_ui_class("ModalFormData"));
+        assert!(modern.has_server_ui_class("MessageFormData"));
+        assert!(modern.is_deprecated_api("runCommandAsync"));
+        assert!(!modern.is_valid_world_method("get_time"));
+
+        let legacy = BedrockSpec::for_profile(ApiProfile::Legacy1x);
+        assert_eq!(legacy.minecraft_version, "1.21.50");
+        assert_eq!(legacy.script_api_version, "1.16.0");
+        assert_eq!(legacy.server_ui_api_version, "1.3.0");
+        assert!(!legacy.is_beta_event("chatSend"));
+        assert!(!legacy.is_deprecated_api("runCommandAsync"));
+        assert!(legacy.is_valid_sound("random.levelup"));
+        assert!(legacy.has_server_symbol("Player", "runCommandAsync"));
+        assert!(legacy.has_server_ui_class("ActionFormData"));
+    }
+
+    #[test]
+    fn wave_3c_doc_snippets_compile_and_validate() {
+        let spec = BedrockSpec::bundled();
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        fn extract_pstdr_blocks(md: &str) -> Vec<String> {
+            let mut blocks = Vec::new();
+            let mut in_block = false;
+            let mut buf = String::new();
+            for line in md.lines() {
+                if !in_block && line.trim() == "```pstdr" {
+                    in_block = true;
+                    buf.clear();
+                } else if in_block && line.trim() == "```" {
+                    in_block = false;
+                    blocks.push(buf.clone());
+                } else if in_block {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+            }
+            blocks
+        }
+
+        // Validate all complete standalone .pstdr snippets in README.md (including Stable 2.11.0 on cmd + ui action + scoreboard)
+        let readme = fs::read_to_string(repo_root.join("README.md")).unwrap();
+        let readme_blocks = extract_pstdr_blocks(&readme);
+        assert!(
+            readme_blocks.len() >= 3,
+            "Expected at least 3 .pstdr snippets in README.md, found {}",
+            readme_blocks.len()
+        );
+        for (idx, snippet) in readme_blocks.iter().enumerate() {
+            let res = compile_source(
+                snippet,
+                &format!("README.md#snippet_{idx}"),
+                None,
+                &spec,
+                true,
+                true,
+                vec![],
+            );
+            assert!(
+                !has_errors(&res.diagnostics),
+                "README.md snippet #{idx} failed compilation:\n{snippet}\ndiags: {:?}",
+                res.diagnostics
+            );
+        }
+
+        // Validate the complete Stable 2.11.0 example in llms.txt (contains on cmd + ui action + score + state)
+        let llms = fs::read_to_string(repo_root.join("llms.txt")).unwrap();
+        let llms_blocks = extract_pstdr_blocks(&llms);
+        let full_llms_example = llms_blocks
+            .iter()
+            .find(|b| b.contains("on cmd"))
+            .expect("llms.txt must contain a complete 'on cmd' example");
+        let llms_res = compile_source(
+            full_llms_example,
+            "llms.txt#example",
+            None,
+            &spec,
+            true,
+            true,
+            vec![],
+        );
+        assert!(
+            !has_errors(&llms_res.diagnostics),
+            "llms.txt example failed compilation:\n{full_llms_example}\ndiags: {:?}",
+            llms_res.diagnostics
+        );
+
+        // Validate a representative Legacy 1.x LTS snippet
+        let legacy_snippet = r#"@addon(target = "1.21.50", api = "1.16.0")
+
+on chat msg by player {
+    if msg.lower().starts_with("!heal") {
+        cancel event
+        apply instant_health 1 to player for 1s
+        command on player "playsound random.levelup @s"
+    }
+}
+"#;
+        let leg_res = compile_source(
+            legacy_snippet,
+            "docs/legacy_1x.pstdr",
+            None,
+            &spec,
+            true,
+            true,
+            vec![],
+        );
+        assert!(
+            !has_errors(&leg_res.diagnostics),
+            "Legacy 1.x snippet failed compilation: {:?}",
+            leg_res.diagnostics
+        );
+        assert!(leg_res.js.unwrap().contains("player.runCommandAsync"));
     }
 }

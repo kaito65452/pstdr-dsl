@@ -14,6 +14,27 @@ If missing, build and install `pstdr-lsp` and ensure `$HOME/.local/bin` is in `P
 
 ---
 
+## PackStudio IDE (`builtin.pstdr`)
+
+PackStudio includes a built-in `.pstdr` language server (`builtin.pstdr`) out of the box — no external `pstdr-lsp` configuration is required when editing inside PackStudio.
+
+---
+
+## Helix (`~/.config/helix/languages.toml`)
+
+```toml
+[language-server.pstdr-lsp]
+command = "pstdr-lsp"
+
+[[language]]
+name = "pstdr"
+scope = "source.pstdr"
+file-types = ["pstdr"]
+language-servers = ["pstdr-lsp"]
+```
+
+---
+
 ## Neovim (`editors/nvim/`)
 
 This repository ships a ready-to-use Neovim plugin in `editors/nvim/` containing:
