@@ -103,6 +103,12 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         needs_system: false,
         needs_equipment_slot: false,
         needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
         needs_in_helper: false,
         needs_within_helper: false,
         needs_give_item_helper: false,
@@ -110,9 +116,11 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         needs_get_score_helper: false,
         needs_set_score_helper: false,
         needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
         body: String::new(),
         indent: 0,
     };
@@ -148,8 +156,9 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         api_major >= 2 && crate::wiring::uses_custom_components_v2(target_ver);
 
     let has_components = !opts.custom_components.is_empty();
+    let has_cmds = !cg.cmd_registrations.is_empty();
     let need_world = cg.needs_world || (has_components && !use_v2_startup);
-    let need_system = cg.needs_system || (has_components && use_v2_startup);
+    let need_system = cg.needs_system || (has_components && use_v2_startup) || has_cmds;
 
     let mut imports = Vec::new();
     if need_world {
@@ -164,73 +173,69 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
     if cg.needs_item_stack {
         imports.push("ItemStack");
     }
+    if cg.needs_command_permission_level {
+        imports.push("CommandPermissionLevel");
+    }
+    if cg.needs_custom_command_param_type {
+        imports.push("CustomCommandParamType");
+    }
+    if cg.needs_display_slot_id {
+        imports.push("DisplaySlotId");
+    }
+    let mut ui_imports = Vec::new();
+    if cg.needs_action_form {
+        ui_imports.push("ActionFormData");
+    }
+    if cg.needs_message_form {
+        ui_imports.push("MessageFormData");
+    }
+    if cg.needs_modal_form {
+        ui_imports.push("ModalFormData");
+    }
     if !imports.is_empty() {
         out.push_str(&format!(
-            "import {{ {} }} from \"@minecraft/server\";\n\n",
+            "import {{ {} }} from \"@minecraft/server\";\n",
             imports.join(", ")
         ));
     }
+    if !ui_imports.is_empty() {
+        out.push_str(&format!(
+            "import {{ {} }} from \"@minecraft/server-ui\";\n",
+            ui_imports.join(", ")
+        ));
+    }
+    if !imports.is_empty() || !ui_imports.is_empty() {
+        out.push('\n');
+    }
 
-    if has_components {
-        let init_ev_param = if mode == EmitMode::TypeScript {
-            "(initEv: any)"
-        } else {
-            "(initEv)"
-        };
-        let cb_ev_param = if mode == EmitMode::TypeScript {
-            "(ev: any)"
-        } else {
-            "(ev)"
-        };
-        if !use_v2_startup {
-            out.push_str(&format!(
-                "world.beforeEvents.worldInitialize.subscribe({init_ev_param} => {{\n"
-            ));
-        } else {
-            out.push_str(&format!(
-                "system.beforeEvents.startup.subscribe({init_ev_param} => {{\n"
-            ));
+    let init_ev_param = if mode == EmitMode::TypeScript {
+        "(initEv: any)"
+    } else {
+        "(initEv)"
+    };
+    let cb_ev_param = if mode == EmitMode::TypeScript {
+        "(ev: any)"
+    } else {
+        "(ev)"
+    };
+
+    if has_components && !use_v2_startup {
+        out.push_str(&format!(
+            "world.beforeEvents.worldInitialize.subscribe({init_ev_param} => {{\n"
+        ));
+        emit_custom_component_registrations(&mut out, opts, &cg, cb_ev_param);
+        out.push_str("});\n\n");
+    }
+
+    if (has_components && use_v2_startup) || has_cmds {
+        out.push_str(&format!(
+            "system.beforeEvents.startup.subscribe({init_ev_param} => {{\n"
+        ));
+        if has_components && use_v2_startup {
+            emit_custom_component_registrations(&mut out, opts, &cg, cb_ev_param);
         }
-        for (comp_id, kind) in &opts.custom_components {
-            match kind {
-                ComponentKind::Item => {
-                    out.push_str(&format!(
-                        "    initEv.itemComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
-                    ));
-                }
-                ComponentKind::Block => {
-                    let has_interact = !cg.block_interact_callbacks.is_empty();
-                    let has_tick = !cg.block_tick_callbacks.is_empty();
-                    if !has_interact && !has_tick {
-                        out.push_str(&format!(
-                            "    initEv.blockComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "    initEv.blockComponentRegistry.registerCustomComponent(\"{comp_id}\", {{\n"
-                        ));
-                        let mut methods = Vec::new();
-                        if has_interact {
-                            let mut m = format!("        onPlayerInteract{cb_ev_param} {{\n");
-                            for snippet in &cg.block_interact_callbacks {
-                                m.push_str(snippet);
-                            }
-                            m.push_str("        }");
-                            methods.push(m);
-                        }
-                        if has_tick {
-                            let mut m = format!("        onTick{cb_ev_param} {{\n");
-                            for snippet in &cg.block_tick_callbacks {
-                                m.push_str(snippet);
-                            }
-                            m.push_str("        }");
-                            methods.push(m);
-                        }
-                        out.push_str(&methods.join(",\n"));
-                        out.push_str("\n    });\n");
-                    }
-                }
-            }
+        for reg in &cg.cmd_registrations {
+            out.push_str(reg);
         }
         out.push_str("});\n\n");
     }
@@ -239,6 +244,55 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
 
     out.push_str(&cg.body);
     out
+}
+
+fn emit_custom_component_registrations(
+    out: &mut String,
+    opts: &CodegenOptions,
+    cg: &Codegen<'_>,
+    cb_ev_param: &str,
+) {
+    for (comp_id, kind) in &opts.custom_components {
+        match kind {
+            ComponentKind::Item => {
+                out.push_str(&format!(
+                    "    initEv.itemComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
+                ));
+            }
+            ComponentKind::Block => {
+                let has_interact = !cg.block_interact_callbacks.is_empty();
+                let has_tick = !cg.block_tick_callbacks.is_empty();
+                if !has_interact && !has_tick {
+                    out.push_str(&format!(
+                        "    initEv.blockComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "    initEv.blockComponentRegistry.registerCustomComponent(\"{comp_id}\", {{\n"
+                    ));
+                    let mut methods = Vec::new();
+                    if has_interact {
+                        let mut m = format!("        onPlayerInteract{cb_ev_param} {{\n");
+                        for snippet in &cg.block_interact_callbacks {
+                            m.push_str(snippet);
+                        }
+                        m.push_str("        }");
+                        methods.push(m);
+                    }
+                    if has_tick {
+                        let mut m = format!("        onTick{cb_ev_param} {{\n");
+                        for snippet in &cg.block_tick_callbacks {
+                            m.push_str(snippet);
+                        }
+                        m.push_str("        }");
+                        methods.push(m);
+                    }
+                    out.push_str(&methods.join(",\n"));
+                    out.push_str("\n    });\n");
+                }
+            }
+        }
+    }
 }
 
 fn emit_runtime_helpers(out: &mut String, cg: &Codegen<'_>, mode: EmitMode) {
@@ -343,6 +397,17 @@ fn emit_runtime_helpers(out: &mut String, cg: &Codegen<'_>, mode: EmitMode) {
              \x20   obj.addScore(target, delta);\n}\n\n",
         );
     }
+
+    if cg.needs_get_or_create_objective_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_get_or_create_objective(id: string): any {\n");
+        } else {
+            out.push_str("function __pstdr_get_or_create_objective(id) {\n");
+        }
+        out.push_str(
+            "    return world.scoreboard.getObjective(id) ?? world.scoreboard.addObjective(id, id);\n}\n\n",
+        );
+    }
 }
 
 fn assemble_partitioned_module(
@@ -376,11 +441,38 @@ fn assemble_partitioned_module(
     if cg.needs_item_stack {
         mc_imports.push("ItemStack");
     }
+    if cg.needs_command_permission_level {
+        mc_imports.push("CommandPermissionLevel");
+    }
+    if cg.needs_custom_command_param_type {
+        mc_imports.push("CustomCommandParamType");
+    }
+    if cg.needs_display_slot_id {
+        mc_imports.push("DisplaySlotId");
+    }
     let has_mc_imports = !mc_imports.is_empty();
     if has_mc_imports {
         out.push_str(&format!(
             "import {{ {} }} from \"@minecraft/server\";\n",
             mc_imports.join(", ")
+        ));
+    }
+
+    let mut ui_imports = Vec::new();
+    if cg.needs_action_form {
+        ui_imports.push("ActionFormData");
+    }
+    if cg.needs_message_form {
+        ui_imports.push("MessageFormData");
+    }
+    if cg.needs_modal_form {
+        ui_imports.push("ModalFormData");
+    }
+    let has_ui_imports = !ui_imports.is_empty();
+    if has_ui_imports {
+        out.push_str(&format!(
+            "import {{ {} }} from \"@minecraft/server-ui\";\n",
+            ui_imports.join(", ")
         ));
     }
 
@@ -394,7 +486,7 @@ fn assemble_partitioned_module(
         ));
     }
 
-    if has_mc_imports || has_shared_imports || cg.opts.source_map_comments {
+    if has_mc_imports || has_ui_imports || has_shared_imports || cg.opts.source_map_comments {
         out.push('\n');
     }
 
@@ -435,6 +527,12 @@ pub fn emit_shared_module(
         needs_system: false,
         needs_equipment_slot: false,
         needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
         needs_in_helper: false,
         needs_within_helper: false,
         needs_give_item_helper: false,
@@ -442,9 +540,11 @@ pub fn emit_shared_module(
         needs_get_score_helper: false,
         needs_set_score_helper: false,
         needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
         body: String::new(),
         indent: 0,
     };
@@ -618,6 +718,12 @@ pub fn emit_item_component_module(
         needs_system: false,
         needs_equipment_slot: false,
         needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
         needs_in_helper: false,
         needs_within_helper: false,
         needs_give_item_helper: false,
@@ -625,9 +731,11 @@ pub fn emit_item_component_module(
         needs_get_score_helper: false,
         needs_set_score_helper: false,
         needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
         body: String::new(),
         indent: 0,
     };
@@ -773,6 +881,12 @@ pub fn emit_block_component_module(
         needs_system: false,
         needs_equipment_slot: false,
         needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
         needs_in_helper: false,
         needs_within_helper: false,
         needs_give_item_helper: false,
@@ -780,9 +894,11 @@ pub fn emit_block_component_module(
         needs_get_score_helper: false,
         needs_set_score_helper: false,
         needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
         body: String::new(),
         indent: 0,
     };
@@ -927,6 +1043,12 @@ pub fn emit_world_module(
         needs_system: false,
         needs_equipment_slot: false,
         needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
         needs_in_helper: false,
         needs_within_helper: false,
         needs_give_item_helper: false,
@@ -934,9 +1056,11 @@ pub fn emit_world_module(
         needs_get_score_helper: false,
         needs_set_score_helper: false,
         needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
         in_before_event: false,
         block_interact_callbacks: Vec::new(),
         block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
         body: String::new(),
         indent: 0,
     };
@@ -947,6 +1071,75 @@ pub fn emit_world_module(
         }
         cg.emit_top_level(item);
     }
+
+    assemble_partitioned_module(&cg, header, mode)
+}
+
+/// Emits `commands/<stem>.js` (or `.ts`) exporting `registerCommands(initEv)` so `_registry.js`
+/// can register all custom commands in the workspace's single `system.beforeEvents.startup` callback.
+pub fn emit_commands_module(
+    commands: &[EventHandler],
+    shared: &SharedContext,
+    header: Option<&AddonDirective>,
+    source_file: &str,
+    source_map_comments: bool,
+    mode: EmitMode,
+) -> String {
+    let opts = CodegenOptions {
+        source_file: source_file.to_string(),
+        source_map_comments,
+        custom_components: Vec::new(),
+        bound_block_ids: Vec::new(),
+    };
+    let mut cg = Codegen {
+        opts: &opts,
+        mode,
+        state_names: shared.shared_states.clone(),
+        const_strings: shared.const_strings.clone(),
+        shared: shared.clone(),
+        used_shared_imports: BTreeSet::new(),
+        local_scopes: Vec::new(),
+        emit_source_lines: true,
+        needs_world: false,
+        needs_system: false,
+        needs_equipment_slot: false,
+        needs_item_stack: false,
+        needs_command_permission_level: false,
+        needs_custom_command_param_type: false,
+        needs_display_slot_id: false,
+        needs_action_form: false,
+        needs_message_form: false,
+        needs_modal_form: false,
+        needs_in_helper: false,
+        needs_within_helper: false,
+        needs_give_item_helper: false,
+        needs_spawn_item_helper: false,
+        needs_get_score_helper: false,
+        needs_set_score_helper: false,
+        needs_add_score_helper: false,
+        needs_get_or_create_objective_helper: false,
+        in_before_event: false,
+        block_interact_callbacks: Vec::new(),
+        block_tick_callbacks: Vec::new(),
+        cmd_registrations: Vec::new(),
+        body: String::new(),
+        indent: 0,
+    };
+
+    for ev in commands {
+        cg.emit_event_handler(ev);
+    }
+
+    let param = if mode == EmitMode::TypeScript {
+        "initEv: any"
+    } else {
+        "initEv"
+    };
+    cg.line(&format!("export function registerCommands({param}) {{"));
+    for reg in std::mem::take(&mut cg.cmd_registrations) {
+        cg.body.push_str(&reg);
+    }
+    cg.line("}");
 
     assemble_partitioned_module(&cg, header, mode)
 }
@@ -964,6 +1157,12 @@ struct Codegen<'a> {
     needs_system: bool,
     needs_equipment_slot: bool,
     needs_item_stack: bool,
+    needs_command_permission_level: bool,
+    needs_custom_command_param_type: bool,
+    needs_display_slot_id: bool,
+    needs_action_form: bool,
+    needs_message_form: bool,
+    needs_modal_form: bool,
     needs_in_helper: bool,
     needs_within_helper: bool,
     needs_give_item_helper: bool,
@@ -971,9 +1170,11 @@ struct Codegen<'a> {
     needs_get_score_helper: bool,
     needs_set_score_helper: bool,
     needs_add_score_helper: bool,
+    needs_get_or_create_objective_helper: bool,
     in_before_event: bool,
     block_interact_callbacks: Vec<String>,
     block_tick_callbacks: Vec<String>,
+    cmd_registrations: Vec<String>,
     body: String,
     indent: usize,
 }
@@ -995,6 +1196,13 @@ impl<'a> Codegen<'a> {
 
     fn is_local(&self, name: &str) -> bool {
         self.local_scopes.iter().rev().any(|s| s.contains(name))
+    }
+
+    fn is_score_shadowed(&self) -> bool {
+        self.is_local("score")
+            || self.state_names.contains("score")
+            || self.shared.shared_exports.contains("score")
+            || self.shared.shared_muts.contains("score")
     }
 
     fn emit_source_comment(&mut self, line: usize) {
@@ -1154,7 +1362,9 @@ impl<'a> Codegen<'a> {
                 // Emitted directly to BP/functions/<path>.mcfunction; no JS output.
             }
             TopLevelItem::EventHandler(ev) => {
-                self.emit_source_comment(ev.span.line);
+                if !matches!(ev.kind, EventKind::CustomCommand { .. }) {
+                    self.emit_source_comment(ev.span.line);
+                }
                 self.emit_event_handler(ev);
             }
             TopLevelItem::AfterTimer {
@@ -1529,6 +1739,337 @@ impl<'a> Codegen<'a> {
                     self.line(&format!("}}, {{ eventTypes: [{id_js}] }});"));
                 }
             }
+            EventKind::CustomCommand {
+                command_id,
+                description,
+                permission,
+                params,
+                actor_var,
+            } => {
+                self.needs_system = true;
+                self.needs_command_permission_level = true;
+                if !params.is_empty() {
+                    self.needs_custom_command_param_type = true;
+                }
+                let id_js = self.emit_expr(command_id);
+                let desc_js = self.emit_expr(description);
+                let perm_js = permission.as_bedrock_enum();
+                let mandatory: Vec<&CmdParam> = params.iter().filter(|p| !p.optional).collect();
+                let optional: Vec<&CmdParam> = params.iter().filter(|p| p.optional).collect();
+                let mut cb_params = vec![if self.mode == EmitMode::TypeScript {
+                    "origin: any".to_string()
+                } else {
+                    "origin".to_string()
+                }];
+                for p in params {
+                    if self.mode == EmitMode::TypeScript {
+                        cb_params.push(format!("{}: any", p.name));
+                    } else {
+                        cb_params.push(p.name.clone());
+                    }
+                }
+                let snippet = self.emit_to_buffer(1, |c| {
+                    c.emit_source_comment(ev.span.line);
+                    c.line("initEv.customCommandRegistry.registerCommand({");
+                    c.indent += 1;
+                    c.line(&format!("name: {id_js},"));
+                    c.line(&format!("description: {desc_js},"));
+                    let has_mand = !mandatory.is_empty();
+                    let has_opt = !optional.is_empty();
+                    let perm_comma = if has_mand || has_opt { "," } else { "" };
+                    c.line(&format!("permissionLevel: {perm_js}{perm_comma}"));
+                    if has_mand {
+                        c.line("mandatoryParameters: [");
+                        c.indent += 1;
+                        for (idx, p) in mandatory.iter().enumerate() {
+                            let comma = if idx + 1 < mandatory.len() { "," } else { "" };
+                            c.line(&format!(
+                                "{{ name: \"{}\", type: {} }}{comma}",
+                                escape_double_quoted(&p.name),
+                                p.param_type.as_bedrock_enum()
+                            ));
+                        }
+                        c.indent -= 1;
+                        let close_comma = if has_opt { "," } else { "" };
+                        c.line(&format!("]{close_comma}"));
+                    }
+                    if has_opt {
+                        c.line("optionalParameters: [");
+                        c.indent += 1;
+                        for (idx, p) in optional.iter().enumerate() {
+                            let comma = if idx + 1 < optional.len() { "," } else { "" };
+                            c.line(&format!(
+                                "{{ name: \"{}\", type: {} }}{comma}",
+                                escape_double_quoted(&p.name),
+                                p.param_type.as_bedrock_enum()
+                            ));
+                        }
+                        c.indent -= 1;
+                        c.line("]");
+                    }
+                    c.indent -= 1;
+                    c.line(&format!("}}, ({}) => {{", cb_params.join(", ")));
+                    c.indent += 1;
+                    c.push_scope();
+                    for p in params {
+                        c.bind_local(&p.name);
+                    }
+                    if let Some(actor) = actor_var {
+                        c.bind_local(actor);
+                        c.line(&format!("const {actor} = origin.sourceEntity;"));
+                        c.line(&format!(
+                            "if (!{actor} || {actor}.typeId !== \"minecraft:player\") return;"
+                        ));
+                    }
+                    c.line("system.run(() => {");
+                    c.indent += 1;
+                    let prev = c.in_before_event;
+                    c.in_before_event = false;
+                    c.emit_block_stmts(&ev.body.stmts);
+                    c.in_before_event = prev;
+                    c.indent -= 1;
+                    c.line("});");
+                    c.pop_scope();
+                    c.indent -= 1;
+                    c.line("});");
+                });
+                self.cmd_registrations.push(snippet);
+            }
+            EventKind::PlaceBlock {
+                block_var,
+                actor_var,
+            } => {
+                self.needs_world = true;
+                let bus = if has_cancel {
+                    "world.beforeEvents.playerPlaceBlock"
+                } else {
+                    "world.afterEvents.playerPlaceBlock"
+                };
+                self.line(&format!("{bus}.subscribe({ev_param} => {{"));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(block_var);
+                self.bind_local(actor_var);
+                self.line(&format!("const {block_var} = ev.block;"));
+                self.line(&format!("const {actor_var} = ev.player;"));
+                let prev = self.in_before_event;
+                self.in_before_event = has_cancel;
+                self.emit_block_stmts(&ev.body.stmts);
+                self.in_before_event = prev;
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::DimensionChange { player_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.playerDimensionChange.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(player_var);
+                self.bind_local("from_dimension");
+                self.bind_local("to_dimension");
+                self.bind_local("from_location");
+                self.bind_local("to_location");
+                self.line(&format!("const {player_var} = ev.player;"));
+                if player_var != "from_dimension" && block_references_ident(&ev.body, "from_dimension") {
+                    self.line("const from_dimension = ev.fromDimension;");
+                }
+                if player_var != "to_dimension" && block_references_ident(&ev.body, "to_dimension") {
+                    self.line("const to_dimension = ev.toDimension;");
+                }
+                if player_var != "from_location" && block_references_ident(&ev.body, "from_location") {
+                    self.line("const from_location = ev.fromLocation;");
+                }
+                if player_var != "to_location" && block_references_ident(&ev.body, "to_location") {
+                    self.line("const to_location = ev.toLocation;");
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::HealthChange { entity_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.entityHealthChanged.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(entity_var);
+                self.bind_local("old_value");
+                self.bind_local("new_value");
+                self.line(&format!("const {entity_var} = ev.entity;"));
+                if entity_var != "old_value" && block_references_ident(&ev.body, "old_value") {
+                    self.line("const old_value = ev.oldValue;");
+                }
+                if entity_var != "new_value" && block_references_ident(&ev.body, "new_value") {
+                    self.line("const new_value = ev.newValue;");
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::InteractEntity {
+                target_var,
+                actor_var,
+            } => {
+                self.needs_world = true;
+                let bus = if has_cancel {
+                    "world.beforeEvents.playerInteractWithEntity"
+                } else {
+                    "world.afterEvents.playerInteractWithEntity"
+                };
+                self.line(&format!("{bus}.subscribe({ev_param} => {{"));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(target_var);
+                self.bind_local(actor_var);
+                self.line(&format!("const {target_var} = ev.target;"));
+                self.line(&format!("const {actor_var} = ev.player;"));
+                let prev = self.in_before_event;
+                self.in_before_event = has_cancel;
+                self.emit_block_stmts(&ev.body.stmts);
+                self.in_before_event = prev;
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::ProjectileHitBlock {
+                block_var,
+                shooter_var,
+            } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.projectileHitBlock.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(block_var);
+                self.bind_local("projectile");
+                self.line(&format!("const {block_var} = ev.getBlockHit()?.block;"));
+                self.line(&format!("if (!{block_var}) return;"));
+                if let Some(shooter) = shooter_var {
+                    self.bind_local(shooter);
+                    self.line(&format!("const {shooter} = ev.source;"));
+                } else if block_var != "shooter" && block_references_ident(&ev.body, "shooter") {
+                    self.bind_local("shooter");
+                    self.line("const shooter = ev.source;");
+                }
+                if block_var != "projectile"
+                    && shooter_var.as_deref() != Some("projectile")
+                    && block_references_ident(&ev.body, "projectile")
+                {
+                    self.line("const projectile = ev.projectile;");
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::EntityHitBlock {
+                block_var,
+                attacker_var,
+            } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.entityHitBlock.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(block_var);
+                self.bind_local(attacker_var);
+                self.line(&format!("const {block_var} = ev.hitBlock;"));
+                self.line(&format!("const {attacker_var} = ev.damagingEntity;"));
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::ItemRelease { item, actor_var } => {
+                self.needs_world = true;
+                let item_js = self.emit_expr(item);
+                self.line(&format!(
+                    "world.afterEvents.itemReleaseUse.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(actor_var);
+                self.bind_local("item");
+                self.bind_local("use_duration");
+                self.line(&format!("const {actor_var} = ev.source;"));
+                self.line(&format!(
+                    "if (!ev.itemStack || ev.itemStack.typeId !== ({item_js})) return;"
+                ));
+                if actor_var != "item" && block_references_ident(&ev.body, "item") {
+                    self.line("const item = ev.itemStack;");
+                }
+                if actor_var != "use_duration" && block_references_ident(&ev.body, "use_duration") {
+                    self.line("const use_duration = ev.useDuration;");
+                }
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::Explosion => {
+                self.needs_world = true;
+                let bus = if has_cancel {
+                    "world.beforeEvents.explosion"
+                } else {
+                    "world.afterEvents.explosion"
+                };
+                self.line(&format!("{bus}.subscribe({ev_param} => {{"));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local("source");
+                self.bind_local("impacted_blocks");
+                if block_references_ident(&ev.body, "source") {
+                    self.line("const source = ev.source;");
+                }
+                if block_references_ident(&ev.body, "impacted_blocks") {
+                    self.line("const impacted_blocks = ev.getImpactedBlocks();");
+                }
+                let prev = self.in_before_event;
+                self.in_before_event = has_cancel;
+                self.emit_block_stmts(&ev.body.stmts);
+                self.in_before_event = prev;
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::EntityLoad { entity_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.entityLoad.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(entity_var);
+                self.line(&format!("const {entity_var} = ev.entity;"));
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
+            EventKind::EntityRemove { entity_var } => {
+                self.needs_world = true;
+                self.line(&format!(
+                    "world.afterEvents.entityRemove.subscribe({ev_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local(entity_var);
+                self.line(&format!(
+                    "const {entity_var} = ev.removedEntity ?? ev;"
+                ));
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+            }
         }
     }
 
@@ -1580,6 +2121,39 @@ impl<'a> Codegen<'a> {
                     }
                     AssignTarget::Index { object, index, .. } => {
                         let idx_js = self.emit_expr(index);
+                        if let Expr::Index {
+                            object: inner_obj,
+                            index: obj_id_expr,
+                            ..
+                        } = object
+                        {
+                            if matches!(inner_obj.as_ref(), Expr::Ident(n, _) if n == "score")
+                                && !self.is_score_shadowed()
+                            {
+                                self.needs_world = true;
+                                self.needs_get_or_create_objective_helper = true;
+                                let obj_id_js = self.emit_expr(obj_id_expr);
+                                let line = match op {
+                                    AssignOp::Assign => format!(
+                                        "__pstdr_get_or_create_objective({obj_id_js}).setScore({idx_js}, {val_js});"
+                                    ),
+                                    AssignOp::AddAssign => format!(
+                                        "__pstdr_get_or_create_objective({obj_id_js}).addScore({idx_js}, {val_js});"
+                                    ),
+                                    AssignOp::SubAssign => format!(
+                                        "__pstdr_get_or_create_objective({obj_id_js}).addScore({idx_js}, -({val_js}));"
+                                    ),
+                                    AssignOp::MulAssign => format!(
+                                        "__pstdr_get_or_create_objective({obj_id_js}).setScore({idx_js}, (__pstdr_get_or_create_objective({obj_id_js}).getScore({idx_js}) ?? 0) * ({val_js}));"
+                                    ),
+                                    AssignOp::DivAssign => format!(
+                                        "__pstdr_get_or_create_objective({obj_id_js}).setScore({idx_js}, (__pstdr_get_or_create_objective({obj_id_js}).getScore({idx_js}) ?? 0) / ({val_js}));"
+                                    ),
+                                };
+                                self.wrap_before_event_mutation(line);
+                                return;
+                            }
+                        }
                         if let Expr::Ident(name, _) = object {
                             if self.state_names.contains(name) {
                                 if self.shared.shared_states.contains(name)
@@ -1838,6 +2412,312 @@ impl<'a> Codegen<'a> {
                 self.line(&format!("}}, {ticks});"));
                 self.in_before_event = prev;
             }
+            Stmt::UiAction {
+                title,
+                body,
+                target,
+                buttons,
+                span,
+            } => {
+                self.emit_source_comment(span.line);
+                self.needs_action_form = true;
+                let title_js = self.emit_expr(title);
+                let body_js = body.as_ref().map(|b| self.emit_expr(b));
+                let target_js = self.emit_expr(target);
+                let res_param = if self.mode == EmitMode::TypeScript {
+                    "(res: any)"
+                } else {
+                    "(res)"
+                };
+                self.line("{");
+                self.indent += 1;
+                self.line("const __form = new ActionFormData()");
+                self.indent += 1;
+                let has_more = body_js.is_some() || !buttons.is_empty();
+                self.line(&format!(
+                    ".title({title_js}){}",
+                    if has_more { "" } else { ";" }
+                ));
+                if let Some(b_js) = body_js {
+                    let semi = if buttons.is_empty() { ";" } else { "" };
+                    self.line(&format!(".body({b_js}){semi}"));
+                }
+                for (idx, btn) in buttons.iter().enumerate() {
+                    let lbl_js = self.emit_expr(&btn.label);
+                    let semi = if idx + 1 == buttons.len() { ";" } else { "" };
+                    if let Some(ic) = &btn.icon {
+                        let ic_js = self.emit_expr(ic);
+                        self.line(&format!(".button({lbl_js}, {ic_js}){semi}"));
+                    } else {
+                        self.line(&format!(".button({lbl_js}){semi}"));
+                    }
+                }
+                self.indent -= 1;
+                let defer = self.in_before_event;
+                if defer {
+                    self.needs_system = true;
+                    self.line("system.run(() => {");
+                    self.indent += 1;
+                }
+                self.line(&format!("__form.show({target_js}).then({res_param} => {{"));
+                self.indent += 1;
+                self.line("if (res.canceled) return;");
+                let prev_before = self.in_before_event;
+                self.in_before_event = false;
+                for (idx, btn) in buttons.iter().enumerate() {
+                    if idx == 0 {
+                        self.line(&format!("if (res.selection === {idx}) {{"));
+                    } else {
+                        self.line(&format!("}} else if (res.selection === {idx}) {{"));
+                    }
+                    self.push_scope();
+                    self.indent += 1;
+                    self.emit_block_stmts(&btn.body.stmts);
+                    self.indent -= 1;
+                    self.pop_scope();
+                }
+                if !buttons.is_empty() {
+                    self.line("}");
+                }
+                self.in_before_event = prev_before;
+                self.indent -= 1;
+                self.line("});");
+                if defer {
+                    self.indent -= 1;
+                    self.line("});");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::UiMessage {
+                title,
+                body,
+                target,
+                button1,
+                button2,
+                span,
+            } => {
+                self.emit_source_comment(span.line);
+                self.needs_message_form = true;
+                let title_js = self.emit_expr(title);
+                let body_js = body.as_ref().map(|b| self.emit_expr(b));
+                let target_js = self.emit_expr(target);
+                let b1_js = self.emit_expr(&button1.label);
+                let b2_js = self.emit_expr(&button2.label);
+                let res_param = if self.mode == EmitMode::TypeScript {
+                    "(res: any)"
+                } else {
+                    "(res)"
+                };
+                self.line("{");
+                self.indent += 1;
+                self.line("const __form = new MessageFormData()");
+                self.indent += 1;
+                self.line(&format!(".title({title_js})"));
+                if let Some(b_js) = body_js {
+                    self.line(&format!(".body({b_js})"));
+                }
+                self.line(&format!(".button1({b1_js})"));
+                self.line(&format!(".button2({b2_js});"));
+                self.indent -= 1;
+                let defer = self.in_before_event;
+                if defer {
+                    self.needs_system = true;
+                    self.line("system.run(() => {");
+                    self.indent += 1;
+                }
+                self.line(&format!("__form.show({target_js}).then({res_param} => {{"));
+                self.indent += 1;
+                self.line("if (res.canceled) return;");
+                let prev_before = self.in_before_event;
+                self.in_before_event = false;
+                self.line("if (res.selection === 0) {");
+                self.push_scope();
+                self.indent += 1;
+                self.emit_block_stmts(&button1.body.stmts);
+                self.indent -= 1;
+                self.pop_scope();
+                self.line("} else if (res.selection === 1) {");
+                self.push_scope();
+                self.indent += 1;
+                self.emit_block_stmts(&button2.body.stmts);
+                self.indent -= 1;
+                self.pop_scope();
+                self.line("}");
+                self.in_before_event = prev_before;
+                self.indent -= 1;
+                self.line("});");
+                if defer {
+                    self.indent -= 1;
+                    self.line("});");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::UiModal {
+                title,
+                target,
+                fields,
+                on_submit,
+                span,
+            } => {
+                self.emit_source_comment(span.line);
+                self.needs_modal_form = true;
+                let title_js = self.emit_expr(title);
+                let target_js = self.emit_expr(target);
+                let res_param = if self.mode == EmitMode::TypeScript {
+                    "(res: any)"
+                } else {
+                    "(res)"
+                };
+                self.line("{");
+                self.indent += 1;
+                self.line("const __form = new ModalFormData()");
+                self.indent += 1;
+                self.line(&format!(
+                    ".title({title_js}){}",
+                    if fields.is_empty() { ";" } else { "" }
+                ));
+                for (idx, f) in fields.iter().enumerate() {
+                    let semi = if idx + 1 == fields.len() { ";" } else { "" };
+                    match &f.kind {
+                        UiModalFieldKind::TextField {
+                            label,
+                            placeholder,
+                            default,
+                        } => {
+                            let l = self.emit_expr(label);
+                            let p = placeholder
+                                .as_ref()
+                                .map(|e| self.emit_expr(e))
+                                .unwrap_or_else(|| "\"\"".to_string());
+                            if let Some(d) = default {
+                                let d_js = self.emit_expr(d);
+                                self.line(&format!(
+                                    ".textField({l}, {p}, {{ defaultValue: {d_js} }}){semi}"
+                                ));
+                            } else {
+                                self.line(&format!(".textField({l}, {p}){semi}"));
+                            }
+                        }
+                        UiModalFieldKind::Toggle { label, default } => {
+                            let l = self.emit_expr(label);
+                            if let Some(d) = default {
+                                let d_js = self.emit_expr(d);
+                                self.line(&format!(
+                                    ".toggle({l}, {{ defaultValue: {d_js} }}){semi}"
+                                ));
+                            } else {
+                                self.line(&format!(".toggle({l}){semi}"));
+                            }
+                        }
+                        UiModalFieldKind::Slider {
+                            label,
+                            min,
+                            max,
+                            step,
+                            default,
+                        } => {
+                            let l = self.emit_expr(label);
+                            let mn = self.emit_expr(min);
+                            let mx = self.emit_expr(max);
+                            let st = self.emit_expr(step);
+                            if let Some(d) = default {
+                                let d_js = self.emit_expr(d);
+                                self.line(&format!(
+                                    ".slider({l}, {mn}, {mx}, {{ valueStep: {st}, defaultValue: {d_js} }}){semi}"
+                                ));
+                            } else {
+                                self.line(&format!(
+                                    ".slider({l}, {mn}, {mx}, {{ valueStep: {st} }}){semi}"
+                                ));
+                            }
+                        }
+                        UiModalFieldKind::Dropdown {
+                            label,
+                            options,
+                            default,
+                        } => {
+                            let l = self.emit_expr(label);
+                            let opts_js = self.emit_expr(options);
+                            if let Some(d) = default {
+                                let d_js = self.emit_expr(d);
+                                self.line(&format!(
+                                    ".dropdown({l}, {opts_js}, {{ defaultValueIndex: {d_js} }}){semi}"
+                                ));
+                            } else {
+                                self.line(&format!(".dropdown({l}, {opts_js}){semi}"));
+                            }
+                        }
+                    }
+                }
+                self.indent -= 1;
+                let defer = self.in_before_event;
+                if defer {
+                    self.needs_system = true;
+                    self.line("system.run(() => {");
+                    self.indent += 1;
+                }
+                self.line(&format!("__form.show({target_js}).then({res_param} => {{"));
+                self.indent += 1;
+                self.line("if (res.canceled || !res.formValues) return;");
+                self.push_scope();
+                if !fields.is_empty() {
+                    let bindings: Vec<&str> = fields.iter().map(|f| f.binding.as_str()).collect();
+                    for b in &bindings {
+                        self.bind_local(b);
+                    }
+                    self.line(&format!(
+                        "const [{}] = res.formValues;",
+                        bindings.join(", ")
+                    ));
+                }
+                let prev_before = self.in_before_event;
+                self.in_before_event = false;
+                self.emit_block_stmts(&on_submit.stmts);
+                self.in_before_event = prev_before;
+                self.pop_scope();
+                self.indent -= 1;
+                self.line("});");
+                if defer {
+                    self.indent -= 1;
+                    self.line("});");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::ScoreboardShow {
+                objective,
+                title,
+                slot,
+                ..
+            } => {
+                self.needs_world = true;
+                self.needs_display_slot_id = true;
+                let obj_js = self.emit_expr(objective);
+                let slot_js = slot.as_bedrock_enum();
+                if let Some(t) = title {
+                    let title_js = self.emit_expr(t);
+                    let action = format!(
+                        "world.scoreboard.setObjectiveAtDisplaySlot({slot_js}, {{ objective: world.scoreboard.getObjective({obj_js}) ?? world.scoreboard.addObjective({obj_js}, {title_js}) }});"
+                    );
+                    self.wrap_before_event_mutation(action);
+                } else {
+                    self.needs_get_or_create_objective_helper = true;
+                    let action = format!(
+                        "world.scoreboard.setObjectiveAtDisplaySlot({slot_js}, {{ objective: __pstdr_get_or_create_objective({obj_js}) }});"
+                    );
+                    self.wrap_before_event_mutation(action);
+                }
+            }
+            Stmt::ScoreboardHide { slot, .. } => {
+                self.needs_world = true;
+                self.needs_display_slot_id = true;
+                let slot_js = slot.as_bedrock_enum();
+                self.wrap_before_event_mutation(format!(
+                    "world.scoreboard.clearObjectiveAtDisplaySlot({slot_js});"
+                ));
+            }
             Stmt::ExprStmt { expr, .. } => {
                 let js = self.emit_expr(expr);
                 self.wrap_before_event_mutation(format!("{js};"));
@@ -1946,6 +2826,23 @@ impl<'a> Codegen<'a> {
             }
             Expr::Index { object, index, .. } => {
                 let idx_js = self.emit_expr(index);
+                if let Expr::Index {
+                    object: inner_obj,
+                    index: obj_id_expr,
+                    ..
+                } = object.as_ref()
+                {
+                    if matches!(inner_obj.as_ref(), Expr::Ident(n, _) if n == "score")
+                        && !self.is_score_shadowed()
+                    {
+                        self.needs_world = true;
+                        self.needs_get_or_create_objective_helper = true;
+                        let obj_id_js = self.emit_expr(obj_id_expr);
+                        return format!(
+                            "(__pstdr_get_or_create_objective({obj_id_js}).getScore({idx_js}) ?? 0)"
+                        );
+                    }
+                }
                 if let Expr::Ident(name, _) = object.as_ref() {
                     if self.state_names.contains(name) {
                         if self.shared.shared_states.contains(name)
@@ -2222,6 +3119,111 @@ fn stmt_references_ident(stmt: &Stmt, name: &str) -> bool {
                 || expr_references_ident(path, name)
         }
         Stmt::After { body, .. } | Stmt::Every { body, .. } => block_references_ident(body, name),
+        Stmt::UiAction {
+            title,
+            body,
+            target,
+            buttons,
+            ..
+        } => {
+            expr_references_ident(title, name)
+                || body
+                    .as_ref()
+                    .is_some_and(|b| expr_references_ident(b, name))
+                || expr_references_ident(target, name)
+                || buttons.iter().any(|b| {
+                    expr_references_ident(&b.label, name)
+                        || b.icon
+                            .as_ref()
+                            .is_some_and(|i| expr_references_ident(i, name))
+                        || block_references_ident(&b.body, name)
+                })
+        }
+        Stmt::UiMessage {
+            title,
+            body,
+            target,
+            button1,
+            button2,
+            ..
+        } => {
+            expr_references_ident(title, name)
+                || body
+                    .as_ref()
+                    .is_some_and(|b| expr_references_ident(b, name))
+                || expr_references_ident(target, name)
+                || expr_references_ident(&button1.label, name)
+                || block_references_ident(&button1.body, name)
+                || expr_references_ident(&button2.label, name)
+                || block_references_ident(&button2.body, name)
+        }
+        Stmt::UiModal {
+            title,
+            target,
+            fields,
+            on_submit,
+            ..
+        } => {
+            expr_references_ident(title, name)
+                || expr_references_ident(target, name)
+                || fields.iter().any(|f| match &f.kind {
+                    UiModalFieldKind::TextField {
+                        label,
+                        placeholder,
+                        default,
+                    } => {
+                        expr_references_ident(label, name)
+                            || placeholder
+                                .as_ref()
+                                .is_some_and(|e| expr_references_ident(e, name))
+                            || default
+                                .as_ref()
+                                .is_some_and(|e| expr_references_ident(e, name))
+                    }
+                    UiModalFieldKind::Toggle { label, default } => {
+                        expr_references_ident(label, name)
+                            || default
+                                .as_ref()
+                                .is_some_and(|e| expr_references_ident(e, name))
+                    }
+                    UiModalFieldKind::Slider {
+                        label,
+                        min,
+                        max,
+                        step,
+                        default,
+                    } => {
+                        expr_references_ident(label, name)
+                            || expr_references_ident(min, name)
+                            || expr_references_ident(max, name)
+                            || expr_references_ident(step, name)
+                            || default
+                                .as_ref()
+                                .is_some_and(|e| expr_references_ident(e, name))
+                    }
+                    UiModalFieldKind::Dropdown {
+                        label,
+                        options,
+                        default,
+                    } => {
+                        expr_references_ident(label, name)
+                            || expr_references_ident(options, name)
+                            || default
+                                .as_ref()
+                                .is_some_and(|e| expr_references_ident(e, name))
+                    }
+                })
+                || block_references_ident(on_submit, name)
+        }
+        Stmt::ScoreboardShow {
+            objective, title, ..
+        } => {
+            expr_references_ident(objective, name)
+                || title
+                    .as_ref()
+                    .is_some_and(|t| expr_references_ident(t, name))
+        }
+        Stmt::ScoreboardHide { .. } => false,
         Stmt::ExprStmt { expr, .. } => expr_references_ident(expr, name),
     }
 }
@@ -2278,6 +3280,44 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
 
 pub(crate) fn block_contains_cancel(block: &Block) -> bool {
     block.stmts.iter().any(stmt_contains_cancel)
+}
+
+pub fn program_uses_ui(program: &Program) -> bool {
+    program.items.iter().any(|item| match item {
+        TopLevelItem::FuncDecl(f) => block_uses_ui(&f.body),
+        TopLevelItem::EventHandler(ev) => block_uses_ui(&ev.body),
+        TopLevelItem::AfterTimer { body, .. } | TopLevelItem::EveryTimer { body, .. } => {
+            block_uses_ui(body)
+        }
+        _ => false,
+    })
+}
+
+fn block_uses_ui(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_uses_ui)
+}
+
+fn stmt_uses_ui(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::UiAction { .. } | Stmt::UiMessage { .. } | Stmt::UiModal { .. } => true,
+        Stmt::If {
+            then_block,
+            else_branch,
+            ..
+        } => {
+            block_uses_ui(then_block)
+                || match else_branch {
+                    Some(ElseBranch::Else(b)) => block_uses_ui(b),
+                    Some(ElseBranch::ElseIf(s)) => stmt_uses_ui(s),
+                    None => false,
+                }
+        }
+        Stmt::For { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::After { body, .. }
+        | Stmt::Every { body, .. } => block_uses_ui(body),
+        _ => false,
+    }
 }
 
 fn stmt_contains_cancel(stmt: &Stmt) -> bool {

@@ -1,6 +1,7 @@
 use crate::codegen::{
-    emit_block_component_module, emit_code, emit_item_component_module, emit_shared_module,
-    emit_world_module, CodegenOptions, ComponentKind, EmitMode, SharedContext,
+    emit_block_component_module, emit_code, emit_commands_module, emit_item_component_module,
+    emit_shared_module, emit_world_module, program_uses_ui, CodegenOptions, ComponentKind,
+    EmitMode, SharedContext,
 };
 use crate::diagnostics::{has_errors, Diagnostic, DiagnosticCode, Span};
 use crate::formatter::format_source;
@@ -9,8 +10,9 @@ use crate::partition::{partition_program, TargetRegistry};
 use crate::spec::BedrockSpec;
 use crate::validator::{validate_program, ValidationContext};
 use crate::wiring::{
-    emit_registry_module, generate_uuid_v4, is_valid_v3_min_engine, resolve_min_engine_version,
-    update_main_js, update_manifest, wire_bind_targets, wire_target_json, RegistryEntry,
+    emit_registry_module_with_commands, generate_uuid_v4, is_valid_v3_min_engine,
+    resolve_min_engine_version, update_main_js, update_manifest_with_ui, wire_bind_targets,
+    wire_target_json, RegistryEntry,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -358,8 +360,29 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     let mut main_modules: Vec<String> = Vec::new();
     let mut registry_entries: Vec<RegistryEntry> = Vec::new();
+    let mut command_modules: Vec<String> = Vec::new();
+    let mut workspace_uses_ui = false;
 
+    let mut partitioned_files = Vec::with_capacity(validated_files.len());
+    let mut total_cmd_files = 0usize;
+    let mut any_partitioned_targets = false;
     for vf in validated_files {
+        if program_uses_ui(&vf.prog) {
+            workspace_uses_ui = true;
+        }
+        let part = partition_program(&vf.prog, &registry);
+        if !part.commands.is_empty() {
+            total_cmd_files += 1;
+        }
+        if part.should_partition(vf.prog.bind_targets.len()) {
+            any_partitioned_targets = true;
+        }
+        partitioned_files.push((vf, part));
+    }
+    let merge_commands_into_registry =
+        total_cmd_files > 1 || (total_cmd_files >= 1 && any_partitioned_targets);
+
+    for (vf, part) in partitioned_files {
         for item in &vf.prog.items {
             if let crate::ast::TopLevelItem::McFunctionDecl(mc) = item {
                 let norm = crate::validator::normalize_mcfunction_path(&mc.path);
@@ -377,8 +400,9 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             }
         }
 
-        let part = partition_program(&vf.prog, &registry);
-        if !part.should_partition(vf.prog.bind_targets.len()) {
+        let should_partition = part.should_partition(vf.prog.bind_targets.len())
+            || (merge_commands_into_registry && !part.commands.is_empty());
+        if !should_partition {
             let registered = wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?;
             let opts = CodegenOptions {
                 source_file: vf.rel,
@@ -506,6 +530,30 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             });
         }
 
+        if !part.commands.is_empty() {
+            let cmd_js = emit_commands_module(
+                &part.commands,
+                &shared_ctx_js,
+                header,
+                &vf.rel,
+                cfg.source_map_comments,
+                EmitMode::JavaScript,
+            );
+            write_generated_file(&js_dir.join(format!("commands/{}.js", vf.stem)), &cmd_js)?;
+            if cfg.emit_ts {
+                let cmd_ts = emit_commands_module(
+                    &part.commands,
+                    &shared_ctx_ts,
+                    header,
+                    &vf.rel,
+                    cfg.source_map_comments,
+                    EmitMode::TypeScript,
+                );
+                write_generated_file(&ts_dir.join(format!("commands/{}.ts", vf.stem)), &cmd_ts)?;
+            }
+            command_modules.push(vf.stem.clone());
+        }
+
         if !part.world.is_empty() {
             let world_js = emit_world_module(
                 &part.world,
@@ -537,11 +585,21 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         }
     }
 
-    if !registry_entries.is_empty() {
-        let reg_js = emit_registry_module(&registry_entries, &target_ver, EmitMode::JavaScript);
+    if !registry_entries.is_empty() || !command_modules.is_empty() {
+        let reg_js = emit_registry_module_with_commands(
+            &registry_entries,
+            &command_modules,
+            &target_ver,
+            EmitMode::JavaScript,
+        );
         write_generated_file(&js_dir.join("_registry.js"), &reg_js)?;
         if cfg.emit_ts {
-            let reg_ts = emit_registry_module(&registry_entries, &target_ver, EmitMode::TypeScript);
+            let reg_ts = emit_registry_module_with_commands(
+                &registry_entries,
+                &command_modules,
+                &target_ver,
+                EmitMode::TypeScript,
+            );
             write_generated_file(&ts_dir.join("_registry.ts"), &reg_ts)?;
         }
         main_modules.push("_registry".to_string());
@@ -549,7 +607,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     if !main_modules.is_empty() {
         update_main_js(root, &main_modules)?;
-        update_manifest(root, &target_ver, &api_ver)?;
+        update_manifest_with_ui(root, &target_ver, &api_ver, workspace_uses_ui)?;
     }
 
     sort_and_dedup_diags(&mut all_diags);

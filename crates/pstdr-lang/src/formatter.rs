@@ -238,6 +238,74 @@ impl Formatter {
                         }
                         None => format!("on entity_trigger {} {{", fmt_expr(event_id)),
                     },
+                    EventKind::CustomCommand {
+                        command_id,
+                        description,
+                        permission,
+                        params,
+                        actor_var,
+                    } => {
+                        let mut h = format!(
+                            "on cmd {} description {}",
+                            fmt_expr(command_id),
+                            fmt_expr(description)
+                        );
+                        if *permission != CmdPermission::Any {
+                            h.push_str(&format!(" permission {}", permission.as_pstdr_str()));
+                        } else {
+                            h.push_str(" permission any");
+                        }
+                        if !params.is_empty() {
+                            let p_strs: Vec<String> = params
+                                .iter()
+                                .map(|p| {
+                                    let q = if p.optional { "?" } else { "" };
+                                    format!("{}{q}: {}", p.name, p.param_type.as_pstdr_str())
+                                })
+                                .collect();
+                            h.push_str(&format!(" ({})", p_strs.join(", ")));
+                        }
+                        if let Some(a) = actor_var {
+                            h.push_str(&format!(" by {a}"));
+                        }
+                        h.push_str(" {");
+                        h
+                    }
+                    EventKind::PlaceBlock {
+                        block_var,
+                        actor_var,
+                    } => format!("on place of {block_var} by {actor_var} {{"),
+                    EventKind::DimensionChange { player_var } => {
+                        format!("on dimension_change of {player_var} {{")
+                    }
+                    EventKind::HealthChange { entity_var } => {
+                        format!("on health_change of {entity_var} {{")
+                    }
+                    EventKind::InteractEntity {
+                        target_var,
+                        actor_var,
+                    } => format!("on interact_entity of {target_var} by {actor_var} {{"),
+                    EventKind::ProjectileHitBlock {
+                        block_var,
+                        shooter_var,
+                    } => match shooter_var {
+                        Some(s) => format!("on projectile_hit_block of {block_var} by {s} {{"),
+                        None => format!("on projectile_hit_block of {block_var} {{"),
+                    },
+                    EventKind::EntityHitBlock {
+                        block_var,
+                        attacker_var,
+                    } => format!("on entity_hit_block of {block_var} by {attacker_var} {{"),
+                    EventKind::ItemRelease { item, actor_var } => {
+                        format!("on item_release with {} by {actor_var} {{", fmt_expr(item))
+                    }
+                    EventKind::Explosion => "on explosion {".to_string(),
+                    EventKind::EntityLoad { entity_var } => {
+                        format!("on entity_load of {entity_var} {{")
+                    }
+                    EventKind::EntityRemove { entity_var } => {
+                        format!("on entity_remove of {entity_var} {{")
+                    }
                 };
                 self.line(&header);
                 self.indent += 1;
@@ -405,6 +473,168 @@ impl Formatter {
                 self.fmt_block_stmts(&body.stmts);
                 self.indent -= 1;
                 self.line("}");
+            }
+            Stmt::UiAction {
+                title,
+                body,
+                target,
+                buttons,
+                ..
+            } => {
+                let mut header = format!("ui action {}", fmt_expr(title));
+                if let Some(b) = body {
+                    header.push_str(&format!(" body {}", fmt_expr(b)));
+                }
+                header.push_str(&format!(" to {} {{", fmt_expr(target)));
+                self.line(&header);
+                self.indent += 1;
+                for btn in buttons {
+                    let mut bh = format!("button {}", fmt_expr(&btn.label));
+                    if let Some(ic) = &btn.icon {
+                        bh.push_str(&format!(" icon {}", fmt_expr(ic)));
+                    }
+                    bh.push_str(" {");
+                    self.line(&bh);
+                    self.indent += 1;
+                    self.fmt_block_stmts(&btn.body.stmts);
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::UiMessage {
+                title,
+                body,
+                target,
+                button1,
+                button2,
+                ..
+            } => {
+                let mut header = format!("ui message {}", fmt_expr(title));
+                if let Some(b) = body {
+                    header.push_str(&format!(" body {}", fmt_expr(b)));
+                }
+                header.push_str(&format!(" to {} {{", fmt_expr(target)));
+                self.line(&header);
+                self.indent += 1;
+                self.line(&format!("button1 {} {{", fmt_expr(&button1.label)));
+                self.indent += 1;
+                self.fmt_block_stmts(&button1.body.stmts);
+                self.indent -= 1;
+                self.line("}");
+                self.line(&format!("button2 {} {{", fmt_expr(&button2.label)));
+                self.indent += 1;
+                self.fmt_block_stmts(&button2.body.stmts);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::UiModal {
+                title,
+                target,
+                fields,
+                on_submit,
+                ..
+            } => {
+                self.line(&format!(
+                    "ui modal {} to {} {{",
+                    fmt_expr(title),
+                    fmt_expr(target)
+                ));
+                self.indent += 1;
+                for f in fields {
+                    match &f.kind {
+                        UiModalFieldKind::TextField {
+                            label,
+                            placeholder,
+                            default,
+                        } => {
+                            let mut s = format!("text_field {}", fmt_expr(label));
+                            if let Some(p) = placeholder {
+                                s.push_str(&format!(" placeholder {}", fmt_expr(p)));
+                            }
+                            if let Some(d) = default {
+                                s.push_str(&format!(" default {}", fmt_expr(d)));
+                            }
+                            s.push_str(&format!(" as {}", f.binding));
+                            self.line(&s);
+                        }
+                        UiModalFieldKind::Toggle { label, default } => {
+                            let mut s = format!("toggle {}", fmt_expr(label));
+                            if let Some(d) = default {
+                                s.push_str(&format!(" default {}", fmt_expr(d)));
+                            }
+                            s.push_str(&format!(" as {}", f.binding));
+                            self.line(&s);
+                        }
+                        UiModalFieldKind::Slider {
+                            label,
+                            min,
+                            max,
+                            step,
+                            default,
+                        } => {
+                            let mut s = format!(
+                                "slider {} min {} max {} step {}",
+                                fmt_expr(label),
+                                fmt_expr(min),
+                                fmt_expr(max),
+                                fmt_expr(step)
+                            );
+                            if let Some(d) = default {
+                                s.push_str(&format!(" default {}", fmt_expr(d)));
+                            }
+                            s.push_str(&format!(" as {}", f.binding));
+                            self.line(&s);
+                        }
+                        UiModalFieldKind::Dropdown {
+                            label,
+                            options,
+                            default,
+                        } => {
+                            let mut s = format!(
+                                "dropdown {} options {}",
+                                fmt_expr(label),
+                                fmt_expr(options)
+                            );
+                            if let Some(d) = default {
+                                s.push_str(&format!(" default {}", fmt_expr(d)));
+                            }
+                            s.push_str(&format!(" as {}", f.binding));
+                            self.line(&s);
+                        }
+                    }
+                }
+                self.line("on submit {");
+                self.indent += 1;
+                self.fmt_block_stmts(&on_submit.stmts);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::ScoreboardShow {
+                objective,
+                title,
+                slot,
+                ..
+            } => match title {
+                Some(t) => self.line(&format!(
+                    "scoreboard show {} title {} slot {}",
+                    fmt_expr(objective),
+                    fmt_expr(t),
+                    slot.as_pstdr_str()
+                )),
+                None => self.line(&format!(
+                    "scoreboard show {} slot {}",
+                    fmt_expr(objective),
+                    slot.as_pstdr_str()
+                )),
+            },
+            Stmt::ScoreboardHide { slot, .. } => {
+                self.line(&format!("scoreboard hide slot {}", slot.as_pstdr_str()));
             }
             Stmt::ExprStmt { expr, .. } => {
                 self.line(&fmt_expr(expr));

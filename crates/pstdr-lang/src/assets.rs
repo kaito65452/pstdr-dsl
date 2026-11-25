@@ -65,7 +65,7 @@ fn load_texture_dict(json_path: &Path) -> HashMap<String, Vec<String>> {
 }
 
 /// Checks whether the physical texture image file exists inside the RP/ directory.
-fn rp_texture_file_exists(root: &Path, tex_path: &str) -> bool {
+pub(crate) fn rp_texture_file_exists(root: &Path, tex_path: &str) -> bool {
     let rp = root.join("RP");
     let path = tex_path.trim().replace('\\', "/");
     let direct = rp.join(&path);

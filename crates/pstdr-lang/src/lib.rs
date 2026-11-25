@@ -2805,4 +2805,383 @@ on join of player {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // ─── WAVE 3B: Custom Commands, Native UI, Scoreboard & 10 Survival Events ───
+
+    #[test]
+    fn wave_3b_on_cmd_codegen_validation_and_merged_startup() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on cmd "my_pack:guess" description "Submit a block guess" permission any (word: string, tries?: int, hard?: bool) by player {
+    send "You guessed: {word}" to player
+}
+
+on cmd "my_pack:tp" description "Teleport helper" permission admin (target: player, height: float) {
+    world.send_message("Teleporting...")
+}
+"#;
+        let res = compile_source(src, "src/cmds.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { world, system, CommandPermissionLevel, CustomCommandParamType } from \"@minecraft/server\";"), "js:\n{js}");
+        assert_eq!(js.matches("system.beforeEvents.startup.subscribe").count(), 1, "Must emit single startup subscriber:\n{js}");
+        assert!(js.contains("// @pstdr src/cmds.pstdr:3"), "js:\n{js}");
+        assert!(js.contains("initEv.customCommandRegistry.registerCommand({"), "js:\n{js}");
+        assert!(js.contains("name: \"my_pack:guess\""), "js:\n{js}");
+        assert!(js.contains("description: \"Submit a block guess\""), "js:\n{js}");
+        assert!(js.contains("permissionLevel: CommandPermissionLevel.Any"), "js:\n{js}");
+        assert!(js.contains("{ name: \"word\", type: CustomCommandParamType.String }"), "js:\n{js}");
+        assert!(js.contains("{ name: \"tries\", type: CustomCommandParamType.Integer }"), "js:\n{js}");
+        assert!(js.contains("{ name: \"hard\", type: CustomCommandParamType.Boolean }"), "js:\n{js}");
+        assert!(js.contains("const player = origin.sourceEntity;"), "js:\n{js}");
+        assert!(js.contains("if (!player || player.typeId !== \"minecraft:player\") return;"), "js:\n{js}");
+        assert!(js.contains("system.run(() => {"), "js:\n{js}");
+        assert!(js.contains("permissionLevel: CommandPermissionLevel.Admin"), "js:\n{js}");
+        assert!(js.contains("{ name: \"target\", type: CustomCommandParamType.PlayerSelector }"), "js:\n{js}");
+        assert!(js.contains("{ name: \"height\", type: CustomCommandParamType.Float }"), "js:\n{js}");
+
+        // Formatter idempotency
+        let fmt1 = format_source(src, "src/cmds.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "src/cmds.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2);
+
+        // Negative validation: missing namespace colon, duplicate param, required after optional
+        let bad = r#"
+on cmd "nocolon" description "Bad" (a: string, a: int) {
+    world.send_message("x")
+}
+on cmd "ns:order" description "Bad order" (opt?: bool, req: string) {
+    world.send_message("y")
+}
+"#;
+        let bad_res = compile_source(bad, "bad_cmd.pstdr", None, &spec, true, true, vec![]);
+        let msgs: Vec<&str> = bad_res.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(msgs.iter().any(|m| m.contains("namespace colon")), "msgs: {msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("Duplicate command parameter")), "msgs: {msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("cannot appear after an optional")), "msgs: {msgs:?}");
+
+        // Workspace merging: custom item component + on cmd share ONE startup subscriber in _registry.js
+        let dir = temp_dir("cmd_merge");
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("BP/items/wand.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"my_pack:wand"},"components":{"minecraft:icon":"stick"}}}"#,
+        ).unwrap();
+        fs::write(
+            dir.join("src/addon.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+on right click with "my_pack:wand" by player {
+    send "Zap!" to player
+}
+on cmd "my_pack:zap" description "Zap command" by player {
+    send "Slash zap!" to player
+}
+"#,
+        ).unwrap();
+        let ws_diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&ws_diags), "ws_diags: {ws_diags:?}");
+        let reg_js = fs::read_to_string(dir.join("BP/scripts/generated/_registry.js")).unwrap();
+        assert_eq!(reg_js.matches("system.beforeEvents.startup.subscribe").count(), 1, "reg_js:\n{reg_js}");
+        assert!(reg_js.contains("initEv.itemComponentRegistry.registerCustomComponent"), "reg_js:\n{reg_js}");
+        assert!(reg_js.contains("cmd_addon(initEv);"), "reg_js:\n{reg_js}");
+        let cmd_js = fs::read_to_string(dir.join("BP/scripts/generated/commands/addon.js")).unwrap();
+        assert!(cmd_js.contains("export function registerCommands(initEv)"), "cmd_js:\n{cmd_js}");
+        assert!(cmd_js.contains("initEv.customCommandRegistry.registerCommand"), "cmd_js:\n{cmd_js}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_3b_ui_forms_codegen_asset_guard_and_conditional_manifest() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on cmd "my_pack:menu" description "Open menus" by player {
+    ui action "Class Menu" body "Choose your role:" to player {
+        button "Warrior" icon "textures/items/iron_sword" {
+            player.give_item("minecraft:iron_sword", 1)
+        }
+        button "Archer" {
+            player.give_item("minecraft:bow", 1)
+        }
+    }
+    ui message "Confirm" body "Proceed?" to player {
+        button1 "Yes" {
+            send "Accepted" to player
+        }
+        button2 "No" {
+            send "Declined" to player
+        }
+    }
+    ui modal "Settings" to player {
+        text_field "Nickname" placeholder "Enter..." default "Steve" as nick
+        toggle "Hardcore" default false as hard
+        slider "Difficulty" min 1 max 5 step 1 default 2 as diff
+        dropdown "Role" options ["Warrior", "Archer"] default 0 as role
+        on submit {
+            send "{nick}:{hard}:{diff}:{role}" to player
+        }
+    }
+}
+
+on break of "minecraft:bedrock" by player {
+    cancel event
+    ui message "Protected" body "Cannot break!" to player {
+        button1 "OK" {
+            send "Understood" to player
+        }
+        button2 "Close" {
+            send "Closed" to player
+        }
+    }
+}
+"#;
+        let res = compile_source(src, "src/ui.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { ActionFormData, MessageFormData, ModalFormData } from \"@minecraft/server-ui\";"), "js:\n{js}");
+        assert!(js.contains("new ActionFormData()"), "js:\n{js}");
+        assert!(js.contains(".button(\"Warrior\", \"textures/items/iron_sword\")"), "js:\n{js}");
+        assert!(js.contains("new MessageFormData()"), "js:\n{js}");
+        assert!(js.contains(".button1(\"Yes\")"), "js:\n{js}");
+        assert!(js.contains(".button2(\"No\")"), "js:\n{js}");
+        assert!(js.contains("new ModalFormData()"), "js:\n{js}");
+        assert!(js.contains(".textField(\"Nickname\", \"Enter...\", { defaultValue: \"Steve\" })"), "js:\n{js}");
+        assert!(js.contains(".toggle(\"Hardcore\", { defaultValue: false })"), "js:\n{js}");
+        assert!(js.contains(".slider(\"Difficulty\", 1, 5, { valueStep: 1, defaultValue: 2 })"), "js:\n{js}");
+        assert!(js.contains(".dropdown(\"Role\", [\"Warrior\", \"Archer\"], { defaultValueIndex: 0 })"), "js:\n{js}");
+        assert!(js.contains("if (res.canceled) return;"), "js:\n{js}");
+        assert!(js.contains("if (res.canceled || !res.formValues) return;"), "js:\n{js}");
+        assert!(js.contains("const [nick, hard, diff, role] = res.formValues;"), "js:\n{js}");
+        // Before-event deferral for ui message inside cancellable on break
+        assert!(js.contains("system.run(() => {\n            __form.show(player).then"), "js:\n{js}");
+        // Source trace comments
+        assert!(js.contains("// @pstdr src/ui.pstdr:4"), "js:\n{js}");
+        assert!(js.contains("// @pstdr src/ui.pstdr:12"), "js:\n{js}");
+        assert!(js.contains("// @pstdr src/ui.pstdr:20"), "js:\n{js}");
+
+        // Formatter idempotency
+        let fmt1 = format_source(src, "src/ui.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "src/ui.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2);
+
+        // Icon asset guard: custom missing icon -> E017; path traversal -> E009
+        let bad_icons = r#"
+on join of player {
+    ui action "Bad" to player {
+        button "Missing" icon "textures/items/custom_nonexistent_blade" {
+            send "a" to player
+        }
+        button "Traversal" icon "../secret.png" {
+            send "b" to player
+        }
+    }
+}
+"#;
+        let bad_res = compile_source(bad_icons, "bad_ui.pstdr", None, &spec, true, true, vec![]);
+        let codes: Vec<&str> = bad_res.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"PSTDR-E017"), "Expected E017 for missing custom icon: {codes:?}");
+        assert!(codes.contains(&"PSTDR-E009"), "Expected E009 for icon path traversal: {codes:?}");
+
+        // Workspace manifest conditional injection: WITH ui -> injects @minecraft/server-ui 2.0.0
+        let dir_with_ui = temp_dir("manifest_with_ui");
+        fs::create_dir_all(dir_with_ui.join("src")).unwrap();
+        fs::write(dir_with_ui.join("src/menu.pstdr"), src).unwrap();
+        let diags_ui = convert_workspace(&dir_with_ui, &spec).unwrap();
+        assert!(!has_errors(&diags_ui), "diags_ui: {diags_ui:?}");
+        let manifest_ui: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir_with_ui.join("BP/manifest.json")).unwrap(),
+        ).unwrap();
+        let deps_ui = manifest_ui["dependencies"].as_array().unwrap();
+        assert!(
+            deps_ui.iter().any(|d| d["module_name"] == "@minecraft/server-ui" && d["version"] == "2.0.0"),
+            "Expected @minecraft/server-ui 2.0.0 in manifest: {deps_ui:?}"
+        );
+        let _ = fs::remove_dir_all(&dir_with_ui);
+
+        // Negative test: WITHOUT ui -> @minecraft/server-ui must NOT be injected
+        let dir_no_ui = temp_dir("manifest_no_ui");
+        fs::create_dir_all(dir_no_ui.join("src")).unwrap();
+        fs::write(
+            dir_no_ui.join("src/plain.pstdr"),
+            "@addon(target = \"26.60\", api = \"2.11.0\")\non join of player {\n    send \"hi\" to player\n}\n",
+        ).unwrap();
+        let diags_plain = convert_workspace(&dir_no_ui, &spec).unwrap();
+        assert!(!has_errors(&diags_plain), "diags_plain: {diags_plain:?}");
+        let manifest_plain: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir_no_ui.join("BP/manifest.json")).unwrap(),
+        ).unwrap();
+        let deps_plain = manifest_plain["dependencies"].as_array().unwrap();
+        assert!(
+            !deps_plain.iter().any(|d| d["module_name"] == "@minecraft/server-ui"),
+            "@minecraft/server-ui must NOT be injected when no ui block exists: {deps_plain:?}"
+        );
+        let _ = fs::remove_dir_all(&dir_no_ui);
+    }
+
+    #[test]
+    fn wave_3b_native_scoreboard_indexing_and_display_slots() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on join of player {
+    score["kills"][player] = 0
+    score["kills"][player] += 1
+    score["kills"][player] -= 1
+    const k = score["kills"][player]
+    send "Kills: {k}" to player
+    scoreboard show "kills" title "Top Kills" slot sidebar
+    scoreboard show "deaths" slot list
+    scoreboard hide slot belowname
+}
+"#;
+        let res = compile_source(src, "src/sb.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("import { world, DisplaySlotId } from \"@minecraft/server\";"), "js:\n{js}");
+        assert_eq!(js.matches("function __pstdr_get_or_create_objective").count(), 1, "Helper must be deduplicated:\n{js}");
+        assert!(js.contains("__pstdr_get_or_create_objective(\"kills\").setScore(player, 0);"), "js:\n{js}");
+        assert!(js.contains("__pstdr_get_or_create_objective(\"kills\").addScore(player, 1);"), "js:\n{js}");
+        assert!(js.contains("__pstdr_get_or_create_objective(\"kills\").addScore(player, -(1));"), "js:\n{js}");
+        assert!(js.contains("const k = (__pstdr_get_or_create_objective(\"kills\").getScore(player) ?? 0);"), "js:\n{js}");
+        assert!(js.contains("world.scoreboard.setObjectiveAtDisplaySlot(DisplaySlotId.Sidebar, { objective: world.scoreboard.getObjective(\"kills\") ?? world.scoreboard.addObjective(\"kills\", \"Top Kills\") });"), "js:\n{js}");
+        assert!(js.contains("world.scoreboard.setObjectiveAtDisplaySlot(DisplaySlotId.List, { objective: __pstdr_get_or_create_objective(\"deaths\") });"), "js:\n{js}");
+        assert!(js.contains("world.scoreboard.clearObjectiveAtDisplaySlot(DisplaySlotId.BelowName);"), "js:\n{js}");
+
+        let fmt1 = format_source(src, "src/sb.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "src/sb.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2);
+    }
+
+    #[test]
+    fn wave_3b_ten_survival_events_and_before_event_routing() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on place of block by player {
+    send "Placed {block.type_id}" to player
+}
+
+on place of block by player {
+    cancel event
+    send "Blocked {block.type_id}" to player
+}
+
+on dimension_change of player {
+    send "Moved from {from_dimension.id} to {to_dimension.id} ({from_location.x} -> {to_location.x})" to player
+}
+
+on health_change of entity {
+    world.send_message("{entity.type_id}: {old_value} -> {new_value}")
+}
+
+on interact_entity of target by player {
+    cancel event
+    send "Locked {target.type_id}" to player
+}
+
+on projectile_hit_block of block by shooter {
+    world.send_message("{projectile.type_id} hit {block.type_id} from {shooter.type_id}")
+}
+
+on entity_hit_block of block by attacker {
+    world.send_message("{attacker.type_id} punched {block.type_id}")
+}
+
+on item_release with "minecraft:bow" by player {
+    send "Released {item.type_id} after {use_duration}" to player
+}
+
+on explosion {
+    cancel event
+    world.send_message("Cancelled explosion from {source} affecting {impacted_blocks.length}")
+}
+
+on entity_load of entity {
+    world.send_message("Loaded {entity.type_id}")
+}
+
+on entity_remove of entity {
+    world.send_message("Removed {entity.type_id}")
+}
+"#;
+        let res = compile_source(src, "src/survival.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("world.afterEvents.playerPlaceBlock.subscribe"), "js:\n{js}");
+        assert!(js.contains("world.beforeEvents.playerPlaceBlock.subscribe"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.playerDimensionChange.subscribe"), "js:\n{js}");
+        assert!(js.contains("const from_dimension = ev.fromDimension;"), "js:\n{js}");
+        assert!(js.contains("const to_dimension = ev.toDimension;"), "js:\n{js}");
+        assert!(js.contains("const from_location = ev.fromLocation;"), "js:\n{js}");
+        assert!(js.contains("const to_location = ev.toLocation;"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.entityHealthChanged.subscribe"), "js:\n{js}");
+        assert!(js.contains("const old_value = ev.oldValue;"), "js:\n{js}");
+        assert!(js.contains("const new_value = ev.newValue;"), "js:\n{js}");
+        assert!(js.contains("world.beforeEvents.playerInteractWithEntity.subscribe"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.projectileHitBlock.subscribe"), "js:\n{js}");
+        assert!(js.contains("const block = ev.getBlockHit()?.block;"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.entityHitBlock.subscribe"), "js:\n{js}");
+        assert!(js.contains("const block = ev.hitBlock;"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.itemReleaseUse.subscribe"), "js:\n{js}");
+        assert!(js.contains("const use_duration = ev.useDuration;"), "js:\n{js}");
+        assert!(js.contains("world.beforeEvents.explosion.subscribe"), "js:\n{js}");
+        assert!(js.contains("const impacted_blocks = ev.getImpactedBlocks();"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.entityLoad.subscribe"), "js:\n{js}");
+        assert!(js.contains("world.afterEvents.entityRemove.subscribe"), "js:\n{js}");
+        // Verify before-event deferral inside cancelled handlers
+        assert!(js.contains("ev.cancel = true;\n    system.run(() => {"), "js:\n{js}");
+
+        // Formatter idempotency
+        let fmt1 = format_source(src, "src/survival.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "src/survival.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2);
+
+        // E016 explain text lists on cmd and new events
+        let e016 = explain_code("E016").unwrap();
+        for kw in ["on cmd", "on place", "on dimension_change", "on explosion", "on entity_remove"] {
+            assert!(e016.contains(kw), "E016 explain missing '{kw}': {e016}");
+        }
+    }
+
+    #[test]
+    fn wave_3b_contextual_keywords_never_break_user_variables() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+on join of player {
+    const title = "Hero"
+    const body = "Welcome"
+    const icon = "star"
+    const slot = 1
+    const min = 0
+    const max = 10
+    const step = 1
+    const options = ["a", "b"]
+    const cmd = "go"
+    const description = "desc"
+    const permission = "any"
+    const placeholder = "ph"
+    const default = "def"
+    const submit = true
+    const show = true
+    const hide = false
+    const button = "ok"
+    const button1 = "yes"
+    const button2 = "no"
+    const text_field = "tf"
+    const toggle = false
+    const slider = 5
+    const dropdown = 0
+    send "{title}{body}{icon}{slot}{min}{max}{step}{options.length}{cmd}{description}{permission}{placeholder}{default}{submit}{show}{hide}{button}{button1}{button2}{text_field}{toggle}{slider}{dropdown}" to player
+}
+"#;
+        let res = compile_source(src, "ctx.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "Contextual keywords must be usable as variables: {:?}",
+            res.diagnostics
+        );
+    }
 }

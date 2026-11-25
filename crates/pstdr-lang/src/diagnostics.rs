@@ -268,7 +268,7 @@ pub fn explain_code(raw_code: &str) -> Option<&'static str> {
         "E016" => Some(
             "PSTDR-E016: General syntax or API usage error.\n\
              Cause: Unexpected token, unclosed quote, invalid helper arity, unknown world.*/system.* method, or unsupported 'on' event type.\n\
-             Supported 'on' events: on right click, on hit, on break, on interact, on tick, on projectile hit, on spawn, on join, on leave, on chat, on hurt, on die, on consume, on script_event, on entity_trigger.\n\
+             Supported 'on' events: on cmd, on right click, on hit, on break, on place, on interact, on interact_entity, on tick, on projectile hit, on projectile_hit_block, on entity_hit_block, on spawn, on entity_load, on entity_remove, on join, on leave, on chat, on hurt, on die, on health_change, on dimension_change, on consume, on item_release, on explosion, on script_event, on entity_trigger.\n\
              Right : Check the highlighted line and fix it to match .pstdr grammar. If using a newer event syntax, check 'pstdr-c --version'.",
         ),
         "E017" => Some(

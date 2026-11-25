@@ -142,6 +142,7 @@ pub struct PartitionedProgram {
     pub shared: Vec<TopLevelItem>,
     pub items: BTreeMap<String, PartitionedTarget>,
     pub blocks: BTreeMap<String, PartitionedTarget>,
+    pub commands: Vec<EventHandler>,
     pub world: Vec<TopLevelItem>,
 }
 
@@ -181,6 +182,7 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
     let mut shared = Vec::new();
     let mut items: BTreeMap<String, PartitionedTarget> = BTreeMap::new();
     let mut blocks: BTreeMap<String, PartitionedTarget> = BTreeMap::new();
+    let mut commands: Vec<EventHandler> = Vec::new();
     let mut world = Vec::new();
 
     for item in &program.items {
@@ -290,6 +292,9 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                             world.push(item.clone());
                         }
                     }
+                    EventKind::CustomCommand { .. } => {
+                        commands.push(ev.clone());
+                    }
                     EventKind::PlayerJoin { .. }
                     | EventKind::PlayerLeave { .. }
                     | EventKind::ChatSend { .. }
@@ -298,7 +303,17 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                     | EventKind::ProjectileHit { .. }
                     | EventKind::EntitySpawn { .. }
                     | EventKind::ScriptEvent { .. }
-                    | EventKind::EntityTrigger { .. } => {
+                    | EventKind::EntityTrigger { .. }
+                    | EventKind::PlaceBlock { .. }
+                    | EventKind::DimensionChange { .. }
+                    | EventKind::HealthChange { .. }
+                    | EventKind::InteractEntity { .. }
+                    | EventKind::ProjectileHitBlock { .. }
+                    | EventKind::EntityHitBlock { .. }
+                    | EventKind::ItemRelease { .. }
+                    | EventKind::Explosion
+                    | EventKind::EntityLoad { .. }
+                    | EventKind::EntityRemove { .. } => {
                         world.push(item.clone());
                     }
                 }
@@ -310,6 +325,7 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
         shared,
         items,
         blocks,
+        commands,
         world,
     }
 }

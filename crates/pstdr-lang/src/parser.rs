@@ -781,12 +781,182 @@ impl<'a> Parser<'a> {
                     entity_type,
                 }
             }
+            TokenKind::Ident(w) if w == "cmd" => {
+                self.advance();
+                let command_id = self.parse_primary(false)?;
+                self.expect_word("description")?;
+                let description = self.parse_primary(false)?;
+                let permission = if self.is_ident_word("permission") {
+                    self.advance();
+                    let (perm_word, perm_span) =
+                        self.expect_ident_any("command permission level")?;
+                    match perm_word.as_str() {
+                        "any" => CmdPermission::Any,
+                        "gamemakers" => CmdPermission::GameMakers,
+                        "admin" => CmdPermission::Admin,
+                        "host" => CmdPermission::Host,
+                        _ => {
+                            return Err(Box::new(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                &perm_span,
+                                format!("Unknown command permission '{perm_word}'."),
+                                "Use 'any', 'gamemakers', 'admin', or 'host'.",
+                            )));
+                        }
+                    }
+                } else {
+                    CmdPermission::Any
+                };
+                let mut params = Vec::new();
+                if matches!(self.peek().kind, TokenKind::LParen) {
+                    self.advance();
+                    while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
+                        let (p_name, p_span) = self.expect_user_ident("command parameter")?;
+                        let optional = if matches!(self.peek().kind, TokenKind::Question) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        self.expect_kind(&TokenKind::Colon, ":")?;
+                        let (ty_word, ty_span) =
+                            self.expect_ident_any("command parameter type")?;
+                        let param_type = match ty_word.as_str() {
+                            "string" => CmdParamType::String,
+                            "int" => CmdParamType::Integer,
+                            "float" => CmdParamType::Float,
+                            "bool" => CmdParamType::Boolean,
+                            "player" => CmdParamType::PlayerSelector,
+                            _ => {
+                                return Err(Box::new(Diagnostic::error(
+                                    DiagnosticCode::E016,
+                                    &ty_span,
+                                    format!("Unknown command parameter type '{ty_word}'."),
+                                    "Use 'string', 'int', 'float', 'bool', or 'player'.",
+                                )));
+                            }
+                        };
+                        params.push(CmdParam {
+                            name: p_name,
+                            span: p_span,
+                            optional,
+                            param_type,
+                        });
+                        if matches!(self.peek().kind, TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect_kind(&TokenKind::RParen, ")")?;
+                }
+                let actor_var = if self.is_ident_word("by") {
+                    self.advance();
+                    let (a, _) = self.expect_user_ident("command sender")?;
+                    Some(a)
+                } else {
+                    None
+                };
+                EventKind::CustomCommand {
+                    command_id,
+                    description,
+                    permission,
+                    params,
+                    actor_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "place" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (block_var, _) = self.expect_user_ident("place event block")?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("place event player")?;
+                EventKind::PlaceBlock {
+                    block_var,
+                    actor_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "dimension_change" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (player_var, _) = self.expect_user_ident("dimension_change event player")?;
+                EventKind::DimensionChange { player_var }
+            }
+            TokenKind::Ident(w) if w == "health_change" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (entity_var, _) = self.expect_user_ident("health_change event entity")?;
+                EventKind::HealthChange { entity_var }
+            }
+            TokenKind::Ident(w) if w == "interact_entity" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (target_var, _) = self.expect_user_ident("interact_entity event target")?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("interact_entity event player")?;
+                EventKind::InteractEntity {
+                    target_var,
+                    actor_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "projectile_hit_block" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (block_var, _) = self.expect_user_ident("projectile_hit_block event block")?;
+                let shooter_var = if self.is_ident_word("by") {
+                    self.advance();
+                    let (s, _) = self.expect_user_ident("projectile_hit_block event shooter")?;
+                    Some(s)
+                } else {
+                    None
+                };
+                EventKind::ProjectileHitBlock {
+                    block_var,
+                    shooter_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "entity_hit_block" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (block_var, _) = self.expect_user_ident("entity_hit_block event block")?;
+                self.expect_word("by")?;
+                let (attacker_var, _) =
+                    self.expect_user_ident("entity_hit_block event attacker")?;
+                EventKind::EntityHitBlock {
+                    block_var,
+                    attacker_var,
+                }
+            }
+            TokenKind::Ident(w) if w == "item_release" => {
+                self.advance();
+                self.expect_word("with")?;
+                let item = self.parse_expr(false)?;
+                self.expect_word("by")?;
+                let (actor_var, _) = self.expect_user_ident("item_release event player")?;
+                EventKind::ItemRelease { item, actor_var }
+            }
+            TokenKind::Ident(w) if w == "explosion" => {
+                self.advance();
+                EventKind::Explosion
+            }
+            TokenKind::Ident(w) if w == "entity_load" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (entity_var, _) = self.expect_user_ident("entity_load event entity")?;
+                EventKind::EntityLoad { entity_var }
+            }
+            TokenKind::Ident(w) if w == "entity_remove" => {
+                self.advance();
+                self.expect_word("of")?;
+                let (entity_var, _) = self.expect_user_ident("entity_remove event entity")?;
+                EventKind::EntityRemove { entity_var }
+            }
             _ => {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on consume ... by player', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'. If using a newer event syntax, check your compiler version with 'pstdr-c --version'.",
+                    "Use 'on cmd \"ns:name\" description \"...\" [permission ...] [(params)] [by player]', 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on place of block by player', 'on interact of ... by player', 'on interact_entity of target by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on projectile_hit_block of block [by shooter]', 'on entity_hit_block of block by attacker', 'on spawn of entity [type ...]', 'on entity_load of entity', 'on entity_remove of entity', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on health_change of entity', 'on dimension_change of player', 'on consume ... by player', 'on item_release with ... by player', 'on explosion', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'. If using a newer event syntax, check your compiler version with 'pstdr-c --version'.",
                 )));
             }
         };
@@ -1033,6 +1203,18 @@ impl<'a> Parser<'a> {
                 span: start,
             });
         }
+        if self.is_ident_word("ui")
+            && (self.peek_next_ident_word("action")
+                || self.peek_next_ident_word("message")
+                || self.peek_next_ident_word("modal"))
+        {
+            return self.parse_ui_stmt();
+        }
+        if self.is_ident_word("scoreboard")
+            && (self.peek_next_ident_word("show") || self.peek_next_ident_word("hide"))
+        {
+            return self.parse_scoreboard_stmt();
+        }
 
         // Expression or assignment
         let expr = self.parse_expr(true)?;
@@ -1121,6 +1303,366 @@ impl<'a> Parser<'a> {
             var_span,
             iter,
             body,
+            span: start,
+        })
+    }
+
+    fn parse_display_slot(&mut self) -> Result<DisplaySlot, Box<Diagnostic>> {
+        let (slot_word, slot_span) = self.expect_ident_any("scoreboard display slot")?;
+        match slot_word.as_str() {
+            "sidebar" => Ok(DisplaySlot::Sidebar),
+            "list" => Ok(DisplaySlot::List),
+            "belowname" => Ok(DisplaySlot::BelowName),
+            _ => Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &slot_span,
+                format!("Unknown scoreboard display slot '{slot_word}'."),
+                "Use 'sidebar', 'list', or 'belowname'.",
+            ))),
+        }
+    }
+
+    fn parse_scoreboard_stmt(&mut self) -> Result<Stmt, Box<Diagnostic>> {
+        let start = self.advance().span; // consume "scoreboard"
+        let (action, action_span) = self.expect_ident_any("scoreboard action")?;
+        match action.as_str() {
+            "show" => {
+                let objective = self.parse_expr(false)?;
+                let title = if self.is_ident_word("title") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                self.expect_word("slot")?;
+                let slot = self.parse_display_slot()?;
+                self.consume_optional_semi();
+                Ok(Stmt::ScoreboardShow {
+                    objective,
+                    title,
+                    slot,
+                    span: start,
+                })
+            }
+            "hide" => {
+                self.expect_word("slot")?;
+                let slot = self.parse_display_slot()?;
+                self.consume_optional_semi();
+                Ok(Stmt::ScoreboardHide { slot, span: start })
+            }
+            _ => Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &action_span,
+                format!("Unknown scoreboard action '{action}'."),
+                "Use 'scoreboard show \"<objective>\" [title \"<title>\"] slot <sidebar|list|belowname>' or 'scoreboard hide slot <sidebar|list|belowname>'.",
+            ))),
+        }
+    }
+
+    fn parse_ui_stmt(&mut self) -> Result<Stmt, Box<Diagnostic>> {
+        let start = self.advance().span; // consume "ui"
+        let (kind_word, kind_span) = self.expect_ident_any("UI form type")?;
+        match kind_word.as_str() {
+            "action" => self.parse_ui_action(start),
+            "message" => self.parse_ui_message(start),
+            "modal" => self.parse_ui_modal(start),
+            _ => Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &kind_span,
+                format!("Unknown UI form type '{kind_word}'."),
+                "Use 'ui action', 'ui message', or 'ui modal'.",
+            ))),
+        }
+    }
+
+    fn parse_ui_action(&mut self, start: Span) -> Result<Stmt, Box<Diagnostic>> {
+        let title = self.parse_expr(false)?;
+        let body = if self.is_ident_word("body") {
+            self.advance();
+            Some(self.parse_expr(false)?)
+        } else {
+            None
+        };
+        self.expect_word("to")?;
+        let target = self.parse_expr(false)?;
+        let open_tok = self.expect_kind(&TokenKind::LBrace, "{")?;
+        let mut buttons = Vec::new();
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            if self.is_ident_word("button") {
+                let b_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                let icon = if self.is_ident_word("icon") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                let b_body = self.parse_block()?;
+                buttons.push(UiActionButton {
+                    label,
+                    icon,
+                    body: b_body,
+                    span: b_span,
+                });
+            } else {
+                let tok = self.peek().clone();
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &tok.span,
+                    "Expected 'button' clause inside 'ui action' block.",
+                    "Example: button \"Warrior\" icon \"textures/items/iron_sword\" { ... }",
+                )));
+            }
+        }
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            return Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E012,
+                &open_tok.span,
+                format!(
+                    "Opening brace '{{' on line {} has no matching closing brace '}}'.",
+                    open_tok.span.line
+                ),
+                "Close the 'ui action' block with '}'.",
+            )));
+        }
+        self.advance();
+        Ok(Stmt::UiAction {
+            title,
+            body,
+            target,
+            buttons,
+            span: start,
+        })
+    }
+
+    fn parse_ui_message(&mut self, start: Span) -> Result<Stmt, Box<Diagnostic>> {
+        let title = self.parse_expr(false)?;
+        let body = if self.is_ident_word("body") {
+            self.advance();
+            Some(self.parse_expr(false)?)
+        } else {
+            None
+        };
+        self.expect_word("to")?;
+        let target = self.parse_expr(false)?;
+        let open_tok = self.expect_kind(&TokenKind::LBrace, "{")?;
+        let mut button1: Option<UiMessageButton> = None;
+        let mut button2: Option<UiMessageButton> = None;
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            if self.is_ident_word("button1") {
+                let b_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                let b_body = self.parse_block()?;
+                button1 = Some(UiMessageButton {
+                    label,
+                    body: b_body,
+                    span: b_span,
+                });
+            } else if self.is_ident_word("button2") {
+                let b_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                let b_body = self.parse_block()?;
+                button2 = Some(UiMessageButton {
+                    label,
+                    body: b_body,
+                    span: b_span,
+                });
+            } else {
+                let tok = self.peek().clone();
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &tok.span,
+                    "Expected 'button1' or 'button2' clause inside 'ui message' block.",
+                    "Example: button1 \"Yes\" { ... } button2 \"No\" { ... }",
+                )));
+            }
+        }
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            return Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E012,
+                &open_tok.span,
+                format!(
+                    "Opening brace '{{' on line {} has no matching closing brace '}}'.",
+                    open_tok.span.line
+                ),
+                "Close the 'ui message' block with '}'.",
+            )));
+        }
+        self.advance();
+        let b1 = button1.ok_or_else(|| {
+            Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &start,
+                "'ui message' requires a 'button1' clause.",
+                "Add button1 \"Yes\" { ... } inside the 'ui message' block.",
+            ))
+        })?;
+        let b2 = button2.ok_or_else(|| {
+            Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &start,
+                "'ui message' requires a 'button2' clause.",
+                "Add button2 \"No\" { ... } inside the 'ui message' block.",
+            ))
+        })?;
+        Ok(Stmt::UiMessage {
+            title,
+            body,
+            target,
+            button1: Box::new(b1),
+            button2: Box::new(b2),
+            span: start,
+        })
+    }
+
+    fn parse_ui_modal(&mut self, start: Span) -> Result<Stmt, Box<Diagnostic>> {
+        let title = self.parse_expr(false)?;
+        self.expect_word("to")?;
+        let target = self.parse_expr(false)?;
+        let open_tok = self.expect_kind(&TokenKind::LBrace, "{")?;
+        let mut fields = Vec::new();
+        let mut on_submit: Option<Block> = None;
+
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            if self.is_ident_word("text_field") {
+                let f_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                let placeholder = if self.is_ident_word("placeholder") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                let default = if self.is_ident_word("default") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                self.expect_word("as")?;
+                let (binding, binding_span) = self.expect_user_ident("modal field binding")?;
+                self.consume_optional_semi();
+                fields.push(UiModalField {
+                    kind: UiModalFieldKind::TextField {
+                        label,
+                        placeholder,
+                        default,
+                    },
+                    binding,
+                    binding_span,
+                    span: f_span,
+                });
+            } else if self.is_ident_word("toggle") {
+                let f_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                let default = if self.is_ident_word("default") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                self.expect_word("as")?;
+                let (binding, binding_span) = self.expect_user_ident("modal field binding")?;
+                self.consume_optional_semi();
+                fields.push(UiModalField {
+                    kind: UiModalFieldKind::Toggle { label, default },
+                    binding,
+                    binding_span,
+                    span: f_span,
+                });
+            } else if self.is_ident_word("slider") {
+                let f_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                self.expect_word("min")?;
+                let min = self.parse_expr(false)?;
+                self.expect_word("max")?;
+                let max = self.parse_expr(false)?;
+                self.expect_word("step")?;
+                let step = self.parse_expr(false)?;
+                let default = if self.is_ident_word("default") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                self.expect_word("as")?;
+                let (binding, binding_span) = self.expect_user_ident("modal field binding")?;
+                self.consume_optional_semi();
+                fields.push(UiModalField {
+                    kind: UiModalFieldKind::Slider {
+                        label,
+                        min,
+                        max,
+                        step,
+                        default,
+                    },
+                    binding,
+                    binding_span,
+                    span: f_span,
+                });
+            } else if self.is_ident_word("dropdown") {
+                let f_span = self.advance().span;
+                let label = self.parse_expr(false)?;
+                self.expect_word("options")?;
+                let options = self.parse_expr(false)?;
+                let default = if self.is_ident_word("default") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                self.expect_word("as")?;
+                let (binding, binding_span) = self.expect_user_ident("modal field binding")?;
+                self.consume_optional_semi();
+                fields.push(UiModalField {
+                    kind: UiModalFieldKind::Dropdown {
+                        label,
+                        options,
+                        default,
+                    },
+                    binding,
+                    binding_span,
+                    span: f_span,
+                });
+            } else if self.is_ident_word("on") && self.peek_next_ident_word("submit") {
+                self.advance(); // "on"
+                self.advance(); // "submit"
+                on_submit = Some(self.parse_block()?);
+            } else {
+                let tok = self.peek().clone();
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &tok.span,
+                    "Expected modal field ('text_field', 'toggle', 'slider', 'dropdown') or 'on submit { ... }' inside 'ui modal' block.",
+                    "Define modal fields ending with 'as <ident>', followed by 'on submit { ... }'.",
+                )));
+            }
+        }
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            return Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E012,
+                &open_tok.span,
+                format!(
+                    "Opening brace '{{' on line {} has no matching closing brace '}}'.",
+                    open_tok.span.line
+                ),
+                "Close the 'ui modal' block with '}'.",
+            )));
+        }
+        self.advance();
+        let submit_block = on_submit.ok_or_else(|| {
+            Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &start,
+                "'ui modal' requires an 'on submit { ... }' block.",
+                "Add 'on submit { ... }' at the end of the 'ui modal' block.",
+            ))
+        })?;
+        Ok(Stmt::UiModal {
+            title,
+            target,
+            fields,
+            on_submit: submit_block,
             span: start,
         })
     }

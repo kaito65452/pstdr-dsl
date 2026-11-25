@@ -157,6 +157,186 @@ pub enum EventKind {
         event_id: Expr,
         entity_type: Option<Expr>,
     },
+    CustomCommand {
+        command_id: Expr,
+        description: Expr,
+        permission: CmdPermission,
+        params: Vec<CmdParam>,
+        actor_var: Option<String>,
+    },
+    PlaceBlock {
+        block_var: String,
+        actor_var: String,
+    },
+    DimensionChange {
+        player_var: String,
+    },
+    HealthChange {
+        entity_var: String,
+    },
+    InteractEntity {
+        target_var: String,
+        actor_var: String,
+    },
+    ProjectileHitBlock {
+        block_var: String,
+        shooter_var: Option<String>,
+    },
+    EntityHitBlock {
+        block_var: String,
+        attacker_var: String,
+    },
+    ItemRelease {
+        item: Expr,
+        actor_var: String,
+    },
+    Explosion,
+    EntityLoad {
+        entity_var: String,
+    },
+    EntityRemove {
+        entity_var: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmdPermission {
+    Any,
+    GameMakers,
+    Admin,
+    Host,
+}
+
+impl CmdPermission {
+    pub fn as_pstdr_str(&self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::GameMakers => "gamemakers",
+            Self::Admin => "admin",
+            Self::Host => "host",
+        }
+    }
+
+    pub fn as_bedrock_enum(&self) -> &'static str {
+        match self {
+            Self::Any => "CommandPermissionLevel.Any",
+            Self::GameMakers => "CommandPermissionLevel.GameDirectors",
+            Self::Admin => "CommandPermissionLevel.Admin",
+            Self::Host => "CommandPermissionLevel.Host",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmdParamType {
+    String,
+    Integer,
+    Float,
+    Boolean,
+    PlayerSelector,
+}
+
+impl CmdParamType {
+    pub fn as_pstdr_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "int",
+            Self::Float => "float",
+            Self::Boolean => "bool",
+            Self::PlayerSelector => "player",
+        }
+    }
+
+    pub fn as_bedrock_enum(&self) -> &'static str {
+        match self {
+            Self::String => "CustomCommandParamType.String",
+            Self::Integer => "CustomCommandParamType.Integer",
+            Self::Float => "CustomCommandParamType.Float",
+            Self::Boolean => "CustomCommandParamType.Boolean",
+            Self::PlayerSelector => "CustomCommandParamType.PlayerSelector",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CmdParam {
+    pub name: String,
+    pub span: Span,
+    pub optional: bool,
+    pub param_type: CmdParamType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplaySlot {
+    Sidebar,
+    List,
+    BelowName,
+}
+
+impl DisplaySlot {
+    pub fn as_pstdr_str(&self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::List => "list",
+            Self::BelowName => "belowname",
+        }
+    }
+
+    pub fn as_bedrock_enum(&self) -> &'static str {
+        match self {
+            Self::Sidebar => "DisplaySlotId.Sidebar",
+            Self::List => "DisplaySlotId.List",
+            Self::BelowName => "DisplaySlotId.BelowName",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiActionButton {
+    pub label: Expr,
+    pub icon: Option<Expr>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiMessageButton {
+    pub label: Expr,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiModalFieldKind {
+    TextField {
+        label: Expr,
+        placeholder: Option<Expr>,
+        default: Option<Expr>,
+    },
+    Toggle {
+        label: Expr,
+        default: Option<Expr>,
+    },
+    Slider {
+        label: Expr,
+        min: Expr,
+        max: Expr,
+        step: Expr,
+        default: Option<Expr>,
+    },
+    Dropdown {
+        label: Expr,
+        options: Expr,
+        default: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiModalField {
+    pub kind: UiModalFieldKind,
+    pub binding: String,
+    pub binding_span: Span,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,6 +427,38 @@ pub enum Stmt {
     Every {
         duration: DurationLit,
         body: Block,
+        span: Span,
+    },
+    UiAction {
+        title: Expr,
+        body: Option<Expr>,
+        target: Expr,
+        buttons: Vec<UiActionButton>,
+        span: Span,
+    },
+    UiMessage {
+        title: Expr,
+        body: Option<Expr>,
+        target: Expr,
+        button1: Box<UiMessageButton>,
+        button2: Box<UiMessageButton>,
+        span: Span,
+    },
+    UiModal {
+        title: Expr,
+        target: Expr,
+        fields: Vec<UiModalField>,
+        on_submit: Block,
+        span: Span,
+    },
+    ScoreboardShow {
+        objective: Expr,
+        title: Option<Expr>,
+        slot: DisplaySlot,
+        span: Span,
+    },
+    ScoreboardHide {
+        slot: DisplaySlot,
         span: Span,
     },
     ExprStmt {

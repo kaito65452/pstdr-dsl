@@ -239,6 +239,17 @@ pub fn update_manifest(
     target_version: &str,
     script_api_version: &str,
 ) -> Result<(), String> {
+    update_manifest_with_ui(workspace_root, target_version, script_api_version, false)
+}
+
+/// Same as `update_manifest`, with optional `@minecraft/server-ui` (`"2.0.0"`) dependency injection
+/// when at least one `ui` form block is used in the workspace.
+pub fn update_manifest_with_ui(
+    workspace_root: &Path,
+    target_version: &str,
+    script_api_version: &str,
+    needs_server_ui: bool,
+) -> Result<(), String> {
     let bp_dir = workspace_root.join("BP");
     fs::create_dir_all(&bp_dir)
         .map_err(|e| format!("Failed to create directory '{}': {e}", bp_dir.display()))?;
@@ -375,6 +386,25 @@ pub fn update_manifest(
                     "version": script_api_version
                 }));
             }
+            if needs_server_ui {
+                let mut ui_updated = false;
+                for dep in arr.iter_mut() {
+                    if dep.get("module_name").and_then(|m| m.as_str())
+                        == Some("@minecraft/server-ui")
+                    {
+                        if let Some(obj) = dep.as_object_mut() {
+                            obj.insert("version".to_string(), Value::String("2.0.0".to_string()));
+                        }
+                        ui_updated = true;
+                    }
+                }
+                if !ui_updated {
+                    arr.push(json!({
+                        "module_name": "@minecraft/server-ui",
+                        "version": "2.0.0"
+                    }));
+                }
+            }
         }
     }
 
@@ -423,6 +453,17 @@ pub fn emit_registry_module(
     target_version: &str,
     mode: crate::codegen::EmitMode,
 ) -> String {
+    emit_registry_module_with_commands(entries, &[], target_version, mode)
+}
+
+/// Same as `emit_registry_module`, additionally invoking custom command registrations from
+/// `commands/<stem>.js` inside the same single `system.beforeEvents.startup` subscriber.
+pub fn emit_registry_module_with_commands(
+    entries: &[RegistryEntry],
+    command_modules: &[String],
+    target_version: &str,
+    mode: crate::codegen::EmitMode,
+) -> String {
     let use_v2_startup = uses_custom_components_v2(target_version);
     let init_ev_param = if mode == crate::codegen::EmitMode::TypeScript {
         "(initEv: any)"
@@ -449,11 +490,25 @@ pub fn emit_registry_module(
     });
     sorted.dedup_by(|a, b| a.kind == b.kind && a.slug == b.slug);
 
+    let mut sorted_cmds = command_modules.to_vec();
+    sorted_cmds.sort();
+    sorted_cmds.dedup();
+
     let mut out = String::from("// Auto-generated component registry by pstdr-c\n");
-    if use_v2_startup {
-        out.push_str("import { system } from \"@minecraft/server\";\n");
-    } else {
-        out.push_str("import { world } from \"@minecraft/server\";\n");
+    let need_system = use_v2_startup || !sorted_cmds.is_empty();
+    let need_world = !use_v2_startup && !sorted.is_empty();
+    let mut mc_imports = Vec::new();
+    if need_world {
+        mc_imports.push("world");
+    }
+    if need_system {
+        mc_imports.push("system");
+    }
+    if !mc_imports.is_empty() {
+        out.push_str(&format!(
+            "import {{ {} }} from \"@minecraft/server\";\n",
+            mc_imports.join(", ")
+        ));
     }
 
     for entry in &sorted {
@@ -472,36 +527,77 @@ pub fn emit_registry_module(
             }
         }
     }
+    for stem in &sorted_cmds {
+        let safe = stem.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+        out.push_str(&format!(
+            "import {{ registerCommands as cmd_{safe} }} from \"./commands/{stem}{ext}\";\n"
+        ));
+    }
 
     out.push('\n');
     if use_v2_startup {
         out.push_str(&format!(
             "system.beforeEvents.startup.subscribe({init_ev_param} => {{\n"
         ));
+        for entry in &sorted {
+            match entry.kind {
+                ComponentKind::Item => {
+                    out.push_str(&format!(
+                        "    initEv.itemComponentRegistry.registerCustomComponent(\"{}\", item_{});\n",
+                        entry.component_id, entry.slug
+                    ));
+                }
+                ComponentKind::Block => {
+                    out.push_str(&format!(
+                        "    initEv.blockComponentRegistry.registerCustomComponent(\"{}\", block_{});\n",
+                        entry.component_id, entry.slug
+                    ));
+                }
+            }
+        }
+        for stem in &sorted_cmds {
+            let safe = stem.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+            out.push_str(&format!("    cmd_{safe}(initEv);\n"));
+        }
+        out.push_str("});\n");
     } else {
-        out.push_str(&format!(
-            "world.beforeEvents.worldInitialize.subscribe({init_ev_param} => {{\n"
-        ));
-    }
-
-    for entry in &sorted {
-        match entry.kind {
-            ComponentKind::Item => {
-                out.push_str(&format!(
-                    "    initEv.itemComponentRegistry.registerCustomComponent(\"{}\", item_{});\n",
-                    entry.component_id, entry.slug
-                ));
+        if !sorted.is_empty() {
+            out.push_str(&format!(
+                "world.beforeEvents.worldInitialize.subscribe({init_ev_param} => {{\n"
+            ));
+            for entry in &sorted {
+                match entry.kind {
+                    ComponentKind::Item => {
+                        out.push_str(&format!(
+                            "    initEv.itemComponentRegistry.registerCustomComponent(\"{}\", item_{});\n",
+                            entry.component_id, entry.slug
+                        ));
+                    }
+                    ComponentKind::Block => {
+                        out.push_str(&format!(
+                            "    initEv.blockComponentRegistry.registerCustomComponent(\"{}\", block_{});\n",
+                            entry.component_id, entry.slug
+                        ));
+                    }
+                }
             }
-            ComponentKind::Block => {
-                out.push_str(&format!(
-                    "    initEv.blockComponentRegistry.registerCustomComponent(\"{}\", block_{});\n",
-                    entry.component_id, entry.slug
-                ));
+            out.push_str("});\n");
+        }
+        if !sorted_cmds.is_empty() {
+            if !sorted.is_empty() {
+                out.push('\n');
             }
+            out.push_str(&format!(
+                "system.beforeEvents.startup.subscribe({init_ev_param} => {{\n"
+            ));
+            for stem in &sorted_cmds {
+                let safe = stem.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+                out.push_str(&format!("    cmd_{safe}(initEv);\n"));
+            }
+            out.push_str("});\n");
         }
     }
 
-    out.push_str("});\n");
     out
 }
 

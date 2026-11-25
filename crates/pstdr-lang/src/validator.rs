@@ -45,6 +45,17 @@ enum EventCtx {
     Hurt,
     Die,
     Consume,
+    CustomCommand,
+    PlaceBlock,
+    DimensionChange,
+    HealthChange,
+    InteractEntity,
+    ProjectileHitBlock,
+    EntityHitBlock,
+    ItemRelease,
+    Explosion,
+    EntityLoad,
+    EntityRemove,
     Timer,
 }
 
@@ -68,6 +79,17 @@ impl EventCtx {
             Self::Hurt => "on hurt",
             Self::Die => "on die",
             Self::Consume => "on consume",
+            Self::CustomCommand => "on cmd",
+            Self::PlaceBlock => "on place",
+            Self::DimensionChange => "on dimension_change",
+            Self::HealthChange => "on health_change",
+            Self::InteractEntity => "on interact_entity",
+            Self::ProjectileHitBlock => "on projectile_hit_block",
+            Self::EntityHitBlock => "on entity_hit_block",
+            Self::ItemRelease => "on item_release",
+            Self::Explosion => "on explosion",
+            Self::EntityLoad => "on entity_load",
+            Self::EntityRemove => "on entity_remove",
             Self::Timer => "after/every",
         }
     }
@@ -75,7 +97,13 @@ impl EventCtx {
     fn is_cancellable(&self) -> bool {
         matches!(
             self,
-            Self::RightClick | Self::BreakBlock | Self::BlockInteract | Self::ChatSend
+            Self::RightClick
+                | Self::BreakBlock
+                | Self::PlaceBlock
+                | Self::BlockInteract
+                | Self::InteractEntity
+                | Self::Explosion
+                | Self::ChatSend
         )
     }
 }
@@ -626,6 +654,146 @@ impl<'a> Validator<'a> {
                 self.insert_binding("event_id", BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::EntityTrigger;
             }
+            EventKind::CustomCommand {
+                command_id,
+                description,
+                params,
+                actor_var,
+                ..
+            } => {
+                self.validate_expr(command_id);
+                self.validate_expr(description);
+                match eval_static_string(command_id, &self.const_strings) {
+                    Some(id_str) => {
+                        let valid = id_str.split_once(':').is_some_and(|(ns, local)| {
+                            !ns.trim().is_empty()
+                                && !local.trim().is_empty()
+                                && !ns.chars().any(char::is_whitespace)
+                                && !local.chars().any(char::is_whitespace)
+                        });
+                        if !valid {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                command_id.span(),
+                                format!(
+                                    "Invalid custom command ID '{id_str}': must include a namespace colon in '<namespace>:<name>' format."
+                                ),
+                                "Use a namespaced command name such as on cmd \"my_pack:guess\" description \"...\" { ... }.",
+                            ));
+                        }
+                    }
+                    None => {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            command_id.span(),
+                            "Custom command ID must be a static string literal or const in '<namespace>:<name>' format.",
+                            "Use a namespaced string literal or const, e.g. on cmd \"my_pack:guess\" description \"...\" { ... }.",
+                        ));
+                    }
+                }
+                let mut seen_params = HashSet::new();
+                let mut seen_optional = false;
+                for p in params {
+                    if !seen_params.insert(p.name.as_str()) {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &p.span,
+                            format!("Duplicate command parameter '{}'.", p.name),
+                            "Give each command parameter a unique name.",
+                        ));
+                    }
+                    if p.optional {
+                        seen_optional = true;
+                    } else if seen_optional {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &p.span,
+                            format!(
+                                "Required command parameter '{}' cannot appear after an optional ('?') parameter.",
+                                p.name
+                            ),
+                            "Place all required parameters before optional ('?') parameters.",
+                        ));
+                    }
+                    self.insert_binding(&p.name, BindingKind::ContextVar, p.span.line);
+                }
+                if let Some(a) = actor_var {
+                    self.insert_binding(a, BindingKind::ContextVar, ev.span.line);
+                }
+                self.event_ctx = EventCtx::CustomCommand;
+            }
+            EventKind::PlaceBlock {
+                block_var,
+                actor_var,
+            } => {
+                self.insert_binding(block_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::PlaceBlock;
+            }
+            EventKind::DimensionChange { player_var } => {
+                self.insert_binding(player_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("from_dimension", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("to_dimension", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("from_location", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("to_location", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::DimensionChange;
+            }
+            EventKind::HealthChange { entity_var } => {
+                self.insert_binding(entity_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("old_value", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("new_value", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::HealthChange;
+            }
+            EventKind::InteractEntity {
+                target_var,
+                actor_var,
+            } => {
+                self.insert_binding(target_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::InteractEntity;
+            }
+            EventKind::ProjectileHitBlock {
+                block_var,
+                shooter_var,
+            } => {
+                self.insert_binding(block_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("projectile", BindingKind::ContextVar, ev.span.line);
+                let shooter_name = shooter_var.as_deref().unwrap_or("shooter");
+                self.insert_binding(shooter_name, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::ProjectileHitBlock;
+            }
+            EventKind::EntityHitBlock {
+                block_var,
+                attacker_var,
+            } => {
+                self.insert_binding(block_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding(attacker_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::EntityHitBlock;
+            }
+            EventKind::ItemRelease { item, actor_var } => {
+                self.validate_expr(item);
+                if let Some(s) = eval_static_string(item, &self.const_strings) {
+                    self.static_event_item_ids
+                        .push((s, item.span().clone()));
+                }
+                self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("item", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("use_duration", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::ItemRelease;
+            }
+            EventKind::Explosion => {
+                self.insert_binding("source", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("impacted_blocks", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::Explosion;
+            }
+            EventKind::EntityLoad { entity_var } => {
+                self.insert_binding(entity_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::EntityLoad;
+            }
+            EventKind::EntityRemove { entity_var } => {
+                self.insert_binding(entity_var, BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::EntityRemove;
+            }
         }
 
         self.validate_block(&ev.body);
@@ -725,6 +893,20 @@ impl<'a> Validator<'a> {
                         _ => {}
                     },
                     AssignTarget::Index { object, index, .. } => {
+                        if let Expr::Index {
+                            object: inner_obj,
+                            index: obj_id_expr,
+                            ..
+                        } = object
+                        {
+                            if matches!(inner_obj.as_ref(), Expr::Ident(n, _) if n == "score")
+                                && self.lookup_binding("score").is_none()
+                            {
+                                self.validate_expr(obj_id_expr);
+                                self.validate_expr(index);
+                                return;
+                            }
+                        }
                         if let Expr::Ident(name, span) = object {
                             if self.lookup_binding(name).is_none() {
                                 self.emit_missing_scope_error(name, span);
@@ -795,7 +977,7 @@ impl<'a> Validator<'a> {
                             "'cancel event' is not valid inside '{}' block.",
                             self.event_ctx.label()
                         ),
-                        "Move 'cancel event' into an 'on right click', 'on break', 'on interact', or 'on chat' block.",
+                        "Move 'cancel event' into an 'on right click', 'on break', 'on place', 'on interact', 'on interact_entity', 'on explosion', or 'on chat' block.",
                     ));
                 }
             }
@@ -923,6 +1105,145 @@ impl<'a> Validator<'a> {
                 self.pop_scope();
                 self.event_ctx = prev;
             }
+            Stmt::UiAction {
+                title,
+                body,
+                target,
+                buttons,
+                ..
+            } => {
+                self.validate_expr(title);
+                if let Some(b) = body {
+                    self.validate_expr(b);
+                }
+                self.validate_expr(target);
+                let prev = self.event_ctx;
+                self.event_ctx = EventCtx::Func;
+                for btn in buttons {
+                    self.validate_expr(&btn.label);
+                    if let Some(icon_expr) = &btn.icon {
+                        self.validate_expr(icon_expr);
+                        if let Some(icon_path) = eval_static_string(icon_expr, &self.const_strings) {
+                            self.validate_ui_icon_path(&icon_path, icon_expr.span());
+                        }
+                    }
+                    self.push_scope();
+                    self.validate_block(&btn.body);
+                    self.pop_scope();
+                }
+                self.event_ctx = prev;
+            }
+            Stmt::UiMessage {
+                title,
+                body,
+                target,
+                button1,
+                button2,
+                ..
+            } => {
+                self.validate_expr(title);
+                if let Some(b) = body {
+                    self.validate_expr(b);
+                }
+                self.validate_expr(target);
+                self.validate_expr(&button1.label);
+                self.validate_expr(&button2.label);
+                let prev = self.event_ctx;
+                self.event_ctx = EventCtx::Func;
+                self.push_scope();
+                self.validate_block(&button1.body);
+                self.pop_scope();
+                self.push_scope();
+                self.validate_block(&button2.body);
+                self.pop_scope();
+                self.event_ctx = prev;
+            }
+            Stmt::UiModal {
+                title,
+                target,
+                fields,
+                on_submit,
+                ..
+            } => {
+                self.validate_expr(title);
+                self.validate_expr(target);
+                let mut seen_bindings = HashSet::new();
+                for f in fields {
+                    match &f.kind {
+                        UiModalFieldKind::TextField {
+                            label,
+                            placeholder,
+                            default,
+                        } => {
+                            self.validate_expr(label);
+                            if let Some(p) = placeholder {
+                                self.validate_expr(p);
+                            }
+                            if let Some(d) = default {
+                                self.validate_expr(d);
+                            }
+                        }
+                        UiModalFieldKind::Toggle { label, default } => {
+                            self.validate_expr(label);
+                            if let Some(d) = default {
+                                self.validate_expr(d);
+                            }
+                        }
+                        UiModalFieldKind::Slider {
+                            label,
+                            min,
+                            max,
+                            step,
+                            default,
+                        } => {
+                            self.validate_expr(label);
+                            self.validate_expr(min);
+                            self.validate_expr(max);
+                            self.validate_expr(step);
+                            if let Some(d) = default {
+                                self.validate_expr(d);
+                            }
+                        }
+                        UiModalFieldKind::Dropdown {
+                            label,
+                            options,
+                            default,
+                        } => {
+                            self.validate_expr(label);
+                            self.validate_expr(options);
+                            if let Some(d) = default {
+                                self.validate_expr(d);
+                            }
+                        }
+                    }
+                    if !seen_bindings.insert(f.binding.as_str()) {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &f.binding_span,
+                            format!("Duplicate modal field binding '{}'.", f.binding),
+                            "Give each modal field a unique 'as <ident>' binding name.",
+                        ));
+                    }
+                }
+                let prev = self.event_ctx;
+                self.event_ctx = EventCtx::Func;
+                self.push_scope();
+                for f in fields {
+                    self.insert_binding(&f.binding, BindingKind::ContextVar, f.binding_span.line);
+                }
+                self.validate_block(on_submit);
+                self.pop_scope();
+                self.event_ctx = prev;
+            }
+            Stmt::ScoreboardShow {
+                objective, title, ..
+            } => {
+                self.validate_expr(objective);
+                if let Some(t) = title {
+                    self.validate_expr(t);
+                }
+            }
+            Stmt::ScoreboardHide { .. } => {}
             Stmt::ExprStmt { expr, .. } => {
                 self.validate_expr(expr);
             }
@@ -959,6 +1280,20 @@ impl<'a> Validator<'a> {
                 }
             }
             Expr::Index { object, index, .. } => {
+                if let Expr::Index {
+                    object: inner_obj,
+                    index: obj_id_expr,
+                    ..
+                } = object.as_ref()
+                {
+                    if matches!(inner_obj.as_ref(), Expr::Ident(n, _) if n == "score")
+                        && self.lookup_binding("score").is_none()
+                    {
+                        self.validate_expr(obj_id_expr);
+                        self.validate_expr(index);
+                        return;
+                    }
+                }
                 self.validate_expr(object);
                 self.validate_expr(index);
             }
@@ -1105,6 +1440,54 @@ impl<'a> Validator<'a> {
                 self.validate_expr(then_expr);
                 self.validate_expr(else_expr);
             }
+        }
+    }
+
+    fn validate_ui_icon_path(&mut self, icon_path: &str, span: &Span) {
+        let trimmed = icon_path.trim();
+        if has_path_traversal(trimmed) {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E009,
+                span,
+                format!("Path traversal or invalid path is not allowed in UI icon '{icon_path}'."),
+                "Use a relative texture path without '..' or leading slashes, e.g. \"textures/items/iron_sword\".",
+            ));
+            return;
+        }
+        let norm = trimmed.replace('\\', "/");
+        let without_ext = norm
+            .strip_suffix(".png")
+            .or_else(|| norm.strip_suffix(".tga"))
+            .or_else(|| norm.strip_suffix(".jpg"))
+            .unwrap_or(&norm);
+
+        let is_vanilla = if let Some(item_name) = without_ext.strip_prefix("textures/items/") {
+            !item_name.contains('/') && self.ctx.spec.is_valid_vanilla_item_texture(item_name)
+        } else if let Some(block_name) = without_ext.strip_prefix("textures/blocks/") {
+            !block_name.contains('/') && self.ctx.spec.is_valid_vanilla_terrain_texture(block_name)
+        } else if let Some(ui_name) = without_ext.strip_prefix("textures/ui/") {
+            !ui_name.is_empty() && !ui_name.contains('/')
+        } else {
+            false
+        };
+
+        if is_vanilla {
+            return;
+        }
+
+        let exists_in_rp = self
+            .ctx
+            .workspace_root
+            .is_some_and(|root| crate::assets::rp_texture_file_exists(root, trimmed));
+        if !exists_in_rp {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E017,
+                span,
+                format!(
+                    "Custom UI icon texture '{icon_path}' not found in RP/ and is not a recognized vanilla texture path."
+                ),
+                "Add the image file under RP/ (e.g. RP/textures/...) or use a valid vanilla path such as \"textures/items/iron_sword\".",
+            ));
         }
     }
 
