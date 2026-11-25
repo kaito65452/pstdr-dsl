@@ -34,10 +34,20 @@ fn main() -> ExitCode {
     }
 }
 
+fn version_string() -> String {
+    let spec = BedrockSpec::bundled();
+    format!(
+        "pstdr-c {VERSION} (spec: Bedrock {} / @minecraft/server {})",
+        spec.bedrock_version, spec.script_api_version
+    )
+}
+
 fn print_help() {
     println!(
         "pstdr-c v{VERSION} — Compiler CLI for the .pstdr language (PackStudio)\n\n\
          USAGE:\n\
+         \x20 pstdr-c build --workspace [--format pretty|compact|json] [--spec <file>]\n\
+         \x20                                                Run check -> convert -> audit sequentially\n\
          \x20 pstdr-c fmt <path> [--check]                  Format .pstdr code in a file/directory\n\
          \x20 pstdr-c fmt --workspace [--check]             Format all .pstdr files in the workspace\n\
          \x20 pstdr-c convert --from <in.pstdr> to <out.js> [--ts] [--spec <file>]\n\
@@ -127,35 +137,75 @@ fn require_workspace(cwd: &Path, fmt: OutputFormat) -> Result<PathBuf, (u8, Stri
 }
 
 fn run_cli(args: &[String]) -> Result<u8, (u8, String)> {
+    let cwd = env::current_dir().map_err(|e| (3u8, format!("Failed to read current directory: {e}")))?;
+    run_cli_in(&cwd, args)
+}
+
+fn run_cli_in(cwd: &Path, args: &[String]) -> Result<u8, (u8, String)> {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
         print_help();
         return Ok(0);
     }
     if args[0] == "--version" || args[0] == "-V" {
-        println!("pstdr-c {VERSION}");
+        println!("{}", version_string());
         return Ok(0);
     }
 
-    let cwd = env::current_dir().map_err(|e| (3u8, format!("Failed to read current directory: {e}")))?;
     let sub = args[0].as_str();
     let rest = &args[1..];
 
     match sub {
-        "fmt" => cmd_fmt(&cwd, rest),
-        "convert" => cmd_convert(&cwd, rest),
-        "check" => cmd_check(&cwd, rest),
-        "watch" => cmd_watch(&cwd, rest),
-        "audit" => cmd_audit(&cwd, rest),
+        "build" => cmd_build(cwd, rest),
+        "fmt" => cmd_fmt(cwd, rest),
+        "convert" => cmd_convert(cwd, rest),
+        "check" => cmd_check(cwd, rest),
+        "watch" => cmd_watch(cwd, rest),
+        "audit" => cmd_audit(cwd, rest),
         "explain" => cmd_explain(rest),
-        "init" => cmd_init(&cwd, rest),
-        "new" => cmd_new(&cwd, rest),
-        "spec" => cmd_spec(&cwd, rest),
-        "doctor" => cmd_doctor(&cwd, rest),
+        "init" => cmd_init(cwd, rest),
+        "new" => cmd_new(cwd, rest),
+        "spec" => cmd_spec(cwd, rest),
+        "doctor" => cmd_doctor(cwd, rest),
         other => Err((
             2,
             format!("Unknown command '{other}'. Run 'pstdr-c --help' for the list of commands."),
         )),
     }
+}
+
+fn cmd_build(cwd: &Path, args: &[String]) -> Result<u8, (u8, String)> {
+    let fmt = parse_format_flag(args)?;
+    let custom_spec = parse_spec_flag(args)?;
+    let root = require_workspace(cwd, fmt)?;
+    let spec = BedrockSpec::load(custom_spec.as_deref(), Some(&root)).map_err(|e| (3u8, e))?;
+
+    // Step 1: check
+    let src = root.join("src");
+    let check_target = if src.is_dir() { src } else { root.clone() };
+    let check_diags = check_path(&check_target, Some(&root), &spec).map_err(|e| (3u8, e))?;
+    if has_errors(&check_diags) {
+        render_diagnostics(&check_diags, fmt);
+        return Ok(1);
+    }
+
+    // Step 2: convert
+    let convert_diags = convert_workspace(&root, &spec).map_err(|e| (3u8, e))?;
+    if has_errors(&convert_diags) {
+        render_diagnostics(&convert_diags, fmt);
+        return Ok(1);
+    }
+
+    // Step 3: audit
+    let audit_diags = audit_workspace(&root, &spec).map_err(|e| (3u8, e))?;
+    render_diagnostics(&audit_diags, fmt);
+    if has_errors(&audit_diags) {
+        return Ok(1);
+    }
+
+    if fmt != OutputFormat::Json {
+        println!("Build succeeded (check -> convert -> audit): 0 errors.");
+    }
+    Ok(0)
 }
 
 fn cmd_fmt(cwd: &Path, args: &[String]) -> Result<u8, (u8, String)> {
@@ -370,7 +420,7 @@ fn cmd_explain(args: &[String]) -> Result<u8, (u8, String)> {
             println!("{text}");
             Ok(0)
         }
-        None => Err((2, format!("Unknown diagnostic code '{code}' (available: E001–E017)."))),
+        None => Err((2, format!("Unknown diagnostic code '{code}' (available: E001–E018)."))),
     }
 }
 
@@ -481,6 +531,51 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(code, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_3a_end_cli_build_workspace_and_version_string() {
+        let ver = version_string();
+        assert!(
+            ver.contains(VERSION) && ver.contains("Bedrock 26.60") && ver.contains("@minecraft/server 2.11.0"),
+            "Unexpected version string: {ver}"
+        );
+
+        let dir = mk_tmp("build_ws");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "BuildPack", &spec).unwrap();
+
+        // 1. Clean workspace -> build --workspace succeeds (check -> convert -> audit)
+        let code = run_cli_in(&dir, &["build".into(), "--workspace".into()]).unwrap();
+        assert_eq!(code, 0, "pstdr-c build --workspace must succeed on valid workspace");
+        assert!(
+            dir.join("BP/scripts/generated/welcome.js").is_file(),
+            "build --workspace must emit generated JS"
+        );
+
+        // 2. Introduce a check error -> build --workspace stops immediately at check (exit 1)
+        fs::write(
+            dir.join("src/broken.pstdr"),
+            "on join of player {\n    const t = world.get_time()\n}\n",
+        )
+        .unwrap();
+        let code_fail = run_cli_in(
+            &dir,
+            &[
+                "build".into(),
+                "--workspace".into(),
+                "--format".into(),
+                "json".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_fail, 1, "build --workspace must fail with exit code 1 on check error");
+        assert!(
+            !dir.join("BP/scripts/generated/broken.js").exists(),
+            "build --workspace must stop before emitting broken.js"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1534,7 +1534,7 @@ on join of player {
         assert!(scythe_js.contains("onUse(ev) {"));
         assert!(scythe_js.contains("onHitEntity(ev) {"));
         assert!(scythe_js.contains("from \"../_shared/all_weapons.shared.js\""));
-        assert!(scythe_js.contains("// @pstdr-source: src/all_weapons.pstdr:"));
+        assert!(scythe_js.contains("// @pstdr src/all_weapons.pstdr:"));
 
         // Item B has onHitEntity
         assert!(blade_js.contains("export const component = {"));
@@ -2510,6 +2510,298 @@ on script_event "arena:start" {
         assert!(main_js.contains("system.afterEvents.scriptEventReceive.subscribe"));
         assert!(main_js.contains("world.getDimension(\"overworld\").runCommand(\"function waves/boss/start\");"));
         assert!(main_js.contains("world.getDimension(\"overworld\").runCommand(\"function existing/from_disk\");"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── WAVE 3A-END: DX Hardening, Multi-Error, Contextual Keywords & Hallucination Guards ───
+
+    #[test]
+    fn wave_3a_end_contextual_preposition_variables() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+const to = "overworld"
+const from = "nether"
+const of = "minecraft:stone"
+const with = "my_pack:blade"
+
+func transfer(from, to, by) {
+    mut at = 0
+    at += by
+    return "{from}->{to}:{at}"
+}
+
+on join of player {
+    mut at = 1
+    mut by = 2
+    const label = transfer(from, to, by)
+    send "Moved {label} at {at}" to player
+}
+
+on hit target with with by player {
+    mut by = 5
+    damage target by by
+}
+
+on break of of by player {
+    spawn particle "minecraft:totem_particle" at player
+}
+"#;
+        let res = compile_source(src, "ctx_kw.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "Contextual prepositions (to, by, of, at, with, from) must compile cleanly: {:?}",
+            res.diagnostics
+        );
+        let js = res.js.unwrap();
+        assert!(js.contains("const to = \"overworld\";"));
+        assert!(js.contains("let at = 0;"));
+        assert!(js.contains("target.applyDamage(by);"));
+        assert!(js.contains("player.sendMessage("));
+    }
+
+    #[test]
+    fn wave_3a_end_e016_help_and_multi_error_recovery() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+on unknown_ev of player {
+    send "hi" to player
+}
+
+on join of player {
+    if ( == ) {
+        send "broken" to player
+    }
+    const x = 1
+    x = 2
+    apply slownes 0 to player for 3s
+}
+"#;
+        let res = compile_source(src, "multi_dx.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            res.diagnostics.len() >= 4,
+            "Expected multiple diagnostics across top-level & statements, got: {:?}",
+            res.diagnostics
+        );
+        let e016 = res
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "PSTDR-E016" && d.message.contains("Unknown 'on' event"))
+            .expect("Expected PSTDR-E016 for unknown 'on' event");
+        for expected in [
+            "on chat",
+            "on leave",
+            "on script_event",
+            "on entity_trigger",
+            "pstdr-c --version",
+        ] {
+            assert!(
+                e016.solution.contains(expected),
+                "PSTDR-E016 solution must mention '{expected}', got: {}",
+                e016.solution
+            );
+        }
+        assert!(res.diagnostics.iter().any(|d| d.code == "PSTDR-E002"));
+        assert!(res.diagnostics.iter().any(|d| d.code == "PSTDR-E011"));
+        assert!(res.diagnostics.iter().any(|d| d.code == "PSTDR-E013"));
+    }
+
+    #[test]
+    fn wave_3a_end_helper_arity_and_world_system_hallucination_guards() {
+        let spec = BedrockSpec::bundled();
+        let bad = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on join of player {
+    player.title("Wave 1", "Get ready!")
+    player.subtitle()
+    player.actionbar("A", "B")
+    player.give_item()
+    player.give_item("minecraft:diamond", 1, "Gem", "extra")
+    const t = world.get_time()
+    const s = system.nonexistent_timer()
+}
+"#;
+        let res = compile_source(bad, "guards.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("title()") && d.solution.contains("subtitle")),
+            "2-arg title() must be rejected with subtitle suggestion: {:?}",
+            res.diagnostics
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.message.contains("subtitle()")),
+            "0-arg subtitle() must be rejected: {:?}",
+            res.diagnostics
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.message.contains("actionbar()")),
+            "2-arg actionbar() must be rejected: {:?}",
+            res.diagnostics
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .filter(|d| d.message.contains("give_item()"))
+                .count()
+                == 2,
+            "0-arg and 4-arg give_item() must be rejected: {:?}",
+            res.diagnostics
+        );
+        let world_err = res
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("world.get_time()"))
+            .expect("world.get_time() must be rejected");
+        for suggestion in [
+            "system.current_tick",
+            "world.get_absolute_time()",
+            "world.get_time_of_day()",
+        ] {
+            assert!(
+                world_err.solution.contains(suggestion),
+                "world.get_time() suggestion must include '{suggestion}', got: {}",
+                world_err.solution
+            );
+        }
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.message.contains("system.nonexistent_timer()")),
+            "Unknown system method must be rejected: {:?}",
+            res.diagnostics
+        );
+
+        // Valid APIs compile cleanly
+        let good = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on join of player {
+    player.title("Wave 1")
+    player.subtitle("Get ready!")
+    player.actionbar("§aGo!")
+    player.give_item("minecraft:diamond", 2, "§bGem")
+    const tick = system.current_tick
+    const abs_t = world.get_absolute_time()
+    const tod = world.get_time_of_day()
+    send "{tick} {abs_t} {tod}" to player
+}
+"#;
+        let res_ok = compile_source(good, "guards_ok.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            !has_errors(&res_ok.diagnostics),
+            "Valid helper & world/system APIs must pass: {:?}",
+            res_ok.diagnostics
+        );
+        let js = res_ok.js.unwrap();
+        assert!(js.contains("system.currentTick"));
+        assert!(js.contains("world.getAbsoluteTime()"));
+        assert!(js.contains("world.getTimeOfDay()"));
+    }
+
+    #[test]
+    fn wave_3a_end_snake_case_string_array_helpers_and_trace_comments() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+func normalize(raw) {
+    const cleaned = raw.trim().lower()
+    const loud = cleaned.upper()
+    const parts = loud.split(" ")
+    parts.push("END")
+    if cleaned.starts_with("!") and cleaned.ends_with("?") and parts.contains("END") {
+        return parts.join("-").replace("A", "B")
+    }
+    return raw.toLowerCase()
+}
+
+on join of player {
+    const out = normalize(" !hello? ")
+    send "{out}" to player
+}
+
+every 1s {
+    const n = world.players().length
+    if n > 0 {
+        world.send_message("tick")
+    }
+}
+"#;
+        let res = compile_source(src, "src/helpers.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "snake_case helpers must compile cleanly: {:?}",
+            res.diagnostics
+        );
+        let js = res.js.unwrap();
+        assert!(js.contains("raw.trim().toLowerCase()"), "js:\n{js}");
+        assert!(js.contains("cleaned.toUpperCase()"), "js:\n{js}");
+        assert!(js.contains("loud.split(\" \")"), "js:\n{js}");
+        assert!(js.contains("parts.push(\"END\")"), "js:\n{js}");
+        assert!(js.contains("cleaned.startsWith(\"!\")"), "js:\n{js}");
+        assert!(js.contains("cleaned.endsWith(\"?\")"), "js:\n{js}");
+        assert!(js.contains("parts.includes(\"END\")"), "js:\n{js}");
+        assert!(js.contains("parts.join(\"-\").replace(\"A\", \"B\")"), "js:\n{js}");
+        assert!(js.contains("raw.toLowerCase()"), "camelCase must still work:\n{js}");
+
+        // Source line trace comments above function, event handler, and top-level timer
+        assert!(
+            js.contains("// @pstdr src/helpers.pstdr:3"),
+            "Expected // @pstdr trace comment above func:\n{js}"
+        );
+        assert!(
+            js.contains("// @pstdr src/helpers.pstdr:14"),
+            "Expected // @pstdr trace comment above on join:\n{js}"
+        );
+        assert!(
+            js.contains("// @pstdr src/helpers.pstdr:19"),
+            "Expected // @pstdr trace comment above every:\n{js}"
+        );
+    }
+
+    #[test]
+    fn wave_3a_end_audit_workspace_stale_manifest_hint() {
+        let dir = temp_dir("stale_manifest");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "StalePack", &spec).unwrap();
+
+        // Update .pstdr to 2.11.0-beta without running convert_workspace -> BP/manifest.json stays 2.11.0
+        fs::write(
+            dir.join("src/welcome.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0-beta")
+
+on join of player {
+    send "Hello!" to player
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = audit_workspace(&dir, &spec).unwrap();
+        let stale = diags
+            .iter()
+            .find(|d| {
+                d.code == "PSTDR-E015"
+                    && d.solution.contains(
+                        "BP/manifest.json is out of sync with @addon(...) — run `pstdr-c convert --workspace` or `pstdr-c build --workspace` first.",
+                    )
+            });
+        assert!(
+            stale.is_some(),
+            "audit_workspace must detect stale BP/manifest.json with explicit hint: {diags:?}"
+        );
+
+        // After convert_workspace, manifest is synced -> audit_workspace passes
+        let conv_diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&conv_diags), "conv_diags: {conv_diags:?}");
+        let audit_after = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&audit_after),
+            "audit_workspace must pass after syncing manifest: {audit_after:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -816,6 +816,42 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
     }
 
     if let Some(api_ver) = manifest_server_api.as_deref() {
+        let mut declared_api: Option<String> = None;
+        if let Ok(pstdr_files) = collect_pstdr_files(&scan_target) {
+            for path in pstdr_files {
+                let Ok(source) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                let (prog_opt, _) = parse_source(&source, &rel);
+                if let Some(prog) = prog_opt {
+                    if let Some(h) = &prog.header {
+                        let is_cur_beta = declared_api
+                            .as_deref()
+                            .is_some_and(crate::spec::is_beta_api_version);
+                        if !is_cur_beta || crate::spec::is_beta_api_version(&h.api) {
+                            declared_api = Some(h.api.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(addon_api) = declared_api.as_deref() {
+            if api_ver != addon_api {
+                diags.push(Diagnostic::error(
+                    DiagnosticCode::E015,
+                    &Span::file_only("BP/manifest.json"),
+                    format!(
+                        "Audit Gate failed: BP/manifest.json declares '@minecraft/server' '{api_ver}', but .pstdr '@addon' declares '{addon_api}'."
+                    ),
+                    "BP/manifest.json is out of sync with @addon(...) — run `pstdr-c convert --workspace` or `pstdr-c build --workspace` first.",
+                ));
+            }
+        }
         if !crate::spec::is_beta_api_version(api_ver) {
             audit_beta_api_usage(root, &cfg, &scan_target, api_ver, spec, &mut diags)?;
         }

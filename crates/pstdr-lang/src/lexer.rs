@@ -51,11 +51,6 @@ pub const RESERVED_KEYWORDS: &[&str] = &[
     "mcfunction",
     "after",
     "every",
-    "with",
-    "by",
-    "to",
-    "of",
-    "at",
 ];
 
 pub fn is_forbidden_keyword(s: &str) -> bool {

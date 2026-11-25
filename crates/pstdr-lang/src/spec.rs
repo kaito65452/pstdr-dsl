@@ -34,6 +34,12 @@ pub struct BedrockSpecRaw {
     /// Class-qualified Beta-only APIs (`ClassName.memberName`).
     #[serde(default)]
     pub beta_apis: Vec<String>,
+    /// Valid `@minecraft/server` `World` methods (canonical camelCase).
+    #[serde(default)]
+    pub world_methods: Option<Vec<String>>,
+    /// Valid `@minecraft/server` `System` methods (canonical camelCase).
+    #[serde(default)]
+    pub system_methods: Option<Vec<String>>,
     pub effects: Vec<String>,
     pub sounds: Vec<String>,
     #[serde(default)]
@@ -66,6 +72,10 @@ pub struct BedrockSpec {
     pub read_only_events: HashSet<String>,
     /// Class-qualified Beta-only APIs (`ClassName.memberName`, exact case preserved).
     pub beta_apis: HashSet<String>,
+    /// Valid `@minecraft/server` `World` methods (canonical camelCase).
+    pub world_methods: HashSet<String>,
+    /// Valid `@minecraft/server` `System` methods (canonical camelCase).
+    pub system_methods: HashSet<String>,
     pub effects: HashSet<String>,
     pub sounds: HashSet<String>,
     pub item_textures: HashSet<String>,
@@ -88,6 +98,20 @@ impl BedrockSpec {
         let beta_events: HashSet<String> = raw
             .beta_events
             .unwrap_or_else(|| vec!["chatSend".to_string()])
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let world_methods: HashSet<String> = raw
+            .world_methods
+            .unwrap_or_else(default_world_methods)
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let system_methods: HashSet<String> = raw
+            .system_methods
+            .unwrap_or_else(default_system_methods)
             .into_iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -124,6 +148,8 @@ impl BedrockSpec {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            world_methods,
+            system_methods,
             effects: raw.effects.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             sounds: raw.sounds.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             item_textures: raw.item_textures.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
@@ -227,6 +253,92 @@ impl BedrockSpec {
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case(trimmed))
     }
+
+    pub fn is_valid_world_method(&self, method: &str) -> bool {
+        let canonical = map_world_method(method).unwrap_or(method);
+        self.world_methods.contains(canonical)
+    }
+
+    pub fn is_valid_system_method(&self, method: &str) -> bool {
+        let canonical = map_system_method(method).unwrap_or(method);
+        self.system_methods.contains(canonical)
+    }
+
+    pub fn suggest_world_method(&self, method: &str) -> String {
+        let lower = method.to_ascii_lowercase();
+        if lower.contains("time") || lower.contains("tick") || lower.contains("clock") {
+            return "Did you mean 'system.current_tick', 'world.get_absolute_time()', or 'world.get_time_of_day()'?".to_string();
+        }
+        if lower.contains("player") {
+            return "Did you mean 'world.players()' (getAllPlayers) or 'world.get_players(...)' (getPlayers)?".to_string();
+        }
+        if lower.contains("dim") {
+            return "Did you mean 'world.dimension(\"overworld\")' (getDimension)?".to_string();
+        }
+        if lower.contains("msg") || lower.contains("message") || lower.contains("say") || lower.contains("broadcast") {
+            return "Did you mean 'world.send_message(...)' (sendMessage)?".to_string();
+        }
+        if lower.contains("sound") || lower.contains("music") {
+            return "Did you mean 'world.play_sound(...)', 'world.play_music(...)', 'world.queue_music(...)', or 'world.stop_music()'?".to_string();
+        }
+        "Use a valid @minecraft/server World method such as world.players(), world.dimension(\"overworld\"), world.send_message(...), world.get_absolute_time(), or world.get_time_of_day().".to_string()
+    }
+
+    pub fn suggest_system_method(&self, method: &str) -> String {
+        let lower = method.to_ascii_lowercase();
+        if lower.contains("time") || lower.contains("tick") {
+            return "Did you mean 'system.current_tick' (property), 'system.wait_ticks(n)', 'world.get_absolute_time()', or 'world.get_time_of_day()'?".to_string();
+        }
+        "Use a valid @minecraft/server System method such as system.run(...), system.run_timeout(...), system.run_interval(...), system.clear_run(...), system.send_script_event(...), or system.wait_ticks(...).".to_string()
+    }
+}
+
+fn default_world_methods() -> Vec<String> {
+    [
+        "broadcastClientMessage",
+        "clearDynamicProperties",
+        "getAbsoluteTime",
+        "getAllPlayers",
+        "getDay",
+        "getDefaultSpawnLocation",
+        "getDimension",
+        "getDynamicProperty",
+        "getDynamicPropertyIds",
+        "getDynamicPropertyTotalByteCount",
+        "getEntity",
+        "getLootTableManager",
+        "getMoonPhase",
+        "getPlayers",
+        "getTimeOfDay",
+        "playMusic",
+        "playSound",
+        "queueMusic",
+        "sendMessage",
+        "setAbsoluteTime",
+        "setDefaultSpawnLocation",
+        "setDynamicProperty",
+        "setTimeOfDay",
+        "stopMusic",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+fn default_system_methods() -> Vec<String> {
+    [
+        "clearJob",
+        "clearRun",
+        "run",
+        "runInterval",
+        "runJob",
+        "runTimeout",
+        "sendScriptEvent",
+        "waitTicks",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 /// Returns true when a `@minecraft/server` API version string targets a Beta release (e.g. `"2.11.0-beta"`).
@@ -302,6 +414,7 @@ pub fn map_property(field: &str) -> Option<&'static str> {
         "is_climbing" => Some("isClimbing"),
         "is_falling" => Some("isFalling"),
         "is_valid" => Some("isValid"),
+        "current_tick" => Some("currentTick"),
         "selected_slot" => Some("selectedSlotIndex"),
         "head_location" => Some("getHeadLocation()"),
         "view_direction" => Some("getViewDirection()"),
@@ -323,7 +436,24 @@ pub fn map_item_property(field: &str) -> Option<&'static str> {
     }
 }
 
-/// Mapping of snake_case methods on entities/players -> @minecraft/server.
+/// Ergonomic snake_case string and array helpers -> standard JS methods.
+pub fn map_string_array_method(method: &str) -> Option<&'static str> {
+    match method {
+        "lower" => Some("toLowerCase"),
+        "upper" => Some("toUpperCase"),
+        "trim" => Some("trim"),
+        "starts_with" => Some("startsWith"),
+        "ends_with" => Some("endsWith"),
+        "contains" => Some("includes"),
+        "replace" => Some("replace"),
+        "split" => Some("split"),
+        "join" => Some("join"),
+        "push" => Some("push"),
+        _ => None,
+    }
+}
+
+/// Mapping of snake_case methods on entities/players/strings/arrays -> @minecraft/server / JS.
 pub fn map_method(method: &str) -> Option<&'static str> {
     match method {
         "actionbar" => Some("onScreenDisplay.setActionBar"),
@@ -350,17 +480,48 @@ pub fn map_method(method: &str) -> Option<&'static str> {
         "get_players" => Some("getPlayers"),
         "teleport" => Some("teleport"),
         "kill" => Some("kill"),
-        _ => None,
+        other => map_string_array_method(other),
     }
 }
 
 /// Method mapping on the global `world` object.
 pub fn map_world_method(method: &str) -> Option<&'static str> {
     match method {
-        "players" => Some("getAllPlayers"),
+        "players" | "get_all_players" => Some("getAllPlayers"),
+        "get_players" => Some("getPlayers"),
         "send_message" => Some("sendMessage"),
-        "dimension" => Some("getDimension"),
+        "dimension" | "get_dimension" => Some("getDimension"),
         "play_sound" => Some("playSound"),
+        "play_music" => Some("playMusic"),
+        "queue_music" => Some("queueMusic"),
+        "stop_music" => Some("stopMusic"),
+        "get_entity" => Some("getEntity"),
+        "get_day" => Some("getDay"),
+        "get_moon_phase" => Some("getMoonPhase"),
+        "get_time_of_day" => Some("getTimeOfDay"),
+        "set_time_of_day" => Some("setTimeOfDay"),
+        "get_absolute_time" => Some("getAbsoluteTime"),
+        "set_absolute_time" => Some("setAbsoluteTime"),
+        "get_default_spawn_location" => Some("getDefaultSpawnLocation"),
+        "set_default_spawn_location" => Some("setDefaultSpawnLocation"),
+        "get_dynamic_property" => Some("getDynamicProperty"),
+        "set_dynamic_property" => Some("setDynamicProperty"),
+        "get_dynamic_property_ids" => Some("getDynamicPropertyIds"),
+        "clear_dynamic_properties" => Some("clearDynamicProperties"),
+        _ => None,
+    }
+}
+
+/// Method mapping on the global `system` object.
+pub fn map_system_method(method: &str) -> Option<&'static str> {
+    match method {
+        "run_timeout" => Some("runTimeout"),
+        "run_interval" => Some("runInterval"),
+        "clear_run" => Some("clearRun"),
+        "run_job" => Some("runJob"),
+        "clear_job" => Some("clearJob"),
+        "send_script_event" => Some("sendScriptEvent"),
+        "wait_ticks" => Some("waitTicks"),
         _ => None,
     }
 }

@@ -965,9 +965,98 @@ impl<'a> Validator<'a> {
             Expr::Member { object, .. } => {
                 self.validate_expr(object);
             }
-            Expr::Call { callee, args, .. } => {
-                // Check vanilla sound ID in play_sound("...") / playSound("...")
-                if let Expr::Member { field, .. } = callee.as_ref() {
+            Expr::Call { callee, args, span } => {
+                if let Expr::Member { object, field, .. } = callee.as_ref() {
+                    // Validate synthesized helper arity
+                    match field.as_str() {
+                        "title" if args.len() != 1 => {
+                            let solution = if args.len() == 2 {
+                                "In Bedrock Script API, 'title(msg)' accepts 1 argument. Call '.subtitle(...)' separately to display a subtitle."
+                            } else {
+                                "Pass a single title message, e.g. player.title(\"Welcome!\"). Use player.subtitle(\"...\") separately for a subtitle."
+                            };
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Method 'title()' expects 1 argument (found {}).",
+                                    args.len()
+                                ),
+                                solution,
+                            ));
+                        }
+                        "subtitle" if args.len() != 1 => {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Method 'subtitle()' expects 1 argument (found {}).",
+                                    args.len()
+                                ),
+                                "Pass a single subtitle message, e.g. player.subtitle(\"Wave 1\").",
+                            ));
+                        }
+                        "actionbar" if args.len() != 1 => {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Method 'actionbar()' expects 1 argument (found {}).",
+                                    args.len()
+                                ),
+                                "Pass a single actionbar message, e.g. player.actionbar(\"§aReady!\").",
+                            ));
+                        }
+                        "give_item" if args.is_empty() || args.len() > 3 => {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Method 'give_item()' expects 1 to 3 arguments: (item_id, amount?, name_tag?) (found {}).",
+                                    args.len()
+                                ),
+                                "Example: player.give_item(\"minecraft:diamond\", 1) or player.give_item(\"minecraft:diamond\", 1, \"§bGem\").",
+                            ));
+                        }
+                        _ => {}
+                    }
+
+                    // Validate world.* and system.* method calls against BedrockSpec
+                    if let Expr::Ident(obj_name, _) = object.as_ref() {
+                        if obj_name == "world"
+                            && self
+                                .lookup_binding("world")
+                                .is_some_and(|b| b.kind == BindingKind::Builtin)
+                            && !self.ctx.spec.is_valid_world_method(field)
+                        {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Unknown method 'world.{field}()' in @minecraft/server ({}).",
+                                    self.ctx.spec.script_api_version
+                                ),
+                                self.ctx.spec.suggest_world_method(field),
+                            ));
+                        } else if obj_name == "system"
+                            && self
+                                .lookup_binding("system")
+                                .is_some_and(|b| b.kind == BindingKind::Builtin)
+                            && !self.ctx.spec.is_valid_system_method(field)
+                        {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                span,
+                                format!(
+                                    "Unknown method 'system.{field}()' in @minecraft/server ({}).",
+                                    self.ctx.spec.script_api_version
+                                ),
+                                self.ctx.spec.suggest_system_method(field),
+                            ));
+                        }
+                    }
+
+                    // Check vanilla sound ID in play_sound("...") / playSound("...")
                     if (field == "play_sound" || field == "playSound") && self.ctx.strict_vanilla_ids
                     {
                         if let Some(first_arg) = args.first() {

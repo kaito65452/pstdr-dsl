@@ -24,6 +24,7 @@ const MEMBER_PROPERTIES: &[(&str, &str)] = &[
     ("is_climbing", "isClimbing"),
     ("is_falling", "isFalling"),
     ("is_valid", "isValid"),
+    ("current_tick", "system.currentTick"),
 ];
 
 const MEMBER_METHODS: &[(&str, &str, &str)] = &[
@@ -56,6 +57,18 @@ const MEMBER_METHODS: &[(&str, &str, &str)] = &[
     ("teleport", "teleport(${1:loc})", "teleport(loc)"),
     ("kill", "kill()", "kill()"),
     ("players", "players()", "world.getAllPlayers()"),
+    ("get_absolute_time", "get_absolute_time()", "world.getAbsoluteTime()"),
+    ("get_time_of_day", "get_time_of_day()", "world.getTimeOfDay()"),
+    ("lower", "lower()", "toLowerCase()"),
+    ("upper", "upper()", "toUpperCase()"),
+    ("trim", "trim()", "trim()"),
+    ("starts_with", "starts_with(${1:\"prefix\"})", "startsWith(prefix)"),
+    ("ends_with", "ends_with(${1:\"suffix\"})", "endsWith(suffix)"),
+    ("contains", "contains(${1:item})", "includes(item)"),
+    ("replace", "replace(${1:\"from\"}, ${2:\"to\"})", "replace(from, to)"),
+    ("split", "split(${1:\" \"})", "split(separator)"),
+    ("join", "join(${1:\", \"})", "join(separator)"),
+    ("push", "push(${1:item})", "push(item)"),
 ];
 
 const PREDICATES: &[(&str, &str)] = &[

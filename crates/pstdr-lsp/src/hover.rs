@@ -1,7 +1,10 @@
 use crate::diagnostics::utf16_col_to_byte_offset;
 use crate::state::ServerState;
 use lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, MarkupKind};
-use pstdr_lang::spec::{map_item_property, map_method, map_property, map_world_method};
+use pstdr_lang::spec::{
+    map_item_property, map_method, map_property, map_string_array_method, map_system_method,
+    map_world_method,
+};
 
 pub fn hover(state: &ServerState, params: &HoverParams) -> Option<Hover> {
     let uri = &params.text_document_position_params.text_document.uri;
@@ -23,15 +26,21 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
     // 2. Member property or method after `.` / `?.`
     let before = line_text[..start_byte].trim_end();
     if before.ends_with('.') {
-        let is_world = before
+        let receiver = before
             .trim_end_matches('.')
             .trim_end_matches('?')
-            .trim_end()
-            .ends_with("world");
-        if is_world {
+            .trim_end();
+        if receiver.ends_with("world") {
             if let Some(mapped) = map_world_method(word) {
                 return Some(mk_hover(format!(
                     "**World Helper**\n\n`world.{word}(...)` → `world.{mapped}(...)`"
+                )));
+            }
+        }
+        if receiver.ends_with("system") {
+            if let Some(mapped) = map_system_method(word) {
+                return Some(mk_hover(format!(
+                    "**System Helper**\n\n`system.{word}(...)` → `system.{mapped}(...)`"
                 )));
             }
         }
@@ -62,6 +71,11 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
                 ));
             }
             _ => {}
+        }
+        if let Some(mapped) = map_string_array_method(word) {
+            return Some(mk_hover(format!(
+                "**String / Array Helper**\n\n`.{word}(...)` → `.{mapped}(...)`"
+            )));
         }
         if let Some(mapped) = map_method(word) {
             return Some(mk_hover(format!(

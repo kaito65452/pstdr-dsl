@@ -231,7 +231,23 @@ mod tests {
         );
 
         let dot = completion::complete_at("player.", 0, 7, &spec);
-        for helper in ["give_item", "spawn_item", "get_score", "set_score", "add_score"] {
+        for helper in [
+            "give_item",
+            "spawn_item",
+            "get_score",
+            "set_score",
+            "add_score",
+            "lower",
+            "upper",
+            "trim",
+            "starts_with",
+            "ends_with",
+            "contains",
+            "replace",
+            "split",
+            "join",
+            "push",
+        ] {
             assert!(
                 dot.iter().any(|i| i.label == helper),
                 "Missing member completion for '{helper}'"
@@ -297,6 +313,9 @@ mod tests {
             ("mcfunction \"folder/fn\" {}", 2, "BP/functions"),
             ("on script_event \"ns:id\" {}", 5, "scriptEventReceive"),
             ("on entity_trigger \"ev\" {}", 5, "dataDrivenEntityTrigger"),
+            ("msg.lower()", 5, "toLowerCase"),
+            ("msg.starts_with(\"!\")", 6, "startsWith"),
+            ("arr.contains(x)", 6, "includes"),
         ] {
             let h = hover::hover_at(line, 0, col).unwrap_or_else(|| panic!("missing hover for {line}"));
             if let HoverContents::Markup(MarkupContent { value, .. }) = h.contents {

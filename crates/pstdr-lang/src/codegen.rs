@@ -1,5 +1,7 @@
 use crate::ast::*;
-use crate::spec::{map_item_property, map_method, map_property, map_world_method};
+use crate::spec::{
+    map_item_property, map_method, map_property, map_system_method, map_world_method,
+};
 use crate::validator::eval_static_string;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -96,7 +98,7 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         shared: SharedContext::default(),
         used_shared_imports: BTreeSet::new(),
         local_scopes: Vec::new(),
-        emit_source_lines: false,
+        emit_source_lines: true,
         needs_world: false,
         needs_system: false,
         needs_equipment_slot: false,
@@ -943,14 +945,6 @@ pub fn emit_world_module(
         if idx > 0 {
             cg.body.push('\n');
         }
-        let line = match item {
-            TopLevelItem::EventHandler(ev) => ev.span.line,
-            TopLevelItem::AfterTimer { span, .. } | TopLevelItem::EveryTimer { span, .. } => {
-                span.line
-            }
-            _ => 0,
-        };
-        cg.emit_source_comment(line);
         cg.emit_top_level(item);
     }
 
@@ -1005,7 +999,7 @@ impl<'a> Codegen<'a> {
 
     fn emit_source_comment(&mut self, line: usize) {
         if self.emit_source_lines && self.opts.source_map_comments && line > 0 {
-            self.line(&format!("// @pstdr-source: {}:{line}", self.opts.source_file));
+            self.line(&format!("// @pstdr {}:{line}", self.opts.source_file));
         }
     }
     fn is_bound_block(&self, block_id: &Expr) -> bool {
@@ -1075,6 +1069,7 @@ impl<'a> Codegen<'a> {
                 self.line(&format!("let {} = {val};", d.name));
             }
             TopLevelItem::StateDecl(s) => {
+                self.emit_source_comment(s.span.line);
                 let default_js = self.emit_expr(&s.default_value);
                 let key = format!("pstdr:{}", s.name);
                 if self.mode == EmitMode::TypeScript {
@@ -1098,6 +1093,7 @@ impl<'a> Codegen<'a> {
                 }
             }
             TopLevelItem::FuncDecl(f) => {
+                self.emit_source_comment(f.span.line);
                 let params: Vec<String> = f
                     .params
                     .iter()
@@ -1158,9 +1154,15 @@ impl<'a> Codegen<'a> {
                 // Emitted directly to BP/functions/<path>.mcfunction; no JS output.
             }
             TopLevelItem::EventHandler(ev) => {
+                self.emit_source_comment(ev.span.line);
                 self.emit_event_handler(ev);
             }
-            TopLevelItem::AfterTimer { duration, body, .. } => {
+            TopLevelItem::AfterTimer {
+                duration,
+                body,
+                span,
+            } => {
+                self.emit_source_comment(span.line);
                 self.needs_system = true;
                 let ticks = duration.ticks_rounded();
                 self.line("system.runTimeout(() => {");
@@ -1169,7 +1171,12 @@ impl<'a> Codegen<'a> {
                 self.indent -= 1;
                 self.line(&format!("}}, {ticks});"));
             }
-            TopLevelItem::EveryTimer { duration, body, .. } => {
+            TopLevelItem::EveryTimer {
+                duration,
+                body,
+                span,
+            } => {
+                self.emit_source_comment(span.line);
                 self.needs_system = true;
                 let ticks = duration.ticks_rounded();
                 self.line("system.runInterval(() => {");
@@ -2026,6 +2033,8 @@ impl<'a> Codegen<'a> {
                     let mapped_method = if matches!(object.as_ref(), Expr::Ident(w, _) if w == "world")
                     {
                         map_world_method(field).or_else(|| map_method(field))
+                    } else if matches!(object.as_ref(), Expr::Ident(s, _) if s == "system") {
+                        map_system_method(field).or_else(|| map_method(field))
                     } else {
                         map_method(field)
                     }

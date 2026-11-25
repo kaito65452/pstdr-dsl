@@ -266,9 +266,10 @@ pub fn explain_code(raw_code: &str) -> Option<&'static str> {
                      or [1, 21, 50] (for 1.21.50 / legacy).",
         ),
         "E016" => Some(
-            "PSTDR-E016: General syntax error.\n\
-             Cause: Unexpected token, unclosed quote, or incomplete .pstdr statement structure.\n\
-             Right : Check the highlighted line and fix it to match .pstdr grammar.",
+            "PSTDR-E016: General syntax or API usage error.\n\
+             Cause: Unexpected token, unclosed quote, invalid helper arity, unknown world.*/system.* method, or unsupported 'on' event type.\n\
+             Supported 'on' events: on right click, on hit, on break, on interact, on tick, on projectile hit, on spawn, on join, on leave, on chat, on hurt, on die, on consume, on script_event, on entity_trigger.\n\
+             Right : Check the highlighted line and fix it to match .pstdr grammar. If using a newer event syntax, check 'pstdr-c --version'.",
         ),
         "E017" => Some(
             "PSTDR-E017: Invalid texture reference, missing image file, or missing .mcfunction asset.\n\

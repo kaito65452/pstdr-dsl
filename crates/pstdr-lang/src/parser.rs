@@ -230,15 +230,29 @@ impl<'a> Parser<'a> {
         if self.pos == start_pos && !self.is_eof() {
             self.advance();
         }
+        let mut brace_depth = 0usize;
         while !self.is_eof() {
-            if matches!(self.peek().kind, TokenKind::RBrace) {
-                break;
+            if matches!(self.peek().kind, TokenKind::LBrace) {
+                brace_depth += 1;
+                self.advance();
+                continue;
             }
-            if matches!(self.peek().kind, TokenKind::Semi) {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                if brace_depth == 0 {
+                    break;
+                }
+                self.advance();
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            if brace_depth == 0 && matches!(self.peek().kind, TokenKind::Semi) {
                 self.advance();
                 break;
             }
-            if self.peek().span.line > self.prev_line() {
+            if brace_depth == 0 && self.peek().span.line > self.prev_line() {
                 break;
             }
             self.advance();
@@ -772,7 +786,7 @@ impl<'a> Parser<'a> {
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on consume ... by player', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on consume ... by player', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'. If using a newer event syntax, check your compiler version with 'pstdr-c --version'.",
                 )));
             }
         };
