@@ -1,0 +1,169 @@
+name: Release PSTDR-DSL (Draft)
+
+# Trigger ONLY on explicit SemVer Git tags (v*.*.*).
+# Daily commits to `main` NEVER trigger a release or PackStudio update.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  spec-bundle:
+    name: Build spec-bundle.tar.gz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package spec-bundle.tar.gz (relative paths, no symlinks)
+        run: |
+          set -euo pipefail
+          rm -rf stage dist
+          mkdir -p stage/data/spec stage/docs dist
+
+          # Copy only regular files (no symlinks) with clean relative paths
+          cp data/spec/*.json stage/data/spec/
+          cp llms.txt stage/llms.txt
+          cp docs/LANGUAGE_REFERENCE.md stage/docs/LANGUAGE_REFERENCE.md
+
+          # Verify zero symlinks exist inside the staging tree
+          if find stage -type l | grep -q .; then
+            echo "ERROR: Symlinks are forbidden inside spec-bundle.tar.gz"
+            exit 1
+          fi
+
+          tar -C stage --sort=name --owner=0 --group=0 --numeric-owner \
+            -czf dist/spec-bundle.tar.gz \
+            data/spec \
+            llms.txt \
+            docs/LANGUAGE_REFERENCE.md
+
+          tar -tzf dist/spec-bundle.tar.gz
+
+      - name: Upload spec-bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-bundle
+          path: dist/spec-bundle.tar.gz
+
+  build-runtime:
+    name: Build Runtime (${{ matrix.artifact_name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact_name: pstdr-x86_64-linux.tar.gz
+            cross_pkg: ""
+            linker_env: ""
+          - target: aarch64-unknown-linux-gnu
+            artifact_name: pstdr-aarch64-linux.tar.gz
+            cross_pkg: gcc-aarch64-linux-gnu
+            linker_env: aarch64-linux-gnu-gcc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation linker (aarch64)
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cross_pkg }}
+
+      - name: Build release pstdr-c and pstdr-lsp
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker_env }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin pstdr-c --bin pstdr-lsp
+
+      - name: Package runtime tarball
+        run: |
+          set -euo pipefail
+          rm -rf stage dist
+          mkdir -p stage dist
+          cp "target/${{ matrix.target }}/release/pstdr-c" stage/pstdr-c
+          cp "target/${{ matrix.target }}/release/pstdr-lsp" stage/pstdr-lsp
+          chmod +x stage/pstdr-c stage/pstdr-lsp
+
+          tar -C stage --sort=name --owner=0 --group=0 --numeric-owner \
+            -czf "dist/${{ matrix.artifact_name }}" \
+            pstdr-c \
+            pstdr-lsp
+
+      - name: Upload runtime tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.target }}
+          path: dist/${{ matrix.artifact_name }}
+
+      - name: Upload host pstdr-c binary for manifest generation
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-pstdr-c
+          path: target/x86_64-unknown-linux-gnu/release/pstdr-c
+
+  draft-release:
+    name: Generate Manifest & Create Draft Release
+    needs: [spec-bundle, build-runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      - name: Assemble dist/ and generate unsigned pstdr-release.json
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp downloaded/spec-bundle/spec-bundle.tar.gz dist/spec-bundle.tar.gz
+          cp downloaded/runtime-x86_64-unknown-linux-gnu/pstdr-x86_64-linux.tar.gz dist/pstdr-x86_64-linux.tar.gz
+          cp downloaded/runtime-aarch64-unknown-linux-gnu/pstdr-aarch64-linux.tar.gz dist/pstdr-aarch64-linux.tar.gz
+          cp downloaded/host-pstdr-c/pstdr-c ./pstdr-c
+          chmod +x ./pstdr-c
+
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          SPEC_VERSION=$(python3 -c 'import json; d=json.load(open("data/spec/bedrock_api_latest.json")); print(f"Bedrock {d[\"bedrock_version\"]} / {d[\"script_api_version\"]}")')
+          KEY_ID="${PSTDR_SIGNING_KEY_ID:-saryu-pstdr-root-2026}"
+
+          ./pstdr-c release manifest \
+            --version "${VERSION}" \
+            --spec-version "${SPEC_VERSION}" \
+            --key-id "${KEY_ID}" \
+            --artifacts \
+              "spec_bundle=dist/spec-bundle.tar.gz:${BASE_URL}/spec-bundle.tar.gz" \
+              "linux_x86_64=dist/pstdr-x86_64-linux.tar.gz:${BASE_URL}/pstdr-x86_64-linux.tar.gz" \
+              "linux_aarch64=dist/pstdr-aarch64-linux.tar.gz:${BASE_URL}/pstdr-aarch64-linux.tar.gz" \
+            --changelog "Release ${TAG} (${SPEC_VERSION})" \
+            --out dist/pstdr-release.json
+
+          cat dist/pstdr-release.json
+
+      - name: Create GitHub Draft Release (unsigned — awaits offline .sig upload)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PSTDR-DSL ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/spec-bundle.tar.gz
+            dist/pstdr-x86_64-linux.tar.gz
+            dist/pstdr-aarch64-linux.tar.gz
+            dist/pstdr-release.json

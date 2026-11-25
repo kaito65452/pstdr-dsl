@@ -76,7 +76,7 @@ cd editors/vscode
 npm install
 npm run compile
 npm run package
-code --install-extension pstdr-vscode-0.1.0-alpha.1.vsix
+code --install-extension pstdr-vscode-0.1.0-pre-beta.1.vsix
 ```
 
 ### Configuration

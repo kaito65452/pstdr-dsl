@@ -1,3 +1,5 @@
+mod release;
+
 use pstdr_lang::{
     audit_workspace, check_path, convert_single_file, convert_workspace, diagnostics_to_json,
     doctor_report, explain_code, find_workspace_root, fmt_path, format_diagnostics_compact,
@@ -12,7 +14,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-const VERSION: &str = "0.1.0-alpha.1";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -59,7 +61,8 @@ fn print_help() {
          \x20 pstdr-c init [pack_name]                      Initialize a new PackStudio project\n\
          \x20 pstdr-c new <script_name>                     Create a template file src/<name>.pstdr\n\
          \x20 pstdr-c spec [info|dump] [--spec <file>]      Show / dump the active Bedrock specification\n\
-         \x20 pstdr-c doctor [--spec <file>]                Environment & workspace diagnostics\n\n\
+         \x20 pstdr-c doctor [--spec <file>]                Environment & workspace diagnostics\n\
+         \x20 pstdr-c release <keygen|manifest|sign|verify> Offline Ed25519 release signing tools\n\n\
          EXIT CODES:\n\
          \x20 0 = Success | 1 = Compile/audit error | 2 = Invalid arguments/workspace | 3 = I/O error"
     );
@@ -166,6 +169,7 @@ fn run_cli_in(cwd: &Path, args: &[String]) -> Result<u8, (u8, String)> {
         "new" => cmd_new(cwd, rest),
         "spec" => cmd_spec(cwd, rest),
         "doctor" => cmd_doctor(cwd, rest),
+        "release" => release::cmd_release(cwd, rest),
         other => Err((
             2,
             format!("Unknown command '{other}'. Run 'pstdr-c --help' for the list of commands."),
@@ -579,6 +583,201 @@ mod tests {
             !dir.join("BP/scripts/generated/broken.js").exists(),
             "build --workspace must stop before emitting broken.js"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_keygen_manifest_sign_verify_and_tamper_detection() {
+        let dir = mk_tmp("release_ed25519");
+        let keys_dir = dir.join("keys");
+        let other_keys_dir = dir.join("other_keys");
+        let dist_dir = dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        // 1. Keygen (primary + secondary wrong keypair)
+        let code_kg = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "keygen".into(),
+                "--out".into(),
+                keys_dir.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_kg, 0);
+        let priv_key = keys_dir.join("pstdr-signing.key");
+        let pub_key = keys_dir.join("pstdr-signing.pub");
+        assert!(priv_key.is_file());
+        assert!(pub_key.is_file());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&priv_key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "Private key must have 0600 permissions");
+        }
+
+        let code_kg2 = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "keygen".into(),
+                "--out".into(),
+                other_keys_dir.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_kg2, 0);
+
+        // 2. Create sample artifact and generate manifest
+        let bundle_path = dist_dir.join("spec-bundle.tar.gz");
+        let payload = b"pstdr-spec-bundle-test-payload";
+        fs::write(&bundle_path, payload).unwrap();
+
+        let manifest_path = dist_dir.join("pstdr-release.json");
+        let sig_path = dist_dir.join("pstdr-release.json.sig");
+
+        let code_mf = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "manifest".into(),
+                "--version".into(),
+                "0.2.0".into(),
+                "--spec-version".into(),
+                "Bedrock 26.60 / 2.11.0".into(),
+                "--key-id".into(),
+                "saryu-pstdr-root-2026".into(),
+                "--artifacts".into(),
+                format!(
+                    "spec_bundle={}:https://github.com/kaito65452/pstdr-dsl/releases/download/v0.2.0/spec-bundle.tar.gz",
+                    bundle_path.display()
+                ),
+                "--changelog".into(),
+                "Initial signed release".into(),
+                "--out".into(),
+                manifest_path.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_mf, 0);
+
+        let manifest_val: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest_val["schema_version"], 1);
+        assert_eq!(manifest_val["version"], "0.2.0");
+        assert_eq!(manifest_val["spec_version"], "Bedrock 26.60 / 2.11.0");
+        assert_eq!(manifest_val["key_id"], "saryu-pstdr-root-2026");
+        assert_eq!(manifest_val["changelog"][0], "Initial signed release");
+        assert_eq!(
+            manifest_val["artifacts"]["spec_bundle"]["size"],
+            payload.len() as u64
+        );
+        assert_eq!(
+            manifest_val["artifacts"]["spec_bundle"]["sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+
+        // 3. Sign manifest
+        let code_sign = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "sign".into(),
+                "--manifest".into(),
+                manifest_path.display().to_string(),
+                "--key".into(),
+                priv_key.display().to_string(),
+                "--out".into(),
+                sig_path.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_sign, 0);
+        let sig_hex = fs::read_to_string(&sig_path).unwrap();
+        assert_eq!(sig_hex.trim().len(), 128, "Ed25519 signature must be 128 hex chars");
+
+        // 4. Verify with public key file AND with raw hex string
+        let code_ver_file = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "verify".into(),
+                "--manifest".into(),
+                manifest_path.display().to_string(),
+                "--sig".into(),
+                sig_path.display().to_string(),
+                "--pubkey".into(),
+                pub_key.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_ver_file, 0);
+
+        let pub_hex = fs::read_to_string(&pub_key).unwrap().trim().to_string();
+        let code_ver_hex = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "verify".into(),
+                "--manifest".into(),
+                manifest_path.display().to_string(),
+                "--sig".into(),
+                sig_path.display().to_string(),
+                "--pubkey".into(),
+                pub_hex,
+            ],
+        )
+        .unwrap();
+        assert_eq!(code_ver_hex, 0);
+
+        // 5. Wrong public key must fail verification
+        let wrong_pub = other_keys_dir.join("pstdr-signing.pub");
+        let code_wrong_key = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "verify".into(),
+                "--manifest".into(),
+                manifest_path.display().to_string(),
+                "--sig".into(),
+                sig_path.display().to_string(),
+                "--pubkey".into(),
+                wrong_pub.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_ne!(code_wrong_key, 0, "Verification with wrong public key must fail");
+
+        // 6. Tampering with a single byte of pstdr-release.json must fail verification
+        let mut tampered_bytes = fs::read(&manifest_path).unwrap();
+        let pos = tampered_bytes
+            .iter()
+            .position(|&b| b == b'2')
+            .expect("manifest must contain '2'");
+        tampered_bytes[pos] = b'3';
+        fs::write(&manifest_path, &tampered_bytes).unwrap();
+
+        let code_tampered = run_cli_in(
+            &dir,
+            &[
+                "release".into(),
+                "verify".into(),
+                "--manifest".into(),
+                manifest_path.display().to_string(),
+                "--sig".into(),
+                sig_path.display().to_string(),
+                "--pubkey".into(),
+                pub_key.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_ne!(code_tampered, 0, "Verification on 1-byte tampered manifest must fail");
 
         let _ = fs::remove_dir_all(&dir);
     }

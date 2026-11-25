@@ -103,7 +103,7 @@ The following is a direct summary of Claude's feedback after building Zombie Rus
 ### Key Takeaways & Limitations Noted
 - `pstdr-c check` and `pstdr-c audit` validate static concerns (syntax, variable scope, vanilla effect/sound IDs, manifest and asset checks) rather than runtime gameplay balance or mob spawn placement.
 - The current built-in event catalog is concise (11 events); areas such as player leave, chat, scoreboards, and UI forms are not covered natively yet.
-- The toolchain targets **Minecraft Bedrock 26.60** with `@minecraft/server` `2.11.0` (`0.1.0-alpha.1`), so a matching Bedrock version is required.
+- The toolchain targets **Minecraft Bedrock 26.60** with `@minecraft/server` `2.11.0` (`0.1.0-pre-beta.1`), so a matching Bedrock version is required.
 
 ### Zero `unsafe` Usage
 - **No `unsafe` blocks were needed** to build the entire minigame.

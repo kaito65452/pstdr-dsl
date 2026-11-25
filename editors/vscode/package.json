@@ -2,7 +2,7 @@
   "name": "pstdr-vscode",
   "displayName": "PackStudio DSL (.pstdr)",
   "description": "Syntax highlighting, diagnostics, completions, hover previews, quick fixes, and formatting for .pstdr (Minecraft Bedrock DSL).",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-pre-beta.1",
   "publisher": "packstudio",
   "license": "GPL-3.0-or-later",
   "engines": {

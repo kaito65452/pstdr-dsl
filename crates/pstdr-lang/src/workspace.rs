@@ -1197,7 +1197,7 @@ pub fn new_script(root: &Path, name: &str, spec: &BedrockSpec) -> Result<PathBuf
 
 pub fn doctor_report(root: Option<&Path>, spec: &BedrockSpec) -> String {
     let mut out = String::new();
-    out.push_str("pstdr-c doctor (v0.1.0-alpha)\n");
+    out.push_str(&format!("pstdr-c doctor (v{})\n", env!("CARGO_PKG_VERSION")));
     out.push_str(&format!(
         "  Spec source      : {}\n",
         spec.source_label
