@@ -99,6 +99,11 @@ pub fn hover_at(text: &str, line: u32, utf16_col: u32) -> Option<Hover> {
         "after" => Some("**`after <duration> { ... }`**\n\nCompiles to `system.runTimeout(..., ticks)`."),
         "unsafe" => Some("**`unsafe`**\n\nIsolates raw JavaScript inside a `.pstdr` file without DSL keyword restrictions."),
         "bind_target" => Some("**`bind_target(\"BP/...\")`**\n\nExplicitly binds a Behavior Pack item or block JSON file for automatic custom component wiring."),
+        "command" => Some("**`command [on <target>] \"<cmd>\"`**\n\nExecutes a synchronous Bedrock command via `.runCommand(...)` (on `world.getDimension(\"overworld\")` by default, or on `<target>`). Automatically deferred via `system.run(...)` inside `beforeEvents` handlers."),
+        "run_fn" => Some("**`run_fn [on <target>] \"<path>\"`**\n\nCompiles to `.runCommand(\"function <path>\")`. Validated against `BP/functions/<path>.mcfunction` and inline `mcfunction` blocks (`PSTDR-E017`). Automatically deferred via `system.run(...)` inside `beforeEvents` handlers."),
+        "mcfunction" => Some("**`mcfunction \"<path>\" { ... }`**\n\nTop-level inline `.mcfunction` declaration emitted to `BP/functions/<path>.mcfunction` during workspace conversion (stripping `//` comments and blank lines)."),
+        "script_event" => Some("**`on script_event \"<ns>:<id>\" { ... }`**\n\nCompiles to `system.afterEvents.scriptEventReceive.subscribe(..., { namespaces: [\"<ns>\"] })`. Exposes `event.id`, `event.message`, `source` (`event.sourceEntity`), and `source_block` (`event.sourceBlock`)."),
+        "entity_trigger" => Some("**`on entity_trigger \"<event_id>\" [for \"<entity_type>\"] { ... }`**\n\nCompiles to `world.afterEvents.dataDrivenEntityTrigger.subscribe(..., { eventTypes: [\"<event_id>\"], ... })`. Exposes `entity` (`event.entity`) and `event_id` (`event.eventId`)."),
         _ => None,
     };
 

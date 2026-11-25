@@ -271,12 +271,13 @@ pub fn explain_code(raw_code: &str) -> Option<&'static str> {
              Right : Check the highlighted line and fix it to match .pstdr grammar.",
         ),
         "E017" => Some(
-            "PSTDR-E017: Invalid texture reference or missing image file.\n\
+            "PSTDR-E017: Invalid texture reference, missing image file, or missing .mcfunction asset.\n\
              Cause: An item/block JSON file in BP references a custom texture alias without a Resource Pack (RP/),\n\
              the alias is not registered in RP/textures/item_texture.json or terrain_texture.json,\n\
-             or the physical image file (.png/.tga) is missing inside RP/.\n\
-             Forbidden formats: alias cannot be empty, end with .png/.tga/.jpg, or contain paths ('/', '\\') or namespaces (':').\n\
-             Right : Create RP/textures/item_texture.json along with the corresponding image file, or use a valid vanilla alias (e.g. 'snowball', 'diamond').",
+             the physical image file (.png/.tga) is missing inside RP/,\n\
+             or a 'run_fn' statement references a function path that does not exist as BP/functions/<path>.mcfunction or an inline 'mcfunction \"<path>\" { ... }' block.\n\
+             Forbidden texture formats: alias cannot be empty, end with .png/.tga/.jpg, or contain paths ('/', '\\') or namespaces (':').\n\
+             Right : Create RP/textures/item_texture.json + image file, use a valid vanilla alias, or define the missing .mcfunction file / inline 'mcfunction' block.",
         ),
         "E018" => Some(
             "PSTDR-E018: Beta-only @minecraft/server API used with a stable API version.\n\

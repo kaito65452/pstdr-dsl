@@ -202,6 +202,13 @@ mod tests {
             "on tick",
             "on projectile hit",
             "on spawn",
+            "on script_event",
+            "on entity_trigger",
+            "mcfunction",
+            "command",
+            "command on",
+            "run_fn",
+            "run_fn on",
             "spawn particle",
         ] {
             assert!(
@@ -282,6 +289,24 @@ mod tests {
             assert!(value.contains("PSTDR-E018"), "got: {value}");
         } else {
             panic!("expected markup hover");
+        }
+
+        for (line, col, expected) in [
+            ("command \"say hi\"", 2, "runCommand"),
+            ("run_fn \"folder/fn\"", 2, "PSTDR-E017"),
+            ("mcfunction \"folder/fn\" {}", 2, "BP/functions"),
+            ("on script_event \"ns:id\" {}", 5, "scriptEventReceive"),
+            ("on entity_trigger \"ev\" {}", 5, "dataDrivenEntityTrigger"),
+        ] {
+            let h = hover::hover_at(line, 0, col).unwrap_or_else(|| panic!("missing hover for {line}"));
+            if let HoverContents::Markup(MarkupContent { value, .. }) = h.contents {
+                assert!(
+                    value.contains(expected),
+                    "hover for '{line}' expected '{expected}', got: {value}"
+                );
+            } else {
+                panic!("expected markup hover");
+            }
         }
     }
 

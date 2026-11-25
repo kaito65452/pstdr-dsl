@@ -360,6 +360,23 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     let mut registry_entries: Vec<RegistryEntry> = Vec::new();
 
     for vf in validated_files {
+        for item in &vf.prog.items {
+            if let crate::ast::TopLevelItem::McFunctionDecl(mc) = item {
+                let norm = crate::validator::normalize_mcfunction_path(&mc.path);
+                if crate::validator::has_path_traversal(&norm) {
+                    return Err(format!(
+                        "Refusing to write mcfunction with unsafe path '{}'",
+                        mc.path
+                    ));
+                }
+                let content = sanitize_mcfunction_body(&mc.raw_body);
+                let out_path = root
+                    .join("BP/functions")
+                    .join(format!("{norm}.mcfunction"));
+                write_generated_file(&out_path, &content)?;
+            }
+        }
+
         let part = partition_program(&vf.prog, &registry);
         if !part.should_partition(vf.prog.bind_targets.len()) {
             let registered = wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?;
@@ -537,6 +554,43 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     sort_and_dedup_diags(&mut all_diags);
     Ok(all_diags)
+}
+
+fn sanitize_mcfunction_body(raw_body: &str) -> String {
+    let mut lines = Vec::new();
+    for line in raw_body.lines() {
+        let stripped = strip_mcfunction_line_comment(line).trim();
+        if !stripped.is_empty() {
+            lines.push(stripped);
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn strip_mcfunction_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote = false;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && in_quote {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_quote = !in_quote;
+            i += 1;
+            continue;
+        }
+        if !in_quote && bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
 }
 
 fn write_generated_file(path: &Path, content: &str) -> Result<(), String> {

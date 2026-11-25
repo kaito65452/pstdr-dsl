@@ -2202,4 +2202,315 @@ on join of player {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // ─── WAVE 3A: .mcfunction Pipeline, command, run_fn, script_event, entity_trigger ───
+
+    #[test]
+    fn wave_3a_command_and_run_fn_codegen_and_before_event_deferral() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+mcfunction "arena/reset_wave" {
+    // Reset arena mobs
+    kill @e[type=zombie]
+    say Arena reset!
+}
+
+on join of player {
+    command "say Welcome!"
+    command on player "particle minecraft:totem_particle ~ ~1 ~"
+    run_fn "arena/reset_wave"
+    run_fn on player "arena/reset_wave"
+}
+
+on break of "minecraft:bedrock" by player {
+    cancel event
+    command "say Protected!"
+    command on player "playsound note.bass @s"
+    run_fn "arena/reset_wave"
+    run_fn on player "arena/reset_wave"
+}
+"#;
+        let res = compile_source(src, "wave3a.pstdr", None, &spec, true, false, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "Expected no errors, got: {:?}",
+            res.diagnostics
+        );
+        let js = res.js.unwrap();
+        assert!(
+            !js.contains("runCommandAsync"),
+            "Must NEVER emit deprecated runCommandAsync:\n{js}"
+        );
+        assert!(
+            js.contains("world.getDimension(\"overworld\").runCommand(\"say Welcome!\");"),
+            "Missing overworld command:\n{js}"
+        );
+        assert!(
+            js.contains("player.runCommand(\"particle minecraft:totem_particle ~ ~1 ~\");"),
+            "Missing targeted command:\n{js}"
+        );
+        assert!(
+            js.contains("world.getDimension(\"overworld\").runCommand(\"function arena/reset_wave\");"),
+            "Missing overworld run_fn:\n{js}"
+        );
+        assert!(
+            js.contains("player.runCommand(\"function arena/reset_wave\");"),
+            "Missing targeted run_fn:\n{js}"
+        );
+        // Inside beforeEvents.playerBreakBlock, all command / run_fn calls must be deferred via system.run
+        assert!(
+            js.contains("system.run(() => {\n        world.getDimension(\"overworld\").runCommand(\"say Protected!\");\n    });"),
+            "command inside beforeEvents must be deferred via system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n        player.runCommand(\"playsound note.bass @s\");\n    });"),
+            "command on target inside beforeEvents must be deferred via system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n        world.getDimension(\"overworld\").runCommand(\"function arena/reset_wave\");\n    });"),
+            "run_fn inside beforeEvents must be deferred via system.run:\n{js}"
+        );
+        assert!(
+            js.contains("system.run(() => {\n        player.runCommand(\"function arena/reset_wave\");\n    });"),
+            "run_fn on target inside beforeEvents must be deferred via system.run:\n{js}"
+        );
+        assert!(
+            !js.contains("mcfunction"),
+            "Inline mcfunction declarations must not emit raw mcfunction into JS:\n{js}"
+        );
+
+        // Formatter round-trip idempotency
+        let fmt1 = format_source(src, "wave3a.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "wave3a.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2, "Formatter must be idempotent for Wave 3A syntax");
+    }
+
+    #[test]
+    fn wave_3a_script_event_and_entity_trigger_codegen_and_validation() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on script_event "my_pack:boss_spawn" {
+    const id = event.id
+    const msg = event.message
+    if source != null {
+        command on source "say Triggered {id}: {msg}"
+    }
+    if source_block != null {
+        command "say From block {source_block.type_id}"
+    }
+}
+
+on entity_trigger "my_pack:enrage" {
+    command on entity "say Enraged via {event_id}"
+}
+
+on entity_trigger "my_pack:phase_two" for "my_pack:frost_boss" {
+    apply strength 2 to entity for 10s
+}
+"#;
+        let res = compile_source(src, "events3a.pstdr", None, &spec, true, false, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "Expected no errors, got: {:?}",
+            res.diagnostics
+        );
+        let js = res.js.unwrap();
+        assert!(
+            js.contains("import { world, system } from \"@minecraft/server\";"),
+            "Must import world and system:\n{js}"
+        );
+        assert!(
+            js.contains("system.afterEvents.scriptEventReceive.subscribe((event) => {"),
+            "Must subscribe to system.afterEvents.scriptEventReceive:\n{js}"
+        );
+        assert!(
+            js.contains("if (event.id !== \"my_pack:boss_spawn\") return;"),
+            "Must filter event.id:\n{js}"
+        );
+        assert!(
+            js.contains("const source = event.sourceEntity;"),
+            "Must bind source:\n{js}"
+        );
+        assert!(
+            js.contains("const source_block = event.sourceBlock;"),
+            "Must bind source_block:\n{js}"
+        );
+        assert!(
+            js.contains("}, { namespaces: [\"my_pack\"] });"),
+            "Must pass namespaces filter option:\n{js}"
+        );
+        assert!(
+            js.contains("world.afterEvents.dataDrivenEntityTrigger.subscribe((event) => {"),
+            "Must subscribe to world.afterEvents.dataDrivenEntityTrigger:\n{js}"
+        );
+        assert!(
+            js.contains("const entity = event.entity;"),
+            "Must bind entity:\n{js}"
+        );
+        assert!(
+            js.contains("const event_id = event.eventId;"),
+            "Must bind event_id:\n{js}"
+        );
+        assert!(
+            js.contains("}, { eventTypes: [\"my_pack:enrage\"] });"),
+            "Must pass eventTypes without entityTypes:\n{js}"
+        );
+        assert!(
+            js.contains("}, { eventTypes: [\"my_pack:phase_two\"], entityTypes: [\"my_pack:frost_boss\"] });"),
+            "Must pass eventTypes and entityTypes:\n{js}"
+        );
+
+        // Invalid script_event without namespace colon must emit a clear error diagnostic
+        let bad_se = r#"
+on script_event "missing_namespace" {
+    command "say bad"
+}
+"#;
+        let bad_res = compile_source(bad_se, "bad_se.pstdr", None, &spec, true, false, vec![]);
+        assert!(
+            bad_res
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.message.contains("namespace")),
+            "Expected clear namespace diagnostic for script_event without colon: {:?}",
+            bad_res.diagnostics
+        );
+
+        // Reserved keywords check (E003)
+        for kw in ["command", "run_fn", "mcfunction"] {
+            let bad_kw = format!("const {kw} = 1\n");
+            let (_p, diags) = parse_source(&bad_kw, "kw.pstdr");
+            assert!(
+                diags.iter().any(|d| d.code == "PSTDR-E003"),
+                "Expected PSTDR-E003 for reserved keyword '{kw}', got: {diags:?}"
+            );
+        }
+
+        // Formatter idempotency for script_event and entity_trigger
+        let fmt1 = format_source(src, "events3a.pstdr").unwrap();
+        let fmt2 = format_source(&fmt1, "events3a.pstdr").unwrap();
+        assert_eq!(fmt1, fmt2);
+    }
+
+    #[test]
+    fn wave_3a_run_fn_asset_guard_e017_and_workspace_mcfunction_pipeline() {
+        let dir = temp_dir("wave3a_ws");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/functions/existing")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // 1. Existing .mcfunction on disk
+        fs::write(
+            dir.join("BP/functions/existing/from_disk.mcfunction"),
+            "say From disk!\n",
+        )
+        .unwrap();
+
+        // 2. Missing .mcfunction must emit PSTDR-E017
+        let missing_src = r#"
+@addon(target = "26.60", api = "2.11.0")
+on join of player {
+    run_fn "does/not_exist"
+}
+"#;
+        let missing_res = compile_source(
+            missing_src,
+            "src/missing.pstdr",
+            Some(&dir),
+            &spec,
+            true,
+            false,
+            vec![],
+        );
+        assert!(
+            missing_res
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "PSTDR-E017"),
+            "Missing run_fn target must emit PSTDR-E017: {:?}",
+            missing_res.diagnostics
+        );
+
+        // 3. Path traversal in mcfunction and run_fn must emit PSTDR-E009
+        let trav_src = r#"
+mcfunction "../escape" {
+    say nope
+}
+on join of player {
+    run_fn "../escape"
+}
+"#;
+        let trav_res = compile_source(
+            trav_src,
+            "src/trav.pstdr",
+            Some(&dir),
+            &spec,
+            true,
+            false,
+            vec![],
+        );
+        assert!(
+            trav_res.diagnostics.iter().filter(|d| d.code == "PSTDR-E009").count() >= 2,
+            "Path traversal in mcfunction and run_fn must emit PSTDR-E009: {:?}",
+            trav_res.diagnostics
+        );
+
+        // 4. Cross-file inline mcfunction + disk mcfunction in convert_workspace
+        fs::write(
+            dir.join("src/funcs.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+
+mcfunction "waves/boss/start" {
+    // Spawn boss and announce
+    
+    tellraw @a {"rawtext":[{"text":"Don't blink!"}]} // inline comment
+    summon minecraft:zombie ~ ~1 ~
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/main.pstdr"),
+            r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on script_event "arena:start" {
+    run_fn "waves/boss/start"
+    run_fn "existing/from_disk"
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags),
+            "Valid disk + cross-file inline mcfunction must compile cleanly: {diags:?}"
+        );
+
+        let emitted_fn = dir.join("BP/functions/waves/boss/start.mcfunction");
+        assert!(
+            emitted_fn.is_file(),
+            "convert_workspace must emit BP/functions/waves/boss/start.mcfunction"
+        );
+        let fn_content = fs::read_to_string(&emitted_fn).unwrap();
+        assert_eq!(
+            fn_content,
+            "tellraw @a {\"rawtext\":[{\"text\":\"Don't blink!\"}]}\nsummon minecraft:zombie ~ ~1 ~\n",
+            "Emitted .mcfunction must strip // comments and blank lines cleanly"
+        );
+
+        let main_js = fs::read_to_string(dir.join("BP/scripts/generated/main.js")).unwrap();
+        assert!(main_js.contains("system.afterEvents.scriptEventReceive.subscribe"));
+        assert!(main_js.contains("world.getDimension(\"overworld\").runCommand(\"function waves/boss/start\");"));
+        assert!(main_js.contains("world.getDimension(\"overworld\").runCommand(\"function existing/from_disk\");"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

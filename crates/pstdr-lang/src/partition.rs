@@ -193,6 +193,9 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
             | TopLevelItem::UnsafeVarDecl(_) => {
                 shared.push(item.clone());
             }
+            TopLevelItem::McFunctionDecl(_) => {
+                // Emitted directly to BP/functions/<path>.mcfunction by workspace conversion.
+            }
             TopLevelItem::AfterTimer { .. } | TopLevelItem::EveryTimer { .. } => {
                 world.push(item.clone());
             }
@@ -293,7 +296,9 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                     | EventKind::Hurt { .. }
                     | EventKind::Die { .. }
                     | EventKind::ProjectileHit { .. }
-                    | EventKind::EntitySpawn { .. } => {
+                    | EventKind::EntitySpawn { .. }
+                    | EventKind::ScriptEvent { .. }
+                    | EventKind::EntityTrigger { .. } => {
                         world.push(item.clone());
                     }
                 }

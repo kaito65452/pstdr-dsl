@@ -37,6 +37,8 @@ enum EventCtx {
     BlockTick,
     ProjectileHit,
     EntitySpawn,
+    ScriptEvent,
+    EntityTrigger,
     PlayerJoin,
     PlayerLeave,
     ChatSend,
@@ -58,6 +60,8 @@ impl EventCtx {
             Self::BlockTick => "on tick",
             Self::ProjectileHit => "on projectile hit",
             Self::EntitySpawn => "on spawn",
+            Self::ScriptEvent => "on script_event",
+            Self::EntityTrigger => "on entity_trigger",
             Self::PlayerJoin => "on join",
             Self::PlayerLeave => "on leave",
             Self::ChatSend => "on chat",
@@ -97,6 +101,10 @@ pub fn validate_program(
     let discovered_registry = ctx
         .workspace_root
         .and_then(|root| TargetRegistry::discover(root).ok());
+    let workspace_mcfunctions = ctx
+        .workspace_root
+        .map(discover_workspace_mcfunctions)
+        .unwrap_or_default();
 
     let active_api = program
         .header
@@ -122,6 +130,7 @@ pub fn validate_program(
         static_event_item_ids: Vec::new(),
         static_event_block_ids: Vec::new(),
         discovered_registry,
+        inline_mcfunctions: workspace_mcfunctions,
     };
 
     v.seed_builtins();
@@ -155,6 +164,7 @@ struct Validator<'a> {
     static_event_item_ids: Vec<(String, Span)>,
     static_event_block_ids: Vec<(String, Span)>,
     discovered_registry: Option<TargetRegistry>,
+    inline_mcfunctions: HashSet<String>,
 }
 
 impl<'a> Validator<'a> {
@@ -294,6 +304,12 @@ impl<'a> Validator<'a> {
                 TopLevelItem::UnsafeVarDecl(u) => {
                     self.insert_binding(&u.name, BindingKind::UnsafeVar, u.span.line);
                 }
+                TopLevelItem::McFunctionDecl(mc) => {
+                    let norm = normalize_mcfunction_path(&mc.path);
+                    if !has_path_traversal(&norm) {
+                        self.inline_mcfunctions.insert(norm);
+                    }
+                }
                 _ => {}
             }
         }
@@ -326,6 +342,20 @@ impl<'a> Validator<'a> {
                 }
                 TopLevelItem::UnsafeVarDecl(u) => {
                     self.validate_unsafe_beta_usage(&u.name, &u.raw_rest, &u.span);
+                }
+                TopLevelItem::McFunctionDecl(mc) => {
+                    let norm = normalize_mcfunction_path(&mc.path);
+                    if has_path_traversal(&norm) {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E009,
+                            &mc.path_span,
+                            format!(
+                                "Path traversal or invalid path is not allowed in mcfunction '{}'.",
+                                mc.path
+                            ),
+                            "Use a non-empty relative path without '..' or leading slashes, e.g. \"folder/my_func\".",
+                        ));
+                    }
                 }
                 TopLevelItem::EventHandler(ev) => {
                     self.validate_event_handler(ev);
@@ -548,6 +578,53 @@ impl<'a> Validator<'a> {
                 }
                 self.insert_binding(entity_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::EntitySpawn;
+            }
+            EventKind::ScriptEvent { event_id } => {
+                self.validate_expr(event_id);
+                match eval_static_string(event_id, &self.const_strings) {
+                    Some(id_str) => {
+                        let valid = id_str.split_once(':').is_some_and(|(ns, local)| {
+                            !ns.trim().is_empty()
+                                && !local.trim().is_empty()
+                                && !ns.chars().any(char::is_whitespace)
+                                && !local.chars().any(char::is_whitespace)
+                        });
+                        if !valid {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E016,
+                                event_id.span(),
+                                format!(
+                                    "Invalid script_event ID '{id_str}': must include a namespace colon in '<namespace>:<id>' format."
+                                ),
+                                "Use a namespaced identifier such as on script_event \"my_pack:my_event\" { ... }.",
+                            ));
+                        }
+                    }
+                    None => {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            event_id.span(),
+                            "script_event ID must be a static string literal or const in '<namespace>:<id>' format.",
+                            "Use a namespaced string literal or const, e.g. on script_event \"my_pack:my_event\" { ... }.",
+                        ));
+                    }
+                }
+                self.insert_binding("event", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("source", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("source_block", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::ScriptEvent;
+            }
+            EventKind::EntityTrigger {
+                event_id,
+                entity_type,
+            } => {
+                self.validate_expr(event_id);
+                if let Some(ty) = entity_type {
+                    self.validate_expr(ty);
+                }
+                self.insert_binding("entity", BindingKind::ContextVar, ev.span.line);
+                self.insert_binding("event_id", BindingKind::ContextVar, ev.span.line);
+                self.event_ctx = EventCtx::EntityTrigger;
             }
         }
 
@@ -782,6 +859,53 @@ impl<'a> Validator<'a> {
                     self.validate_expr(dim);
                 }
             }
+            Stmt::Command {
+                target, command, ..
+            } => {
+                if let Some(t) = target {
+                    self.validate_expr(t);
+                }
+                self.validate_expr(command);
+            }
+            Stmt::RunFn { target, path, .. } => {
+                if let Some(t) = target {
+                    self.validate_expr(t);
+                }
+                self.validate_expr(path);
+                if let Some(raw_path) = eval_static_string(path, &self.const_strings) {
+                    let norm = normalize_mcfunction_path(&raw_path);
+                    if has_path_traversal(&norm) {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E009,
+                            path.span(),
+                            format!(
+                                "Path traversal or invalid path is not allowed in run_fn '{}'.",
+                                raw_path
+                            ),
+                            "Use a non-empty relative path without '..' or leading slashes, e.g. run_fn \"folder/my_func\".",
+                        ));
+                    } else {
+                        let exists_inline = self.inline_mcfunctions.contains(&norm);
+                        let exists_on_disk = self.ctx.workspace_root.is_some_and(|root| {
+                            root.join("BP/functions")
+                                .join(format!("{norm}.mcfunction"))
+                                .is_file()
+                        });
+                        if !exists_inline && !exists_on_disk {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E017,
+                                path.span(),
+                                format!(
+                                    "Referenced mcfunction '{norm}' not found: neither 'BP/functions/{norm}.mcfunction' nor an inline 'mcfunction \"{norm}\" {{ ... }}' declaration exists in the workspace."
+                                ),
+                                format!(
+                                    "Create 'BP/functions/{norm}.mcfunction' or add an inline 'mcfunction \"{norm}\" {{ ... }}' block."
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
             Stmt::After { body, .. } => {
                 let prev = self.event_ctx;
                 self.event_ctx = EventCtx::Timer;
@@ -911,6 +1035,49 @@ impl<'a> Validator<'a> {
             hint,
         ));
     }
+}
+
+pub fn normalize_mcfunction_path(raw: &str) -> String {
+    let normalized = raw.trim().replace('\\', "/");
+    normalized
+        .strip_suffix(".mcfunction")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn discover_workspace_mcfunctions(root: &Path) -> HashSet<String> {
+    let mut found = HashSet::new();
+    let cfg = WorkspaceConfig::load_from_root(root);
+    let src_dir = root.join(&cfg.src_dir);
+    let scan_dir = if src_dir.is_dir() {
+        src_dir
+    } else {
+        root.to_path_buf()
+    };
+    let Ok(files) = crate::workspace::collect_pstdr_files(&scan_dir) else {
+        return found;
+    };
+    for file in files {
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        if !source.contains("mcfunction") {
+            continue;
+        }
+        let label = file.display().to_string();
+        let (prog_opt, _) = crate::parser::parse_source(&source, &label);
+        if let Some(prog) = prog_opt {
+            for item in prog.items {
+                if let TopLevelItem::McFunctionDecl(mc) = item {
+                    let norm = normalize_mcfunction_path(&mc.path);
+                    if !has_path_traversal(&norm) {
+                        found.insert(norm);
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 pub fn has_path_traversal(path: &str) -> bool {

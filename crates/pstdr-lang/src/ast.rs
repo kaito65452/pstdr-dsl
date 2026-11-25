@@ -28,6 +28,7 @@ pub enum TopLevelItem {
     FuncDecl(FuncDecl),
     UnsafeFuncDecl(UnsafeFuncDecl),
     UnsafeVarDecl(UnsafeVarDecl),
+    McFunctionDecl(McFunctionDecl),
     EventHandler(EventHandler),
     AfterTimer {
         duration: DurationLit,
@@ -78,6 +79,14 @@ pub struct UnsafeVarDecl {
     pub keyword: String,
     pub name: String,
     pub raw_rest: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct McFunctionDecl {
+    pub path: String,
+    pub path_span: Span,
+    pub raw_body: String,
     pub span: Span,
 }
 
@@ -139,6 +148,13 @@ pub enum EventKind {
     },
     EntitySpawn {
         entity_var: String,
+        entity_type: Option<Expr>,
+    },
+    ScriptEvent {
+        event_id: Expr,
+    },
+    EntityTrigger {
+        event_id: Expr,
         entity_type: Option<Expr>,
     },
 }
@@ -211,6 +227,16 @@ pub enum Stmt {
         particle: Expr,
         location: Expr,
         dimension: Option<Expr>,
+        span: Span,
+    },
+    Command {
+        target: Option<Expr>,
+        command: Expr,
+        span: Span,
+    },
+    RunFn {
+        target: Option<Expr>,
+        path: Expr,
         span: Span,
     },
     After {

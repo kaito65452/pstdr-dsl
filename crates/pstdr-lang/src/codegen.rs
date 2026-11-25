@@ -28,6 +28,7 @@ pub struct SharedContext {
     pub shared_exports: HashSet<String>,
     pub shared_muts: HashSet<String>,
     pub shared_states: HashSet<String>,
+    pub const_strings: HashMap<String, String>,
     pub shared_import_path: Option<String>,
 }
 
@@ -37,11 +38,15 @@ impl SharedContext {
             shared_exports: HashSet::new(),
             shared_muts: HashSet::new(),
             shared_states: HashSet::new(),
+            const_strings: HashMap::new(),
             shared_import_path: import_path,
         };
         for item in shared {
             match item {
                 TopLevelItem::ConstDecl(d) => {
+                    if let Some(s) = eval_static_string(&d.value, &ctx.const_strings) {
+                        ctx.const_strings.insert(d.name.clone(), s);
+                    }
                     ctx.shared_exports.insert(d.name.clone());
                 }
                 TopLevelItem::MutDecl(d) => {
@@ -602,7 +607,7 @@ pub fn emit_item_component_module(
         opts: &opts,
         mode,
         state_names: shared.shared_states.clone(),
-        const_strings: HashMap::new(),
+        const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
         used_shared_imports: BTreeSet::new(),
         local_scopes: Vec::new(),
@@ -757,7 +762,7 @@ pub fn emit_block_component_module(
         opts: &opts,
         mode,
         state_names: shared.shared_states.clone(),
-        const_strings: HashMap::new(),
+        const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
         used_shared_imports: BTreeSet::new(),
         local_scopes: Vec::new(),
@@ -911,7 +916,7 @@ pub fn emit_world_module(
         opts: &opts,
         mode,
         state_names: shared.shared_states.clone(),
-        const_strings: HashMap::new(),
+        const_strings: shared.const_strings.clone(),
         shared: shared.clone(),
         used_shared_imports: BTreeSet::new(),
         local_scopes: Vec::new(),
@@ -1148,6 +1153,9 @@ impl<'a> Codegen<'a> {
                     rest.push(';');
                 }
                 self.line(&format!("{} {}", u.keyword, rest));
+            }
+            TopLevelItem::McFunctionDecl(_) => {
+                // Emitted directly to BP/functions/<path>.mcfunction; no JS output.
             }
             TopLevelItem::EventHandler(ev) => {
                 self.emit_event_handler(ev);
@@ -1449,6 +1457,71 @@ impl<'a> Codegen<'a> {
                 self.indent -= 1;
                 self.line("});");
             }
+            EventKind::ScriptEvent { event_id } => {
+                self.needs_system = true;
+                let event_param = if self.mode == EmitMode::TypeScript {
+                    "(event: any)"
+                } else {
+                    "(event)"
+                };
+                let id_js = self.emit_expr(event_id);
+                let namespace = eval_static_string(event_id, &self.const_strings)
+                    .and_then(|s| s.split_once(':').map(|(ns, _)| ns.to_string()));
+                self.line(&format!(
+                    "system.afterEvents.scriptEventReceive.subscribe({event_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local("event");
+                self.bind_local("source");
+                self.bind_local("source_block");
+                self.line(&format!("if (event.id !== {id_js}) return;"));
+                self.line("const source = event.sourceEntity;");
+                self.line("const source_block = event.sourceBlock;");
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                if let Some(ns) = namespace {
+                    self.line(&format!(
+                        "}}, {{ namespaces: [\"{}\"] }});",
+                        escape_double_quoted(&ns)
+                    ));
+                } else {
+                    self.line("});");
+                }
+            }
+            EventKind::EntityTrigger {
+                event_id,
+                entity_type,
+            } => {
+                self.needs_world = true;
+                let event_param = if self.mode == EmitMode::TypeScript {
+                    "(event: any)"
+                } else {
+                    "(event)"
+                };
+                let id_js = self.emit_expr(event_id);
+                let entity_type_js = entity_type.as_ref().map(|ty| self.emit_expr(ty));
+                self.line(&format!(
+                    "world.afterEvents.dataDrivenEntityTrigger.subscribe({event_param} => {{"
+                ));
+                self.indent += 1;
+                self.push_scope();
+                self.bind_local("entity");
+                self.bind_local("event_id");
+                self.line("const entity = event.entity;");
+                self.line("const event_id = event.eventId;");
+                self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
+                self.indent -= 1;
+                if let Some(ty_js) = entity_type_js {
+                    self.line(&format!(
+                        "}}, {{ eventTypes: [{id_js}], entityTypes: [{ty_js}] }});"
+                    ));
+                } else {
+                    self.line(&format!("}}, {{ eventTypes: [{id_js}] }});"));
+                }
+            }
         }
     }
 
@@ -1676,6 +1749,61 @@ impl<'a> Codegen<'a> {
                     self.needs_world = true;
                     let l = self.emit_expr(location);
                     format!("world.getDimension(\"overworld\").spawnParticle({p}, {l});")
+                };
+                self.wrap_before_event_mutation(call);
+            }
+            Stmt::Command {
+                target, command, ..
+            } => {
+                let cmd_js = self.emit_expr(command);
+                let call = if let Some(t) = target {
+                    let t_js = self.emit_expr(t);
+                    format!("{t_js}.runCommand({cmd_js});")
+                } else {
+                    self.needs_world = true;
+                    format!("world.getDimension(\"overworld\").runCommand({cmd_js});")
+                };
+                self.wrap_before_event_mutation(call);
+            }
+            Stmt::RunFn { target, path, .. } => {
+                let fn_cmd_js = match path {
+                    Expr::StringParts(parts, _) => {
+                        if parts.len() == 1 {
+                            if let StringPart::Literal(s) = &parts[0] {
+                                let norm = crate::validator::normalize_mcfunction_path(s);
+                                format!("\"function {}\"", escape_double_quoted(&norm))
+                            } else {
+                                let p_js = self.emit_expr(path);
+                                format!("`function ${{{p_js}}}`")
+                            }
+                        } else {
+                            let mut out = String::from("`function ");
+                            for p in parts {
+                                match p {
+                                    StringPart::Literal(s) => {
+                                        out.push_str(&escape_template_literal(s));
+                                    }
+                                    StringPart::Expr(e) => {
+                                        let inner = self.emit_expr(e);
+                                        out.push_str(&format!("${{{inner}}}"));
+                                    }
+                                }
+                            }
+                            out.push('`');
+                            out
+                        }
+                    }
+                    _ => {
+                        let p_js = self.emit_expr(path);
+                        format!("`function ${{{p_js}}}`")
+                    }
+                };
+                let call = if let Some(t) = target {
+                    let t_js = self.emit_expr(t);
+                    format!("{t_js}.runCommand({fn_cmd_js});")
+                } else {
+                    self.needs_world = true;
+                    format!("world.getDimension(\"overworld\").runCommand({fn_cmd_js});")
                 };
                 self.wrap_before_event_mutation(call);
             }
@@ -2069,6 +2197,20 @@ fn stmt_references_ident(stmt: &Stmt, name: &str) -> bool {
                 || dimension
                     .as_ref()
                     .is_some_and(|d| expr_references_ident(d, name))
+        }
+        Stmt::Command {
+            target, command, ..
+        } => {
+            target
+                .as_ref()
+                .is_some_and(|t| expr_references_ident(t, name))
+                || expr_references_ident(command, name)
+        }
+        Stmt::RunFn { target, path, .. } => {
+            target
+                .as_ref()
+                .is_some_and(|t| expr_references_ident(t, name))
+                || expr_references_ident(path, name)
         }
         Stmt::After { body, .. } | Stmt::Every { body, .. } => block_references_ident(body, name),
         Stmt::ExprStmt { expr, .. } => expr_references_ident(expr, name),

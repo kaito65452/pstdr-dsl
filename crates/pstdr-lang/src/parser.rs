@@ -184,6 +184,7 @@ impl<'a> Parser<'a> {
                         | "state"
                         | "func"
                         | "unsafe"
+                        | "mcfunction"
                         | "on"
                         | "after"
                         | "every"
@@ -401,6 +402,9 @@ impl<'a> Parser<'a> {
         if self.is_ident_word("unsafe") {
             return self.parse_unsafe_top_level();
         }
+        if self.is_ident_word("mcfunction") {
+            return Ok(TopLevelItem::McFunctionDecl(self.parse_mcfunction_decl()?));
+        }
         if self.is_ident_word("on") {
             return Ok(TopLevelItem::EventHandler(self.parse_event_handler()?));
         }
@@ -429,7 +433,7 @@ impl<'a> Parser<'a> {
             DiagnosticCode::E016,
             &tok.span,
             "Unknown top-level declaration.",
-            "Use 'const', 'mut', 'state', 'func', 'unsafe', 'on', 'after', or 'every'.",
+            "Use 'const', 'mut', 'state', 'func', 'unsafe', 'mcfunction', 'on', 'after', or 'every'.",
         )))
     }
 
@@ -561,6 +565,36 @@ impl<'a> Parser<'a> {
         while !self.is_eof() && self.peek().start_byte < byte_limit {
             self.advance();
         }
+    }
+
+    fn parse_mcfunction_decl(&mut self) -> Result<McFunctionDecl, Box<Diagnostic>> {
+        let kw_tok = self.advance();
+        let path_tok = self.peek().clone();
+        self.check_not_forbidden(&path_tok)?;
+        let (path, path_span) = match path_tok.kind {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                (s, path_tok.span)
+            }
+            _ => {
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &path_tok.span,
+                    "Expected string literal path after 'mcfunction'.",
+                    "Example: mcfunction \"folder/my_func\" { ... }",
+                )));
+            }
+        };
+        let lbrace = self.expect_kind(&TokenKind::LBrace, "{")?;
+        let (raw_body, close_end_byte) =
+            scan_mcfunction_brace_block(self.source, lbrace.end_byte, &lbrace.span)?;
+        self.skip_tokens_before(close_end_byte);
+        Ok(McFunctionDecl {
+            path,
+            path_span,
+            raw_body,
+            span: kw_tok.span,
+        })
     }
 
     fn parse_event_handler(&mut self) -> Result<EventHandler, Box<Diagnostic>> {
@@ -714,12 +748,31 @@ impl<'a> Parser<'a> {
                     entity_type,
                 }
             }
+            TokenKind::Ident(w) if w == "script_event" => {
+                self.advance();
+                let event_id = self.parse_expr(false)?;
+                EventKind::ScriptEvent { event_id }
+            }
+            TokenKind::Ident(w) if w == "entity_trigger" => {
+                self.advance();
+                let event_id = self.parse_expr(false)?;
+                let entity_type = if self.is_ident_word("for") {
+                    self.advance();
+                    Some(self.parse_expr(false)?)
+                } else {
+                    None
+                };
+                EventKind::EntityTrigger {
+                    event_id,
+                    entity_type,
+                }
+            }
             _ => {
                 return Err(Box::new(Diagnostic::error(
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', or 'on consume ... by player'.",
+                    "Use 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on interact of ... by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on spawn of entity [type ...]', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on consume ... by player', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'.",
                 )));
             }
         };
@@ -911,6 +964,38 @@ impl<'a> Parser<'a> {
                 particle,
                 location,
                 dimension,
+                span: start,
+            });
+        }
+        if self.is_ident_word("command") {
+            let start = self.advance().span;
+            let target = if self.is_ident_word("on") {
+                self.advance();
+                Some(self.parse_postfix(false)?)
+            } else {
+                None
+            };
+            let command = self.parse_expr(true)?;
+            self.consume_optional_semi();
+            return Ok(Stmt::Command {
+                target,
+                command,
+                span: start,
+            });
+        }
+        if self.is_ident_word("run_fn") {
+            let start = self.advance().span;
+            let target = if self.is_ident_word("on") {
+                self.advance();
+                Some(self.parse_postfix(false)?)
+            } else {
+                None
+            };
+            let path = self.parse_expr(true)?;
+            self.consume_optional_semi();
+            return Ok(Stmt::RunFn {
+                target,
+                path,
                 span: start,
             });
         }
@@ -1709,6 +1794,65 @@ fn scan_js_brace_block(
             open_span.line
         ),
         "Close the 'unsafe' block with a matching '}'.",
+    )))
+}
+
+fn scan_mcfunction_brace_block(
+    source: &str,
+    body_start_byte: usize,
+    open_span: &Span,
+) -> Result<(String, usize), Box<Diagnostic>> {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = body_start_byte;
+    let mut depth = 1usize;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'"' {
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                if bytes[i] == b'\n' {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                let raw = source[body_start_byte..i].to_string();
+                return Ok((raw, i + 1));
+            }
+        }
+        i += 1;
+    }
+
+    Err(Box::new(Diagnostic::error(
+        DiagnosticCode::E012,
+        open_span,
+        format!(
+            "Opening brace '{{' on line {} has no matching closing brace '}}'.",
+            open_span.line
+        ),
+        "Close the 'mcfunction' block with a matching '}'.",
     )))
 }
 

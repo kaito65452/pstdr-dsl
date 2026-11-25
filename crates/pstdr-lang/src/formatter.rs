@@ -67,6 +67,7 @@ impl Formatter {
                 item,
                 TopLevelItem::FuncDecl(_)
                     | TopLevelItem::UnsafeFuncDecl(_)
+                    | TopLevelItem::McFunctionDecl(_)
                     | TopLevelItem::EventHandler(_)
                     | TopLevelItem::AfterTimer { .. }
                     | TopLevelItem::EveryTimer { .. }
@@ -80,6 +81,7 @@ impl Formatter {
                     prog.items[idx - 1],
                     TopLevelItem::FuncDecl(_)
                         | TopLevelItem::UnsafeFuncDecl(_)
+                        | TopLevelItem::McFunctionDecl(_)
                         | TopLevelItem::EventHandler(_)
                         | TopLevelItem::AfterTimer { .. }
                         | TopLevelItem::EveryTimer { .. }
@@ -134,6 +136,13 @@ impl Formatter {
                     rest.push(';');
                 }
                 self.line(&format!("unsafe {kw} {rest}"));
+            }
+            TopLevelItem::McFunctionDecl(mc) => {
+                self.line(&format!(
+                    "mcfunction \"{}\" {{{}}}",
+                    escape_str(&mc.path),
+                    mc.raw_body
+                ));
             }
             TopLevelItem::EventHandler(ev) => {
                 let header = match &ev.kind {
@@ -212,6 +221,22 @@ impl Formatter {
                     } => match entity_type {
                         Some(ty) => format!("on spawn of {entity_var} type {} {{", fmt_expr(ty)),
                         None => format!("on spawn of {entity_var} {{"),
+                    },
+                    EventKind::ScriptEvent { event_id } => {
+                        format!("on script_event {} {{", fmt_expr(event_id))
+                    }
+                    EventKind::EntityTrigger {
+                        event_id,
+                        entity_type,
+                    } => match entity_type {
+                        Some(ty) => {
+                            format!(
+                                "on entity_trigger {} for {} {{",
+                                fmt_expr(event_id),
+                                fmt_expr(ty)
+                            )
+                        }
+                        None => format!("on entity_trigger {} {{", fmt_expr(event_id)),
                     },
                 };
                 self.line(&header);
@@ -352,6 +377,20 @@ impl Formatter {
                     fmt_expr(particle),
                     fmt_expr(location)
                 )),
+            },
+            Stmt::Command {
+                target, command, ..
+            } => match target {
+                Some(t) => self.line(&format!(
+                    "command on {} {}",
+                    fmt_expr(t),
+                    fmt_expr(command)
+                )),
+                None => self.line(&format!("command {}", fmt_expr(command))),
+            },
+            Stmt::RunFn { target, path, .. } => match target {
+                Some(t) => self.line(&format!("run_fn on {} {}", fmt_expr(t), fmt_expr(path))),
+                None => self.line(&format!("run_fn {}", fmt_expr(path))),
             },
             Stmt::After { duration, body, .. } => {
                 self.line(&format!("after {} {{", duration.raw));
