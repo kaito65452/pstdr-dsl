@@ -11,7 +11,7 @@ pub mod validator;
 pub mod wiring;
 pub mod workspace;
 
-pub use assets::validate_workspace_assets;
+pub use assets::{validate_bedrock_schema_gates, validate_workspace_assets, validate_workspace_assets_with_index, WorkspaceAssetIndex};
 pub use ast::ApiProfile;
 pub use codegen::{emit_code, CodegenOptions, ComponentKind, EmitMode};
 pub use diagnostics::{
@@ -24,9 +24,10 @@ pub use partition::{partition_program, PartitionedProgram, PartitionedTarget, Ta
 pub use spec::BedrockSpec;
 pub use validator::{validate_program, ValidatedProgramInfo, ValidationContext};
 pub use workspace::{
-    audit_workspace, check_path, compile_source, convert_single_file, convert_workspace,
-    doctor_report, find_workspace_root, fmt_path, init_workspace, new_script, CompileResult,
-    WorkspaceConfig,
+    audit_workspace, audit_workspace_with_index, build_workspace, check_path,
+    check_path_with_index, compile_source, convert_single_file, convert_workspace,
+    convert_workspace_with_index, doctor_report, find_workspace_root, fmt_path, init_workspace,
+    new_script, CompileResult, WorkspaceConfig,
 };
 pub use wiring::{is_valid_v3_min_engine, resolve_min_engine_version, uses_custom_components_v2};
 
@@ -3606,5 +3607,773 @@ on place of block by player {
         assert_eq!(modern_manifest["header"]["uuid"].as_str(), Some(orig_uuid.as_str()));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── PHASE 1 HOTFIXES, SCALE OPTIMIZATION & AUDIT GATES ───────────────────
+
+    #[test]
+    fn phase_1_1_hp_property_rewrite_scoped_to_entities_only() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+unsafe get_item() {
+    return { hp: 42, location: "slot1", is_sneaking: false };
+}
+
+unsafe get_rows() {
+    return [{ hp: 10 }, { hp: 20 }];
+}
+
+func read_cfg(c) {
+    return c.hp
+}
+
+on hit target by player {
+    const p_hp = player.hp
+    const t_hp = target.hp
+    const c = get_item()
+    const obj_hp = c.hp
+    const obj_loc = c.location
+    const obj_sneak = c.is_sneaking
+    const fn_hp = read_cfg(c)
+    for p in world.players() {
+        const loop_p_hp = p.hp
+    }
+    for row in get_rows() {
+        const loop_row_hp = row.hp
+    }
+    send "{p_hp}:{t_hp}:{obj_hp}:{obj_loc}:{obj_sneak}:{fn_hp}" to player
+}
+"#;
+        // Note: `on hit target by player` requires Wave 4 optional `with`, so test with `with "minecraft:stick"` for Phase 1!
+        let src_phase1 = src.replace(
+            "on hit target by player {",
+            "on hit target with \"minecraft:stick\" by player {",
+        );
+        let res = compile_source(&src_phase1, "hp_scope.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "diags: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(
+            js.contains("const p_hp = player.getComponent(\"minecraft:health\")?.currentValue;"),
+            "player.hp must rewrite to health component:\n{js}"
+        );
+        assert!(
+            js.contains("const t_hp = target.getComponent(\"minecraft:health\")?.currentValue;"),
+            "target.hp must rewrite to health component:\n{js}"
+        );
+        assert!(
+            js.contains("const loop_p_hp = p.getComponent(\"minecraft:health\")?.currentValue;"),
+            "entity loop var p.hp must rewrite:\n{js}"
+        );
+        assert!(
+            js.contains("const obj_hp = c.hp;"),
+            "plain local object c.hp must NOT be rewritten:\n{js}"
+        );
+        assert!(
+            js.contains("const obj_loc = c.location;"),
+            "plain local object c.location must remain c.location:\n{js}"
+        );
+        assert!(
+            js.contains("const obj_sneak = c.is_sneaking;"),
+            "plain local object c.is_sneaking must NOT be rewritten:\n{js}"
+        );
+        assert!(
+            js.contains("return c.hp;"),
+            "plain function param c.hp must NOT be rewritten:\n{js}"
+        );
+        assert!(
+            js.contains("const loop_row_hp = row.hp;"),
+            "non-entity loop var row.hp must NOT be rewritten:\n{js}"
+        );
+    }
+
+    #[test]
+    fn phase_1_2_multi_bind_target_and_120_item_scale_test() {
+        let spec = BedrockSpec::bundled();
+
+        // 1. Multi-bind_target in a single .pstdr file (0 PSTDR-E008 errors)
+        let dir_multi = temp_dir("multi_bind_target");
+        fs::create_dir_all(dir_multi.join("BP/items")).unwrap();
+        fs::create_dir_all(dir_multi.join("src")).unwrap();
+        for slug in ["sword_a", "sword_b", "sword_c"] {
+            fs::write(
+                dir_multi.join(format!("BP/items/{slug}.json")),
+                format!(
+                    r#"{{"format_version":"1.21.90","minecraft:item":{{"description":{{"identifier":"bl:{slug}"}},"components":{{"minecraft:icon":"diamond"}}}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(
+            dir_multi.join("src/swords.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+bind_target("BP/items/sword_a.json")
+bind_target("BP/items/sword_b.json")
+bind_target("BP/items/sword_c.json")
+
+const EXTRA_ITEM = "bl:sword_c"
+
+on hit target with "bl:sword_a" by player {
+    damage target by 4
+}
+
+on right click with "bl:sword_b" by player {
+    player.actionbar("Sword B")
+}
+
+on join of player {
+    send "Loaded {EXTRA_ITEM}" to player
+}
+"#,
+        )
+        .unwrap();
+
+        let multi_diags = build_workspace(&dir_multi, &spec).unwrap();
+        assert!(
+            !has_errors(&multi_diags),
+            "Multi-bind_target file must pass build_workspace with 0 errors: {multi_diags:?}"
+        );
+        let _ = fs::remove_dir_all(&dir_multi);
+
+        // 2. Synthetic 120-item scale test verifying fast check + convert + audit + build
+        let dir_scale = temp_dir("scale_120_items");
+        init_workspace(&dir_scale, "ScalePack", &spec).unwrap();
+        for idx in 0..120 {
+            let slug = format!("relic_{idx:03}");
+            fs::write(
+                dir_scale.join(format!("BP/items/{slug}.json")),
+                format!(
+                    r#"{{"format_version":"1.21.90","minecraft:item":{{"description":{{"identifier":"scale:{slug}"}},"components":{{"minecraft:icon":"diamond"}}}}}}"#
+                ),
+            )
+            .unwrap();
+            fs::write(
+                dir_scale.join(format!("src/{slug}.pstdr")),
+                format!(
+                    "@addon(target = \"26.60\", api = \"2.11.0\")\nbind_target(\"BP/items/{slug}.json\")\n\non right click with \"scale:{slug}\" by player {{\n    player.actionbar(\"{slug}\")\n}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let t0 = std::time::Instant::now();
+        let build_diags = build_workspace(&dir_scale, &spec).unwrap();
+        let elapsed = t0.elapsed();
+        assert!(
+            !has_errors(&build_diags),
+            "120-item scale build_workspace must have 0 errors: {build_diags:?}"
+        );
+        assert!(
+            elapsed.as_secs_f64() < 10.0,
+            "120-item build_workspace should finish rapidly with WorkspaceAssetIndex, took {:.2}s",
+            elapsed.as_secs_f64()
+        );
+        let _ = fs::remove_dir_all(&dir_scale);
+    }
+
+    #[test]
+    fn phase_1_3_lexer_digit_prefixed_unquoted_namespaced_ids() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"
+@addon(target = "26.60", api = "2.11.0")
+
+on right click with bl:1pctgluttony by player {
+    player.actionbar("Gluttony!")
+}
+
+on hit target with fw:3d_blade by player {
+    damage target by 6
+}
+
+on consume "bl:1pctgluttony" by player {
+    send "Consumed!" to player
+}
+"#;
+        let res = compile_source(src, "ns_digit.pstdr", None, &spec, true, true, vec![]);
+        assert!(
+            !has_errors(&res.diagnostics),
+            "Digit-prefixed unquoted namespaced IDs must compile without E016: {:?}",
+            res.diagnostics
+        );
+        let js = res.js.unwrap();
+        assert!(js.contains("\"bl:1pctgluttony\""), "js:\n{js}");
+        assert!(js.contains("\"fw:3d_blade\""), "js:\n{js}");
+
+        // Invalid duration literal `20t` must still fail with PSTDR-E016
+        let bad = "after 20t {\n}\n";
+        let (_p, bad_diags) = parse_source(bad, "bad_dur.pstdr");
+        assert!(
+            bad_diags.iter().any(|d| d.code == "PSTDR-E016"),
+            "20t must still emit PSTDR-E016: {bad_diags:?}"
+        );
+    }
+
+    #[test]
+    fn phase_1_4_and_1_6_no_empty_component_stubs_and_deduplicated_registration() {
+        let spec = BedrockSpec::bundled();
+
+        // 1. Single item with both `on consume` and `on right click` -> merged into ONE component,
+        //    ZERO empty `{}` stubs, registerCustomComponent("pstdr:elixir", ...) appears ONCE across all JS files.
+        let dir = temp_dir("dedup_item_comp");
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("BP/items/elixir.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"bl:elixir"},"components":{"minecraft:icon":"potion"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/elixir.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/elixir.json")
+
+on right click with "bl:elixir" by player {
+    player.actionbar("Sip!")
+}
+
+on consume "bl:elixir" by player {
+    apply speed 2 to player for 5s
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "diags: {diags:?}");
+
+        let mut total_reg_count = 0usize;
+        let mut all_js = String::new();
+        let mut js_files = Vec::new();
+        fn walk_js(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in fs::read_dir(d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk_js(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("js") {
+                    out.push(p);
+                }
+            }
+        }
+        walk_js(&dir.join("BP/scripts/generated"), &mut js_files);
+        for f in js_files {
+            let content = fs::read_to_string(&f).unwrap();
+            total_reg_count += content.matches("registerCustomComponent(\"pstdr:elixir\"").count();
+            assert!(
+                !content.contains("registerCustomComponent(\"pstdr:elixir\", {})"),
+                "Must never emit empty {{}} stub in {}:\n{content}",
+                f.display()
+            );
+            all_js.push_str(&content);
+        }
+        assert_eq!(
+            total_reg_count, 1,
+            "registerCustomComponent(\"pstdr:elixir\") must appear exactly once across all generated JS:\n{all_js}"
+        );
+        assert!(all_js.contains("onUse(ev)"), "Missing onUse:\n{all_js}");
+        assert!(all_js.contains("onConsume(ev)"), "Missing onConsume:\n{all_js}");
+        assert!(
+            !all_js.contains("world.afterEvents.itemUse"),
+            "Bound item on right click must use Custom Component onUse instead of world.afterEvents.itemUse:\n{all_js}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        // 2. Multi-file workspace targeting the same item -> merged into _registry.js + items/elixir.js ONCE
+        let dir2 = temp_dir("dedup_multi_file");
+        fs::create_dir_all(dir2.join("BP/items")).unwrap();
+        fs::create_dir_all(dir2.join("src")).unwrap();
+        fs::write(
+            dir2.join("BP/items/elixir.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"bl:elixir"},"components":{"minecraft:icon":"potion"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir2.join("src/elixir_use.pstdr"),
+            "@addon(target = \"26.60\", api = \"2.11.0\")\nbind_target(\"BP/items/elixir.json\")\non right click with \"bl:elixir\" by player {\n    player.actionbar(\"Use\")\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir2.join("src/elixir_consume.pstdr"),
+            "@addon(target = \"26.60\", api = \"2.11.0\")\non consume \"bl:elixir\" by player {\n    apply regeneration 1 to player for 3s\n}\n",
+        )
+        .unwrap();
+        let diags2 = convert_workspace(&dir2, &spec).unwrap();
+        assert!(!has_errors(&diags2), "diags2: {diags2:?}");
+        let mut reg_count_2 = 0usize;
+        let mut js_files2 = Vec::new();
+        walk_js(&dir2.join("BP/scripts/generated"), &mut js_files2);
+        let mut all_js2 = String::new();
+        for f in js_files2 {
+            let content = fs::read_to_string(&f).unwrap();
+            reg_count_2 += content.matches("registerCustomComponent(\"pstdr:elixir\"").count();
+            all_js2.push_str(&content);
+        }
+        assert_eq!(reg_count_2, 1, "Multi-file must register pstdr:elixir once:\n{all_js2}");
+        let item_js2 = fs::read_to_string(dir2.join("BP/scripts/generated/items/elixir.js")).unwrap();
+        assert!(item_js2.contains("onUse(ev)") && item_js2.contains("onConsume(ev)"), "item_js2:\n{item_js2}");
+        let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn phase_1_5_shared_module_imports_world_and_system() {
+        let dir = temp_dir("shared_unsafe_imports");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("BP/items/blade.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"bl:blade"},"components":{"minecraft:icon":"diamond"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/combat.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+unsafe bl_register_generic_hit() {
+    world.afterEvents.entityHitEntity.subscribe((ev) => {
+        system.run(() => {
+            ev.hitEntity?.applyDamage(2, { cause: EntityDamageCause.magic });
+        });
+    });
+}
+
+on hit target with "bl:blade" by player {
+    damage target by 5
+}
+
+on join of player {
+    bl_register_generic_hit()
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "diags: {diags:?}");
+
+        let shared_js =
+            fs::read_to_string(dir.join("BP/scripts/generated/_shared/combat.shared.js")).unwrap();
+        assert!(
+            shared_js.contains("import { world, system, EntityDamageCause } from \"@minecraft/server\";"),
+            "_shared module must emit ESM imports for world, system, EntityDamageCause:\n{shared_js}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phase_1_7_audit_bedrock_26_60_schema_gates() {
+        let dir = temp_dir("audit_26_60_gates");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "SchemaGatePack", &spec).unwrap();
+        fs::create_dir_all(dir.join("BP/recipes")).unwrap();
+        fs::create_dir_all(dir.join("RP/attachables")).unwrap();
+
+        // 1. Numeric-only item ID suffix (`bl:1`) + invalid enchantable slot (`armor_chest`)
+        fs::write(
+            dir.join("BP/items/bad_item.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "bl:1" },
+    "components": {
+      "minecraft:icon": "diamond",
+      "minecraft:enchantable": { "slot": "armor_chest", "value": 10 }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        // 2. Recipe with format_version >= 1.20.10 missing `unlock`
+        fs::write(
+            dir.join("BP/recipes/bad_recipe.json"),
+            r#"{
+  "format_version": "1.20.10",
+  "minecraft:recipe_shaped": {
+    "description": { "identifier": "bl:bad_recipe" },
+    "pattern": ["X"],
+    "key": { "X": { "item": "minecraft:stick" } },
+    "result": { "item": "minecraft:diamond" }
+  }
+}"#,
+        )
+        .unwrap();
+
+        // 3. Attachable using non-existent `controller.render.armor.chestplate`
+        fs::write(
+            dir.join("RP/attachables/bad_armor.json"),
+            r#"{
+  "format_version": "1.10.0",
+  "minecraft:attachable": {
+    "description": {
+      "identifier": "bl:bad_chestplate",
+      "render_controllers": ["controller.render.armor.chestplate"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let diags = audit_workspace(&dir, &spec).unwrap();
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("numeric-only suffix")),
+            "Must reject numeric-only item ID suffix 'bl:1': {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("armor_chest") && d.solution.contains("armor_torso")),
+            "Must reject 'armor_chest' and suggest 'armor_torso': {diags:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("missing required 'unlock'")),
+            "Must reject recipe missing unlock on 1.20.10+: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("controller.render.armor.chestplate") && d.solution.contains("controller.render.armor")),
+            "Must reject controller.render.armor.chestplate and suggest controller.render.armor: {diags:?}"
+        );
+
+        // Fix all 4 issues -> audit_workspace passes with 0 errors
+        fs::write(
+            dir.join("BP/items/bad_item.json"),
+            r#"{
+  "format_version": "1.21.90",
+  "minecraft:item": {
+    "description": { "identifier": "bl:item_1" },
+    "components": {
+      "minecraft:icon": "diamond",
+      "minecraft:enchantable": { "slot": "armor_torso", "value": 10 }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("BP/recipes/bad_recipe.json"),
+            r#"{
+  "format_version": "1.20.10",
+  "minecraft:recipe_shaped": {
+    "description": { "identifier": "bl:bad_recipe" },
+    "pattern": ["X"],
+    "key": { "X": { "item": "minecraft:stick" } },
+    "unlock": [{ "item": "minecraft:stick" }],
+    "result": { "item": "minecraft:diamond" }
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("RP/attachables/bad_armor.json"),
+            r#"{
+  "format_version": "1.10.0",
+  "minecraft:attachable": {
+    "description": {
+      "identifier": "bl:bad_chestplate",
+      "render_controllers": ["controller.render.armor"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let diags_ok = audit_workspace(&dir, &spec).unwrap();
+        assert!(
+            !has_errors(&diags_ok),
+            "Fixed schema gates must pass audit_workspace: {diags_ok:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_4a_modules_tables_and_circular_import_guards() {
+        let dir = temp_dir("wave4_modules");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "Wave4Modules", &spec).unwrap();
+        fs::create_dir_all(dir.join("src/lib")).unwrap();
+        fs::create_dir_all(dir.join("src/items")).unwrap();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::write(
+            dir.join("BP/items/ember_edge.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"bl:ember_edge"},"components":{"minecraft:icon":"diamond_sword"}}}"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/lib/combat.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+export const FIRE_SFX = "mob.blaze.shoot"
+export table WEAPON_CFG = {
+    "bl:ember_edge": { tier: 2, dmg: 9 },
+    2: { tier: 2, dmg: 12 }
+}
+export state charges[player] = 3
+
+export func strike(caster: Player, foe: Entity, bonus) {
+    if foe.hp > 0 {
+        damage foe by bonus cause fire source caster
+        heal caster by 2
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("src/items/ember_edge.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+import { FIRE_SFX, WEAPON_CFG, charges, strike } from "../lib/combat"
+bind_target("BP/items/ember_edge.json")
+
+on hit target with "bl:ember_edge" by player {
+    const cfg = WEAPON_CFG["bl:ember_edge"]
+    if charges[player] > 0 {
+        charges[player] -= 1
+        strike(player, target, cfg.dmg)
+        play sound FIRE_SFX at target
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = build_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "Wave 4A build errors: {diags:?}");
+
+        let combat_js = fs::read_to_string(dir.join("BP/scripts/generated/lib/combat.js")).unwrap();
+        assert!(combat_js.contains("export const FIRE_SFX = \"mob.blaze.shoot\";"), "{combat_js}");
+        assert!(combat_js.contains("export const WEAPON_CFG = {"), "{combat_js}");
+        assert!(combat_js.contains("export function __get_charges(owner)"), "{combat_js}");
+        assert!(combat_js.contains("export function __set_charges(owner, value)"), "{combat_js}");
+        assert!(combat_js.contains("export function strike(caster, foe, bonus)"), "{combat_js}");
+        assert!(combat_js.contains("foe.getComponent(\"minecraft:health\")?.currentValue"), "{combat_js}");
+
+        let item_js = fs::read_to_string(dir.join("BP/scripts/generated/items/ember_edge.js")).unwrap();
+        assert!(
+            item_js.contains("import { FIRE_SFX, WEAPON_CFG, __get_charges, __set_charges, strike } from \"../lib/combat.js\";"),
+            "item_js:\n{item_js}"
+        );
+        assert!(item_js.contains("__set_charges(player, __get_charges(player) - (1));"), "{item_js}");
+        assert!(!item_js.contains("cfg.getComponent"), "Local table lookup cfg.dmg unaffected:\n{item_js}");
+        let _ = fs::remove_dir_all(&dir);
+
+        // Negative: circular imports & unexported symbol errors
+        let bad_dir = temp_dir("wave4_circular");
+        fs::create_dir_all(bad_dir.join("src")).unwrap();
+        fs::write(
+            bad_dir.join("src/a.pstdr"),
+            "import { b_val } from \"./b\"\nexport const a_val = 1\n",
+        )
+        .unwrap();
+        fs::write(
+            bad_dir.join("src/b.pstdr"),
+            "import { a_val } from \"./a\"\nexport const b_val = 2\nconst hidden = 3\n",
+        )
+        .unwrap();
+        fs::write(
+            bad_dir.join("src/c.pstdr"),
+            "import { hidden } from \"./b\"\nimport { nope } from \"./missing\"\n",
+        )
+        .unwrap();
+        let bad_diags = check_path(&bad_dir.join("src"), Some(&bad_dir), &spec).unwrap();
+        assert!(
+            bad_diags.iter().any(|d| d.code == "PSTDR-E016" && d.message.contains("Circular import")),
+            "Must reject circular import: {bad_diags:?}"
+        );
+        assert!(
+            bad_diags.iter().any(|d| d.code == "PSTDR-E016" && d.message.contains("not exported")),
+            "Must reject unexported symbol: {bad_diags:?}"
+        );
+        assert!(
+            bad_diags.iter().any(|d| d.code == "PSTDR-E007" && d.message.contains("not found")),
+            "Must reject missing import file: {bad_diags:?}"
+        );
+        let _ = fs::remove_dir_all(&bad_dir);
+    }
+
+    #[test]
+    fn wave_4b_wildcard_generic_triggers_and_sneak_filters() {
+        let dir = temp_dir("wave4_wildcard_sneak");
+        let spec = BedrockSpec::bundled();
+        fs::create_dir_all(dir.join("BP/items")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("BP/items/ember_sword.json"),
+            r#"{"format_version":"1.21.90","minecraft:item":{"description":{"identifier":"bl:ember_sword"},"components":{"minecraft:icon":"diamond_sword"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/generic.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+bind_target("BP/items/ember_sword.json")
+
+on right click by player when sneaking {
+    player.actionbar("Generic Sneak Use!")
+}
+
+on hit target with "bl:*" by player when not sneaking {
+    damage target by 4 cause magic source player
+}
+
+on consume by player {
+    heal player by 2
+}
+
+on item_release by player when sneaking {
+    player.actionbar("Released {use_duration}")
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = convert_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "Wave 4B diags: {diags:?}");
+
+        let js = fs::read_to_string(dir.join("BP/scripts/generated/generic.js")).unwrap();
+        assert!(js.contains("world.afterEvents.itemUse.subscribe"), "{js}");
+        assert!(js.contains("if (!player?.isSneaking) return;"), "{js}");
+        assert!(js.contains("if (!__held?.typeId?.startsWith(\"bl:\")) return;"), "{js}");
+        assert!(js.contains("if (player?.isSneaking) return;"), "{js}");
+        assert!(js.contains("world.afterEvents.itemCompleteUse.subscribe"), "{js}");
+        assert!(js.contains("world.afterEvents.itemReleaseUse.subscribe"), "{js}");
+        assert!(!js.contains("registerCustomComponent"), "Wildcard/generic must not emit empty custom component:\n{js}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_4c_armor_offhand_heal_damage_effect_and_audio() {
+        let dir = temp_dir("wave4_combat_audio");
+        let spec = BedrockSpec::bundled();
+        init_workspace(&dir, "CombatAudio", &spec).unwrap();
+        fs::create_dir_all(dir.join("RP/sounds")).unwrap();
+        fs::write(
+            dir.join("RP/sounds/sound_definitions.json"),
+            r#"{"format_version":"1.20.20","sound_definitions":{"bl:blade_slash":{"sounds":["sounds/bl/slash"]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/skills.pstdr"),
+            r#"@addon(target = "26.60", api = "2.11.0")
+
+table LOCAL_META = { armor: { helmet: "fake" }, offhand: "plain" }
+
+on hit target by player {
+    if player.armor.helmet == "bl:crown" && player.armor.chestplate == "bl:plate" {
+        if player.armor.leggings != "" && player.armor.boots != "" && player.offhand == "minecraft:shield" {
+            const off_id = player.offhand.id
+            const eq = player.equipment("Head")
+            const bogus = LOCAL_META.armor.helmet
+            heal player by 5
+            damage target by 8 cause magic source player
+            const eff = "strength"
+            apply effect(eff, 2) to player for (4s)
+            play custom_sound "bl:blade_slash" at target volume 0.9 pitch 1.15
+            play sound "random.anvil_land" at player
+            player.actionbar("{off_id}:{eq?.id}:{bogus}")
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let diags = build_workspace(&dir, &spec).unwrap();
+        assert!(!has_errors(&diags), "Wave 4C build errors: {diags:?}");
+        assert!(
+            !diags.iter().any(|d| d.message.contains("sound_definitions.json")),
+            "Defined custom sound must emit 0 warnings: {diags:?}"
+        );
+
+        let js = fs::read_to_string(dir.join("BP/scripts/generated/skills.js")).unwrap();
+        assert!(js.contains("EntityDamageCause"), "{js}");
+        assert!(js.contains("EquipmentSlot"), "{js}");
+        assert!(js.contains("getEquipment(EquipmentSlot.Head)?.typeId ?? \"\""), "{js}");
+        assert!(js.contains("getEquipment(EquipmentSlot.Chest)?.typeId ?? \"\""), "{js}");
+        assert!(js.contains("getEquipment(EquipmentSlot.Legs)?.typeId ?? \"\""), "{js}");
+        assert!(js.contains("getEquipment(EquipmentSlot.Feet)?.typeId ?? \"\""), "{js}");
+        assert!(js.contains("getEquipment(EquipmentSlot.Offhand)?.typeId ?? \"\""), "{js}");
+        assert!(js.contains("const bogus = LOCAL_META.armor.helmet;"), "Plain table armor property must stay untouched:\n{js}");
+        assert!(js.contains("__pstdr_heal(player, 5);"), "{js}");
+        assert!(js.contains("target.applyDamage(8, { cause: EntityDamageCause.magic, damagingEntity: player });"), "{js}");
+        assert!(js.contains("player.addEffect(eff, Math.max(1, Math.round(80)), { amplifier: 1 });"), "{js}");
+        assert!(js.contains("__pstdr_play_sound(target, \"bl:blade_slash\", { volume: 0.9, pitch: 1.15 });"), "{js}");
+        assert!(js.contains("__pstdr_play_sound(player, \"random.anvil_land\");"), "{js}");
+
+        // Unknown custom sound triggers Warning (not Error) when RP/sounds/sound_definitions.json exists
+        fs::write(
+            dir.join("src/skills.pstdr"),
+            "@addon(target = \"26.60\", api = \"2.11.0\")\non right click by player {\n    play custom_sound \"bl:missing_sfx\" at player\n}\n",
+        )
+        .unwrap();
+        let warn_diags = check_path(&dir.join("src"), Some(&dir), &spec).unwrap();
+        assert!(!has_errors(&warn_diags), "Missing custom sound is warning, not error: {warn_diags:?}");
+        assert!(
+            warn_diags.iter().any(|d| d.severity == Severity::Warning && d.message.contains("bl:missing_sfx")),
+            "Must warn on missing custom sound in sound_definitions.json: {warn_diags:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_4d_spatial_launch_dash_timers_and_formatter() {
+        let spec = BedrockSpec::bundled();
+        let src = r#"@addon(target = "26.60", api = "2.11.0")
+
+export table SKILL_CFG = { speed: 2.5 }
+
+on right click by player {
+    for hit in raycast entities from player range 24 pierce 3 step 0.5 {
+        damage hit by 6 cause lightning source player
+    }
+    for foe in entities in cone(player, radius: 8, angle: 60) {
+        if foe within 6b of player {
+            damage foe by 4 cause entity_attack
+        }
+    }
+    for ally in entities within 10b of player {
+        heal ally by 2
+    }
+    launch "minecraft:arrow" from player speed SKILL_CFG.speed
+    dash player forward 1.8 up 0.4
+    const step = 2
+    after (step * 300ms) {
+        heal player by 1
+    }
+    timeline {
+        0s: {
+            player.actionbar("Phase 1")
+        }
+        (step * 300ms): {
+            player.actionbar("Phase 2")
+        }
+    }
+}
+"#;
+        let res = compile_source(src, "spatial_dash.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&res.diagnostics), "Wave 4D errors: {:?}", res.diagnostics);
+        let js = res.js.unwrap();
+        assert!(js.contains("__pstdr_raycast_entities(player, 24, 3)"), "{js}");
+        assert!(js.contains("hit.applyDamage(6, { cause: EntityDamageCause.lightning, damagingEntity: player });"), "{js}");
+        assert!(js.contains("__pstdr_cone_entities(player, 8, 60)"), "{js}");
+        assert!(js.contains("__pstdr_within(foe, player, 6)"), "{js}");
+        assert!(js.contains("__pstdr_entities_within(player, 10)"), "{js}");
+        assert!(js.contains("__pstdr_launch_projectile(player, \"minecraft:arrow\", SKILL_CFG.speed);"), "{js}");
+        assert!(js.contains("__pstdr_dash(player, 1.8, 0.4);"), "{js}");
+        assert!(js.contains("target.applyKnockback({ x: nx * forward, z: nz * forward }, up);"), "2.x dash must use VectorXZ applyKnockback:\n{js}");
+        assert!(js.contains("system.runTimeout(() => {"), "{js}");
+        assert!(js.contains("Math.max(0, Math.round(step * 6))"), "{js}");
+
+        // Formatter idempotency across all Wave 4 syntax
+        let fmt1 = format_source(src, "spatial_dash.pstdr").expect("format1");
+        let fmt2 = format_source(&fmt1, "spatial_dash.pstdr").expect("format2");
+        assert_eq!(fmt1, fmt2, "Wave 4 formatter must be strictly idempotent:\n{fmt1}");
+
+        // Legacy 1.x dash uses 4-arg applyKnockback(nx, nz, forward, up)
+        let legacy_src = "@addon(target = \"1.21.50\", api = \"1.16.0\")\non right click by player {\n    dash player forward 1.5 up 0.3\n}\n";
+        let legacy_res = compile_source(legacy_src, "legacy_dash.pstdr", None, &spec, true, true, vec![]);
+        assert!(!has_errors(&legacy_res.diagnostics), "Legacy dash errors: {:?}", legacy_res.diagnostics);
+        let legacy_js = legacy_res.js.unwrap();
+        assert!(legacy_js.contains("target.applyKnockback(nx, nz, forward, up);"), "Legacy 1.x dash:\n{legacy_js}");
     }
 }

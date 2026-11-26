@@ -65,8 +65,31 @@ impl<'a> Parser<'a> {
         matches!(&self.peek().kind, TokenKind::Ident(s) if s == word)
     }
 
+    fn peek_n(&self, n: usize) -> &Token {
+        self.tokens.get(self.pos + n).unwrap_or_else(|| self.tokens.last().unwrap())
+    }
+
     fn peek_next_ident_word(&self, word: &str) -> bool {
         matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(s)) if s == word)
+    }
+
+    fn is_n_ident_word(&self, n: usize, word: &str) -> bool {
+        matches!(self.tokens.get(self.pos + n).map(|t| &t.kind), Some(TokenKind::Ident(s)) if s == word)
+    }
+
+    fn peek_next_starts_expr_or_ident(&self) -> bool {
+        !matches!(
+            self.peek_n(1).kind,
+            TokenKind::LParen
+                | TokenKind::Eq
+                | TokenKind::PlusEq
+                | TokenKind::MinusEq
+                | TokenKind::StarEq
+                | TokenKind::SlashEq
+                | TokenKind::Dot
+                | TokenKind::QuestionDot
+                | TokenKind::LBracket
+        )
     }
 
     fn check_not_forbidden(&self, tok: &Token) -> Result<(), Box<Diagnostic>> {
@@ -179,6 +202,9 @@ impl<'a> Parser<'a> {
                 matches!(
                     s.as_str(),
                     "bind_target"
+                        | "import"
+                        | "export"
+                        | "table"
                         | "const"
                         | "mut"
                         | "state"
@@ -323,8 +349,8 @@ impl<'a> Parser<'a> {
         // Default versions come from the centralized bundled spec.
         // Never hardcoded; loaded from the embedded spec JSON at compile time.
         let (default_target, default_api) = {
-            let s = crate::spec::BedrockSpec::bundled();
-            (s.bedrock_version, s.script_api_version)
+            let s = crate::spec::BedrockSpec::bundled_ref();
+            (s.bedrock_version.clone(), s.script_api_version.clone())
         };
         let mut target = default_target;
         let mut api = default_api;
@@ -401,17 +427,47 @@ impl<'a> Parser<'a> {
         let tok = self.peek().clone();
         self.check_not_forbidden(&tok)?;
 
+        if self.is_ident_word("import") {
+            return Ok(TopLevelItem::Import(self.parse_import_decl()?));
+        }
+
+        let exported = if self.is_ident_word("export") {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        if self.is_ident_word("table") {
+            return Ok(TopLevelItem::TableDecl(self.parse_table_decl(exported)?));
+        }
         if self.is_ident_word("const") {
-            return Ok(TopLevelItem::ConstDecl(self.parse_var_decl(true)?));
+            return Ok(TopLevelItem::ConstDecl(self.parse_var_decl(true, exported)?));
         }
         if self.is_ident_word("mut") {
-            return Ok(TopLevelItem::MutDecl(self.parse_var_decl(false)?));
+            if exported {
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &self.peek().span,
+                    "'export mut' is not allowed across modules in safe mode.",
+                    "Use 'export state name[global] = ...' for mutable shared state, or 'export const' / 'export table' for immutable bindings.",
+                )));
+            }
+            return Ok(TopLevelItem::MutDecl(self.parse_var_decl(false, false)?));
         }
         if self.is_ident_word("state") {
-            return Ok(TopLevelItem::StateDecl(self.parse_state_decl()?));
+            return Ok(TopLevelItem::StateDecl(self.parse_state_decl(exported)?));
         }
         if self.is_ident_word("func") {
-            return Ok(TopLevelItem::FuncDecl(self.parse_func_decl()?));
+            return Ok(TopLevelItem::FuncDecl(self.parse_func_decl(exported)?));
+        }
+        if exported {
+            return Err(Box::new(Diagnostic::error(
+                DiagnosticCode::E016,
+                &self.peek().span,
+                "Expected 'func', 'table', 'const', or 'state' after 'export'.",
+                "Example: export func cast_spell(player) { ... } or export table CONFIG = { ... }",
+            )));
         }
         if self.is_ident_word("unsafe") {
             return self.parse_unsafe_top_level();
@@ -447,11 +503,65 @@ impl<'a> Parser<'a> {
             DiagnosticCode::E016,
             &tok.span,
             "Unknown top-level declaration.",
-            "Use 'const', 'mut', 'state', 'func', 'unsafe', 'mcfunction', 'on', 'after', or 'every'.",
+            "Use 'import', 'export', 'table', 'const', 'mut', 'state', 'func', 'unsafe', 'mcfunction', 'on', 'after', or 'every'.",
         )))
     }
 
-    fn parse_var_decl(&mut self, is_const: bool) -> Result<VarDecl, Box<Diagnostic>> {
+    fn parse_import_decl(&mut self) -> Result<ImportDecl, Box<Diagnostic>> {
+        let start = self.advance().span; // consume "import"
+        self.expect_kind(&TokenKind::LBrace, "{")?;
+        let mut symbols = Vec::new();
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            let (name, span) = self.expect_user_ident("imported symbol")?;
+            symbols.push(ImportSymbol { name, span });
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "}")?;
+        self.expect_word("from")?;
+        let path_tok = self.peek().clone();
+        let path = match path_tok.kind {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                s
+            }
+            _ => {
+                return Err(Box::new(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &path_tok.span,
+                    "Expected module path string literal after 'from'.",
+                    "Example: import { calc_dmg, TIERS } from \"./lib/combat\"",
+                )));
+            }
+        };
+        self.consume_optional_semi();
+        Ok(ImportDecl {
+            symbols,
+            path,
+            path_span: path_tok.span,
+            span: start,
+        })
+    }
+
+    fn parse_table_decl(&mut self, exported: bool) -> Result<TableDecl, Box<Diagnostic>> {
+        let kw = self.advance();
+        let (name, name_span) = self.expect_user_ident("table name")?;
+        self.expect_kind(&TokenKind::Eq, "=")?;
+        let value = self.parse_expr(true)?;
+        self.consume_optional_semi();
+        Ok(TableDecl {
+            name,
+            name_span,
+            value,
+            exported,
+            span: kw.span,
+        })
+    }
+
+    fn parse_var_decl(&mut self, is_const: bool, exported: bool) -> Result<VarDecl, Box<Diagnostic>> {
         let kw = self.advance();
         let (name, name_span) =
             self.expect_user_ident(if is_const { "constant" } else { "mut variable" })?;
@@ -462,11 +572,12 @@ impl<'a> Parser<'a> {
             name,
             name_span,
             value,
+            exported,
             span: kw.span,
         })
     }
 
-    fn parse_state_decl(&mut self) -> Result<StateDecl, Box<Diagnostic>> {
+    fn parse_state_decl(&mut self, exported: bool) -> Result<StateDecl, Box<Diagnostic>> {
         let kw = self.advance();
         let (name, _) = self.expect_user_ident("state")?;
         self.expect_kind(&TokenKind::LBracket, "[")?;
@@ -479,17 +590,39 @@ impl<'a> Parser<'a> {
             name,
             owner_hint,
             default_value,
+            exported,
             span: kw.span,
         })
     }
 
-    fn parse_func_decl(&mut self) -> Result<FuncDecl, Box<Diagnostic>> {
+    fn parse_func_decl(&mut self, exported: bool) -> Result<FuncDecl, Box<Diagnostic>> {
         let kw = self.advance();
         let (name, _) = self.expect_user_ident("function name")?;
         self.expect_kind(&TokenKind::LParen, "(")?;
         let mut params = Vec::new();
+        let mut entity_params = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
-            params.push(self.expect_user_ident("function parameter")?);
+            let param = self.expect_user_ident("function parameter")?;
+            let is_entity_hint = if matches!(self.peek().kind, TokenKind::Colon) {
+                self.advance();
+                let (ty_name, ty_span) = self.expect_ident_any("parameter type hint")?;
+                match ty_name.as_str() {
+                    "Entity" | "entity" | "Player" | "player" | "Actor" | "actor" => true,
+                    "number" | "string" | "bool" | "boolean" | "table" | "any" => false,
+                    _ => {
+                        return Err(Box::new(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &ty_span,
+                            format!("Unknown parameter type annotation '{ty_name}'."),
+                            "Supported parameter hints are 'Entity', 'Player', 'number', 'string', 'bool', or omit the ': Type' annotation.",
+                        )));
+                    }
+                }
+            } else {
+                false
+            };
+            params.push(param);
+            entity_params.push(is_entity_hint);
             if matches!(self.peek().kind, TokenKind::Comma) {
                 self.advance();
             } else {
@@ -501,7 +634,9 @@ impl<'a> Parser<'a> {
         Ok(FuncDecl {
             name,
             params,
+            entity_params,
             body,
+            exported,
             span: kw.span,
         })
     }
@@ -620,8 +755,17 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(w) if w == "right" => {
                 self.advance();
                 self.expect_word("click")?;
-                self.expect_word("with")?;
-                let item = self.parse_expr(false)?;
+                let item = if self.is_ident_word("with") {
+                    self.advance();
+                    if self.is_ident_word("item") && self.peek_next_ident_word("by") {
+                        self.advance();
+                        None
+                    } else {
+                        Some(self.parse_expr(false)?)
+                    }
+                } else {
+                    None
+                };
                 self.expect_word("by")?;
                 let (actor_var, _) = self.expect_user_ident("event actor")?;
                 EventKind::RightClick { item, actor_var }
@@ -629,8 +773,17 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(w) if w == "hit" => {
                 self.advance();
                 let (target_var, _) = self.expect_user_ident("hit event target")?;
-                self.expect_word("with")?;
-                let item = self.parse_expr(false)?;
+                let item = if self.is_ident_word("with") {
+                    self.advance();
+                    if self.is_ident_word("item") && self.peek_next_ident_word("by") {
+                        self.advance();
+                        None
+                    } else {
+                        Some(self.parse_expr(false)?)
+                    }
+                } else {
+                    None
+                };
                 self.expect_word("by")?;
                 let (actor_var, _) = self.expect_user_ident("hit event attacker")?;
                 EventKind::HitTarget {
@@ -702,7 +855,19 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(w) if w == "consume" => {
                 self.advance();
-                let item = self.parse_expr(false)?;
+                let item = if self.is_ident_word("by") {
+                    None
+                } else {
+                    if self.is_ident_word("with") {
+                        self.advance();
+                    }
+                    if self.is_ident_word("item") && self.peek_next_ident_word("by") {
+                        self.advance();
+                        None
+                    } else {
+                        Some(self.parse_expr(false)?)
+                    }
+                };
                 self.expect_word("by")?;
                 let (actor_var, _) = self.expect_user_ident("consume event actor")?;
                 EventKind::Consume { item, actor_var }
@@ -929,8 +1094,17 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(w) if w == "item_release" => {
                 self.advance();
-                self.expect_word("with")?;
-                let item = self.parse_expr(false)?;
+                let item = if self.is_ident_word("with") {
+                    self.advance();
+                    if self.is_ident_word("item") && self.peek_next_ident_word("by") {
+                        self.advance();
+                        None
+                    } else {
+                        Some(self.parse_expr(false)?)
+                    }
+                } else {
+                    None
+                };
                 self.expect_word("by")?;
                 let (actor_var, _) = self.expect_user_ident("item_release event player")?;
                 EventKind::ItemRelease { item, actor_var }
@@ -956,14 +1130,29 @@ impl<'a> Parser<'a> {
                     DiagnosticCode::E016,
                     &kind_tok.span,
                     "Unknown 'on' event type.",
-                    "Use 'on cmd \"ns:name\" description \"...\" [permission ...] [(params)] [by player]', 'on right click with ... by player', 'on hit target with ... by player', 'on break of ... by player', 'on place of block by player', 'on interact of ... by player', 'on interact_entity of target by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on projectile_hit_block of block [by shooter]', 'on entity_hit_block of block by attacker', 'on spawn of entity [type ...]', 'on entity_load of entity', 'on entity_remove of entity', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on health_change of entity', 'on dimension_change of player', 'on consume ... by player', 'on item_release with ... by player', 'on explosion', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'. If using a newer event syntax, check your compiler version with 'pstdr-c --version'.",
+                    "Use 'on cmd \"ns:name\" description \"...\" [permission ...] [(params)] [by player]', 'on right click [with ...] by player', 'on hit target [with ...] by player', 'on break of ... by player', 'on place of block by player', 'on interact of ... by player', 'on interact_entity of target by player', 'on tick of ...', 'on projectile hit target [with ...] [by shooter]', 'on projectile_hit_block of block [by shooter]', 'on entity_hit_block of block by attacker', 'on spawn of entity [type ...]', 'on entity_load of entity', 'on entity_remove of entity', 'on join of player', 'on leave of player', 'on chat msg by player', 'on hurt target [by attacker]', 'on die of target [by killer]', 'on health_change of entity', 'on dimension_change of player', 'on consume [...] by player', 'on item_release [with ...] by player', 'on explosion', 'on script_event \"ns:id\"', or 'on entity_trigger \"event_id\" [for \"entity_type\"]'. If using a newer event syntax, check your compiler version with 'pstdr-c --version'.",
                 )));
             }
+        };
+
+        let sneak_filter = if self.is_ident_word("when") {
+            self.advance();
+            if self.is_ident_word("not") {
+                self.advance();
+                self.expect_word("sneaking")?;
+                Some(false)
+            } else {
+                self.expect_word("sneaking")?;
+                Some(true)
+            }
+        } else {
+            None
         };
 
         let body = self.parse_block()?;
         Ok(EventHandler {
             kind,
+            sneak_filter,
             body,
             span: on_tok.span,
         })
@@ -1013,11 +1202,14 @@ impl<'a> Parser<'a> {
             )));
         }
 
+        if self.is_ident_word("table") && matches!(self.peek_n(1).kind, TokenKind::Ident(_)) {
+            return Ok(Stmt::TableDecl(self.parse_table_decl(false)?));
+        }
         if self.is_ident_word("const") {
-            return Ok(Stmt::ConstDecl(self.parse_var_decl(true)?));
+            return Ok(Stmt::ConstDecl(self.parse_var_decl(true, false)?));
         }
         if self.is_ident_word("mut") {
-            return Ok(Stmt::MutDecl(self.parse_var_decl(false)?));
+            return Ok(Stmt::MutDecl(self.parse_var_decl(false, false)?));
         }
         if self.is_ident_word("if") {
             return self.parse_if_stmt();
@@ -1062,8 +1254,33 @@ impl<'a> Parser<'a> {
             let target = self.parse_expr(true)?;
             self.expect_word("by")?;
             let amount = self.parse_expr(true)?;
+            let mut cause = None;
+            let mut source = None;
+            while self.is_ident_word("cause") || self.is_ident_word("source") {
+                if self.is_ident_word("cause") {
+                    self.advance();
+                    cause = Some(self.parse_expr(true)?);
+                } else {
+                    self.advance();
+                    source = Some(self.parse_expr(true)?);
+                }
+            }
             self.consume_optional_semi();
             return Ok(Stmt::Damage {
+                target,
+                amount,
+                cause,
+                source,
+                span: start,
+            });
+        }
+        if self.is_ident_word("heal") && self.peek_next_starts_expr_or_ident() {
+            let start = self.advance().span;
+            let target = self.parse_expr(true)?;
+            self.expect_word("by")?;
+            let amount = self.parse_expr(true)?;
+            self.consume_optional_semi();
+            return Ok(Stmt::Heal {
                 target,
                 amount,
                 span: start,
@@ -1083,14 +1300,34 @@ impl<'a> Parser<'a> {
         }
         if self.is_ident_word("apply") {
             let start = self.advance().span;
+            if self.is_ident_word("effect") && matches!(self.peek_n(1).kind, TokenKind::LParen) {
+                self.advance(); // consume "effect"
+                self.expect_kind(&TokenKind::LParen, "(")?;
+                let eff_expr = self.parse_expr(true)?;
+                self.expect_kind(&TokenKind::Comma, ",")?;
+                let level = self.parse_expr(true)?;
+                self.expect_kind(&TokenKind::RParen, ")")?;
+                self.expect_word("to")?;
+                let target = self.parse_expr(true)?;
+                self.expect_word("for")?;
+                let duration = self.parse_delay_spec(true)?;
+                self.consume_optional_semi();
+                return Ok(Stmt::ApplyEffect {
+                    effect: EffectSpec::Dynamic(eff_expr),
+                    level,
+                    target,
+                    duration,
+                    span: start,
+                });
+            }
             let effect_tok = self.peek().clone();
-            let (effect, effect_span) = match &effect_tok.kind {
+            let (effect_name, effect_span) = match &effect_tok.kind {
                 TokenKind::Ident(s) => {
                     let s = s.clone();
                     self.advance();
                     (s, effect_tok.span)
                 }
-                TokenKind::StringLit(s) => {
+                TokenKind::StringLit(s) | TokenKind::NamespacedId(s) => {
                     let s = s.clone();
                     self.advance();
                     (s, effect_tok.span)
@@ -1100,7 +1337,7 @@ impl<'a> Parser<'a> {
                         DiagnosticCode::E016,
                         &effect_tok.span,
                         "Expected effect name after 'apply'.",
-                        "Example: apply slowness 2 to target for 3s",
+                        "Example: apply slowness 2 to target for 3s or apply effect(eff_id, lvl) to target for 3s",
                     )));
                 }
             };
@@ -1108,11 +1345,13 @@ impl<'a> Parser<'a> {
             self.expect_word("to")?;
             let target = self.parse_expr(true)?;
             self.expect_word("for")?;
-            let duration = self.parse_duration_lit()?;
+            let duration = DelaySpec::Literal(self.parse_duration_lit()?);
             self.consume_optional_semi();
             return Ok(Stmt::ApplyEffect {
-                effect,
-                effect_span,
+                effect: EffectSpec::Static {
+                    name: effect_name,
+                    span: effect_span,
+                },
                 level,
                 target,
                 duration,
@@ -1128,6 +1367,70 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::SendMessage {
                 message,
                 target,
+                span: start,
+            });
+        }
+        if self.is_ident_word("play")
+            && (self.peek_next_ident_word("sound") || self.peek_next_ident_word("custom_sound"))
+        {
+            let start = self.advance().span;
+            let custom = self.is_ident_word("custom_sound");
+            self.advance(); // consume "sound" or "custom_sound"
+            let sound = self.parse_expr(true)?;
+            self.expect_word("at")?;
+            let target = self.parse_nullish(true)?;
+            let mut volume = None;
+            let mut pitch = None;
+            while self.is_ident_word("volume") || self.is_ident_word("pitch") {
+                if self.is_ident_word("volume") {
+                    self.advance();
+                    volume = Some(self.parse_expr(true)?);
+                } else {
+                    self.advance();
+                    pitch = Some(self.parse_expr(true)?);
+                }
+            }
+            self.consume_optional_semi();
+            return Ok(Stmt::PlaySound {
+                sound,
+                target,
+                volume,
+                pitch,
+                custom,
+                span: start,
+            });
+        }
+        if self.is_ident_word("launch") && self.peek_next_starts_expr_or_ident() {
+            let start = self.advance().span;
+            let projectile = self.parse_expr(true)?;
+            self.expect_word("from")?;
+            let from = self.parse_expr(true)?;
+            self.expect_word("speed")?;
+            let speed = self.parse_expr(true)?;
+            self.consume_optional_semi();
+            return Ok(Stmt::Launch {
+                projectile,
+                from,
+                speed,
+                span: start,
+            });
+        }
+        if self.is_ident_word("dash") && self.peek_next_starts_expr_or_ident() {
+            let start = self.advance().span;
+            let target = self.parse_expr(true)?;
+            self.expect_word("forward")?;
+            let forward = self.parse_expr(true)?;
+            let up = if self.is_ident_word("up") {
+                self.advance();
+                Some(self.parse_expr(true)?)
+            } else {
+                None
+            };
+            self.consume_optional_semi();
+            return Ok(Stmt::Dash {
+                target,
+                forward,
+                up,
                 span: start,
             });
         }
@@ -1185,11 +1488,30 @@ impl<'a> Parser<'a> {
         }
         if self.is_ident_word("after") {
             let start = self.advance().span;
-            let duration = self.parse_duration_lit()?;
+            let delay = self.parse_delay_spec(false)?;
             let body = self.parse_block()?;
             return Ok(Stmt::After {
-                duration,
+                delay,
                 body,
+                span: start,
+            });
+        }
+        if self.is_ident_word("timeline") && matches!(self.peek_n(1).kind, TokenKind::LBrace) {
+            let start = self.advance().span;
+            self.expect_kind(&TokenKind::LBrace, "{")?;
+            let mut entries = Vec::new();
+            while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+                let delay = self.parse_delay_spec(true)?;
+                self.expect_kind(&TokenKind::Colon, ":")?;
+                let block = self.parse_block()?;
+                entries.push((delay, block));
+                if matches!(self.peek().kind, TokenKind::Comma | TokenKind::Semi) {
+                    self.advance();
+                }
+            }
+            self.expect_kind(&TokenKind::RBrace, "}")?;
+            return Ok(Stmt::Timeline {
+                entries,
                 span: start,
             });
         }
@@ -1689,6 +2011,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_delay_spec(&mut self, allow_brace_obj: bool) -> Result<DelaySpec, Box<Diagnostic>> {
+        if matches!(self.peek().kind, TokenKind::Duration { .. })
+            && !matches!(
+                self.peek_n(1).kind,
+                TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Percent
+            )
+        {
+            Ok(DelaySpec::Literal(self.parse_duration_lit()?))
+        } else {
+            Ok(DelaySpec::Expr(self.parse_expr(allow_brace_obj)?))
+        }
+    }
+
     fn parse_expr(&mut self, allow_brace_obj: bool) -> Result<Expr, Box<Diagnostic>> {
         self.parse_ternary(allow_brace_obj)
     }
@@ -1791,13 +2130,24 @@ impl<'a> Parser<'a> {
 
             if self.is_ident_word("within") {
                 let sp = self.advance().span;
-                let right = self.parse_nullish(allow_brace_obj)?;
-                left = Expr::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::Within,
-                    right: Box::new(right),
-                    span: sp,
-                };
+                let rhs = self.parse_nullish(allow_brace_obj)?;
+                if self.is_ident_word("of") {
+                    self.advance();
+                    let target = self.parse_nullish(allow_brace_obj)?;
+                    left = Expr::WithinDistance {
+                        left: Box::new(left),
+                        distance: Box::new(rhs),
+                        right: Box::new(target),
+                        span: sp,
+                    };
+                } else {
+                    left = Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Within,
+                        right: Box::new(rhs),
+                        span: sp,
+                    };
+                }
                 continue;
             }
 
@@ -2022,6 +2372,10 @@ impl<'a> Parser<'a> {
                 let parts = parse_string_parts(&raw_inner, &tok.span)?;
                 Ok(Expr::StringParts(parts, tok.span))
             }
+            TokenKind::NamespacedId(id) => {
+                self.advance();
+                Ok(Expr::StringParts(vec![StringPart::Literal(id)], tok.span))
+            }
             TokenKind::Ident(s) => {
                 if s == "unsafe" {
                     return Err(Box::new(Diagnostic::error(
@@ -2042,6 +2396,109 @@ impl<'a> Parser<'a> {
                 if s == "null" {
                     self.advance();
                     return Ok(Expr::Null(tok.span));
+                }
+                if s == "raycast" && self.peek_next_ident_word("entities") {
+                    self.advance(); // raycast
+                    self.advance(); // entities
+                    self.expect_word("from")?;
+                    let origin = self.parse_nullish(allow_brace_obj)?;
+                    self.expect_word("range")?;
+                    let range = self.parse_nullish(allow_brace_obj)?;
+                    let mut pierce = None;
+                    let mut step = None;
+                    while self.is_ident_word("pierce") || self.is_ident_word("step") {
+                        if self.is_ident_word("pierce") {
+                            self.advance();
+                            pierce = Some(Box::new(self.parse_nullish(allow_brace_obj)?));
+                        } else {
+                            self.advance();
+                            step = Some(Box::new(self.parse_nullish(allow_brace_obj)?));
+                        }
+                    }
+                    return Ok(Expr::RaycastEntities {
+                        origin: Box::new(origin),
+                        range: Box::new(range),
+                        pierce,
+                        step,
+                        span: tok.span,
+                    });
+                }
+                if s == "entities"
+                    && self.peek_next_ident_word("in")
+                    && self.is_n_ident_word(2, "cone")
+                {
+                    self.advance(); // entities
+                    self.advance(); // in
+                    self.advance(); // cone
+                    self.expect_kind(&TokenKind::LParen, "(")?;
+                    let origin = self.parse_expr(true)?;
+                    self.expect_kind(&TokenKind::Comma, ",")?;
+                    let mut radius: Option<Expr> = None;
+                    let mut angle: Option<Expr> = None;
+                    let mut pos_idx = 0usize;
+                    while !matches!(self.peek().kind, TokenKind::RParen | TokenKind::Eof) {
+                        if (self.is_ident_word("radius") || self.is_ident_word("angle"))
+                            && matches!(self.peek_n(1).kind, TokenKind::Colon | TokenKind::Eq)
+                        {
+                            let key = if self.is_ident_word("radius") { "radius" } else { "angle" };
+                            self.advance();
+                            self.advance();
+                            let val = self.parse_expr(true)?;
+                            if key == "radius" {
+                                radius = Some(val);
+                            } else {
+                                angle = Some(val);
+                            }
+                        } else {
+                            let val = self.parse_expr(true)?;
+                            if pos_idx == 0 {
+                                radius = Some(val);
+                            } else if pos_idx == 1 {
+                                angle = Some(val);
+                            }
+                            pos_idx += 1;
+                        }
+                        if matches!(self.peek().kind, TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect_kind(&TokenKind::RParen, ")")?;
+                    let radius = radius.ok_or_else(|| {
+                        Box::new(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &tok.span,
+                            "Missing 'radius' in entities in cone(...).",
+                            "Example: entities in cone(player, radius: 8, angle: 60)",
+                        ))
+                    })?;
+                    let angle = angle.ok_or_else(|| {
+                        Box::new(Diagnostic::error(
+                            DiagnosticCode::E016,
+                            &tok.span,
+                            "Missing 'angle' in entities in cone(...).",
+                            "Example: entities in cone(player, radius: 8, angle: 60)",
+                        ))
+                    })?;
+                    return Ok(Expr::ConeEntities {
+                        origin: Box::new(origin),
+                        radius: Box::new(radius),
+                        angle: Box::new(angle),
+                        span: tok.span,
+                    });
+                }
+                if s == "entities" && self.peek_next_ident_word("within") {
+                    self.advance(); // entities
+                    self.advance(); // within
+                    let radius = self.parse_nullish(allow_brace_obj)?;
+                    self.expect_word("of")?;
+                    let origin = self.parse_nullish(allow_brace_obj)?;
+                    return Ok(Expr::EntitiesWithin {
+                        radius: Box::new(radius),
+                        origin: Box::new(origin),
+                        span: tok.span,
+                    });
                 }
                 if is_reserved_keyword(&s) {
                     return Err(Box::new(Diagnostic::error(
@@ -2086,9 +2543,18 @@ impl<'a> Parser<'a> {
                             self.advance();
                             (k, false)
                         }
-                        TokenKind::StringLit(k) => {
+                        TokenKind::StringLit(k) | TokenKind::NamespacedId(k) => {
                             self.advance();
                             (k, true)
+                        }
+                        TokenKind::Number(n) => {
+                            self.advance();
+                            let k = if n.fract() == 0.0 {
+                                format!("{}", n as i64)
+                            } else {
+                                n.to_string()
+                            };
+                            (k, false)
                         }
                         _ => {
                             return Err(Box::new(Diagnostic::error(

@@ -45,6 +45,29 @@ impl TargetRegistry {
         Ok(registry)
     }
 
+    /// Builds a `TargetRegistry` directly from already-parsed `BP/items` and `BP/blocks` JSONs
+    /// cached inside `WorkspaceAssetIndex` without re-reading files from disk.
+    pub fn from_parsed_assets(
+        workspace_root: &Path,
+        bp_items: &BTreeMap<String, Value>,
+        bp_blocks: &BTreeMap<String, Value>,
+    ) -> Self {
+        let mut raw_entries: Vec<(String, ComponentKind, PathBuf)> = Vec::new();
+        for (rel, val) in bp_items {
+            if let Some((id, kind)) = extract_bp_target_from_value(val) {
+                raw_entries.push((id, kind, workspace_root.join(rel)));
+            }
+        }
+        for (rel, val) in bp_blocks {
+            if let Some((id, kind)) = extract_bp_target_from_value(val) {
+                raw_entries.push((id, kind, workspace_root.join(rel)));
+            }
+        }
+        let mut registry = Self::default();
+        registry.insert_entries(raw_entries);
+        registry
+    }
+
     /// Registers any explicit `bind_target(...)` JSON files that were not already discovered.
     pub fn register_bind_targets(
         &mut self,
@@ -53,6 +76,39 @@ impl TargetRegistry {
     ) {
         let mut extra = Vec::new();
         for bt in bind_targets {
+            let path = workspace_root.join(&bt.path);
+            if path.is_file() {
+                if let Some((id, kind)) = extract_bp_target(&path) {
+                    if !self.by_identifier.contains_key(&id) {
+                        extra.push((id, kind, path));
+                    }
+                }
+            }
+        }
+        if !extra.is_empty() {
+            self.insert_entries(extra);
+        }
+    }
+
+    /// Registers explicit `bind_target(...)` entries using cached parsed JSONs when available.
+    pub fn register_bind_targets_cached(
+        &mut self,
+        workspace_root: &Path,
+        bind_targets: &[BindTargetStmt],
+        bp_items: &BTreeMap<String, Value>,
+        bp_blocks: &BTreeMap<String, Value>,
+    ) {
+        let mut extra = Vec::new();
+        for bt in bind_targets {
+            let norm = bt.path.trim().replace('\\', "/");
+            if let Some(val) = bp_items.get(&norm).or_else(|| bp_blocks.get(&norm)) {
+                if let Some((id, kind)) = extract_bp_target_from_value(val) {
+                    if !self.by_identifier.contains_key(&id) {
+                        extra.push((id, kind, workspace_root.join(&norm)));
+                    }
+                }
+                continue;
+            }
             let path = workspace_root.join(&bt.path);
             if path.is_file() {
                 if let Some((id, kind)) = extract_bp_target(&path) {
@@ -187,7 +243,11 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
 
     for item in &program.items {
         match item {
-            TopLevelItem::ConstDecl(_)
+            TopLevelItem::Import(_) => {
+                // Cross-module imports are resolved per-file/per-bucket during codegen.
+            }
+            TopLevelItem::TableDecl(_)
+            | TopLevelItem::ConstDecl(_)
             | TopLevelItem::MutDecl(_)
             | TopLevelItem::StateDecl(_)
             | TopLevelItem::FuncDecl(_)
@@ -206,12 +266,9 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                 match &ev.kind {
                     EventKind::RightClick { item: item_expr, .. } => {
                         if !has_cancel {
-                            if let Some(entry) = resolve_target(
-                                item_expr,
-                                &const_strings,
-                                registry,
-                                ComponentKind::Item,
-                            ) {
+                            if let Some(entry) = item_expr.as_ref().and_then(|e| {
+                                resolve_target(e, &const_strings, registry, ComponentKind::Item)
+                            }) {
                                 items
                                     .entry(entry.slug.clone())
                                     .or_insert_with(|| PartitionedTarget {
@@ -231,12 +288,9 @@ pub fn partition_program(program: &Program, registry: &TargetRegistry) -> Partit
                     | EventKind::Consume {
                         item: item_expr, ..
                     } => {
-                        if let Some(entry) = resolve_target(
-                            item_expr,
-                            &const_strings,
-                            registry,
-                            ComponentKind::Item,
-                        ) {
+                        if let Some(entry) = item_expr.as_ref().and_then(|e| {
+                            resolve_target(e, &const_strings, registry, ComponentKind::Item)
+                        }) {
                             items
                                 .entry(entry.slug.clone())
                                 .or_insert_with(|| PartitionedTarget {
@@ -337,6 +391,9 @@ fn resolve_target<'a>(
     expected_kind: ComponentKind,
 ) -> Option<&'a TargetEntry> {
     let id = eval_static_string(expr, const_strings)?;
+    if id.contains('*') {
+        return None;
+    }
     let entry = registry.get(&id)?;
     if entry.kind == expected_kind {
         Some(entry)
@@ -360,9 +417,7 @@ fn collect_json_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Stri
     Ok(())
 }
 
-fn extract_bp_target(path: &Path) -> Option<(String, ComponentKind)> {
-    let raw = fs::read_to_string(path).ok()?;
-    let val: Value = serde_json::from_str(&raw).ok()?;
+pub fn extract_bp_target_from_value(val: &Value) -> Option<(String, ComponentKind)> {
     if let Some(id) = val
         .get("minecraft:item")
         .and_then(|v| v.get("description"))
@@ -380,6 +435,12 @@ fn extract_bp_target(path: &Path) -> Option<(String, ComponentKind)> {
         return Some((id.to_string(), ComponentKind::Block));
     }
     None
+}
+
+fn extract_bp_target(path: &Path) -> Option<(String, ComponentKind)> {
+    let raw = fs::read_to_string(path).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    extract_bp_target_from_value(&val)
 }
 
 fn sanitize_slug(raw: &str) -> String {

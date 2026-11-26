@@ -1,10 +1,10 @@
 mod release;
 
 use pstdr_lang::{
-    audit_workspace, check_path, convert_single_file, convert_workspace, diagnostics_to_json,
-    doctor_report, explain_code, find_workspace_root, fmt_path, format_diagnostics_compact,
-    format_diagnostics_pretty, has_errors, init_workspace, new_script, BedrockSpec, Diagnostic,
-    DiagnosticCode, Span,
+    audit_workspace, build_workspace, check_path, convert_single_file, convert_workspace,
+    diagnostics_to_json, doctor_report, explain_code, find_workspace_root, fmt_path,
+    format_diagnostics_compact, format_diagnostics_pretty, has_errors, init_workspace, new_script,
+    BedrockSpec, Diagnostic, DiagnosticCode, Span,
 };
 use std::collections::HashMap;
 use std::env;
@@ -183,26 +183,9 @@ fn cmd_build(cwd: &Path, args: &[String]) -> Result<u8, (u8, String)> {
     let root = require_workspace(cwd, fmt)?;
     let spec = BedrockSpec::load(custom_spec.as_deref(), Some(&root)).map_err(|e| (3u8, e))?;
 
-    // Step 1: check
-    let src = root.join("src");
-    let check_target = if src.is_dir() { src } else { root.clone() };
-    let check_diags = check_path(&check_target, Some(&root), &spec).map_err(|e| (3u8, e))?;
-    if has_errors(&check_diags) {
-        render_diagnostics(&check_diags, fmt);
-        return Ok(1);
-    }
-
-    // Step 2: convert
-    let convert_diags = convert_workspace(&root, &spec).map_err(|e| (3u8, e))?;
-    if has_errors(&convert_diags) {
-        render_diagnostics(&convert_diags, fmt);
-        return Ok(1);
-    }
-
-    // Step 3: audit
-    let audit_diags = audit_workspace(&root, &spec).map_err(|e| (3u8, e))?;
-    render_diagnostics(&audit_diags, fmt);
-    if has_errors(&audit_diags) {
+    let diags = build_workspace(&root, &spec).map_err(|e| (3u8, e))?;
+    render_diagnostics(&diags, fmt);
+    if has_errors(&diags) {
         return Ok(1);
     }
 

@@ -62,16 +62,18 @@ Always use `state <key>[player] = <default>` for per-player cooldowns, scores, t
 
 ---
 
-## 3. Complete Event Catalog (Wave 1–3C)
+## 3. Complete Event Catalog (Wave 1–4)
+
+> **Wave 4 Triggers & Filters:** `on right click`, `on hit`, `on consume`, and `on item_release` support omitting `with <item>` (generic world trigger), wildcard item matching (`with "ns:*"`), and trailing `when sneaking` / `when not sneaking` actor filters.
 
 | Event | Exact Syntax | Scope Variables | Underlying Bedrock Hook |
 | :--- | :--- | :--- | :--- |
 | **Custom Command** *(3B)* | `on cmd "<ns>:<name>" description "<desc>" [permission any\|gamemakers\|admin\|host] [(<p>: <type>, <opt>?: <type>)] [by <actor>] { ... }` | params, `[<actor>]` | `system.beforeEvents.startup` -> `customCommandRegistry.registerCommand` (**Stable `2.x`**; rejected on `1.x`) |
 | **Chat Send** | `on chat <msg> by <actor> { ... }` | `<msg>`, `<actor>` | `world.beforeEvents.chatSend` (**`2.x` Beta-only `E018`**, **`1.x` Stable**) |
-| **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
-| **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `afterEvents.entityHitEntity` (or item component `onHitEntity`) |
-| **Consume Item** | `on consume <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemCompleteUse` (or item component `onConsume`) |
-| **Item Release** *(3B)* | `on item_release with <item> by <actor> { ... }` | `<actor>`, `item`, `use_duration` | `world.afterEvents.itemReleaseUse` |
+| **Right Click** | `on right click [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
+| **Hit Entity** | `on hit <target> [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<target>`, `<actor>` | `afterEvents.entityHitEntity` (or item component `onHitEntity`) |
+| **Consume Item** | `on consume [<item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>` | `afterEvents.itemCompleteUse` (or item component `onConsume`) |
+| **Item Release** *(3B)* | `on item_release [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>`, `item`, `use_duration` | `world.afterEvents.itemReleaseUse` |
 | **Break Block** | `on break of <block_id> by <actor> { ... }` | `<actor>`, `block` | `afterEvents.playerBreakBlock` / `beforeEvents.playerBreakBlock` (or `onPlayerBreak`) |
 | **Place Block** *(3B)* | `on place of <block> by <actor> { ... }` | `<block>`, `<actor>` | `afterEvents.playerPlaceBlock` / `beforeEvents.playerPlaceBlock` (Cancellable) |
 | **Block Interact** | `on interact of <block_id> by <actor> { ... }` | `<actor>`, `block` | Block component `onPlayerInteract` or `playerInteractWithBlock` (Cancellable) |
@@ -122,11 +124,25 @@ Semicolons (`;`) are optional at the end of statements.
 | :--- | :--- | :--- |
 | **Cancel Event** | `cancel event` | `ev.cancel = true;`. Only valid in `on right click`, `on break`, `on place`, `on interact`, `on interact_entity`, `on explosion`, `on chat` (`E004`). |
 | **Send Message** | `send <msg> to <target>` | `<target>.sendMessage(<msg>);` (`<target>` = player or `world`). |
-| **Apply Effect** | `apply <effect> <level> to <target> for <duration>` | `<target>.addEffect("<effect>", <ticks>, { amplifier: <level> - 1 });` (1-based `level >= 1`, `E011`; validated by `E013`). |
-| **Damage / Ignite** | `damage <target> by <amount>` / `ignite <target> for <duration>` | `applyDamage(...)` / `setOnFire(<seconds>, true)`. |
+| **Apply Effect** | `apply <effect> <level> to <target> for <duration>` / `apply effect(<id>, <lvl>) to <target> for <dur>` | `addEffect(..., { amplifier: level - 1 })` (1-based `level >= 1`, `E011`; `effect(...)` accepts dynamic expressions and bypasses `E013`). |
+| **Heal / Damage / Ignite** | `heal <t> by <a>` / `damage <t> by <a> [cause <c>] [source <s>]` / `ignite <t> for <dur>` | Clamped health heal / `applyDamage(..., { cause: EntityDamageCause.<c>, damagingEntity })` / `setOnFire(<sec>, true)`. |
+| **Audio** *(4)* | `play sound\|custom_sound <id> at <target> [volume <v>] [pitch <p>]` | Spatial `playSound` (`custom_sound` skips `E013` and warns `E017` if missing in `RP/sounds/sound_definitions.json`). |
+| **Motion** *(4)* | `launch <proj> from <caster> speed <v>` / `dash <target> forward <h> [up <v>]` | Spawns & shoots projectile / profile-aware horizontal+vertical `applyKnockback`. |
+| **Dynamic Timers** *(4)* | `after (<expr>) { ... }` / `timeline { <dur>: { ... } ... }` | One-shot & multi-phase staggered `system.runTimeout` choreographies. |
 | **Spawn Particle** | `spawn particle <id> at <entity_or_loc> [in <dim>]` | `<dim>.spawnParticle(<id>, <loc>);`. |
 | **Run Command** *(3A)* | `command [on <target>] <cmd_expr>` | `.runCommand(<cmd>)` (`2.x`) / `.runCommandAsync(<cmd>)` (`1.x`); defaults to overworld. |
 | **Run `.mcfunction`** *(3A)* | `run_fn [on <target>] <path_expr>` | Runs `function <path>`; validates `BP/functions/<path>.mcfunction` or inline `mcfunction` exists (`E017`, `E009`). |
+
+### Modules, `table`, Spatial Queries & Armor Inspection (Wave 4)
+
+```pstdr
+import { WEAPON_CFG, charges, strike } from "./lib/combat"
+export table TIERS = { "bl:ember_edge": { tier: 1, dmg: 8 } }
+export func strike(caster: Player, foe: Entity) { ... }
+```
+
+- **Spatial Expressions:** `raycast entities from <e> range <r> [pierce <p>] [step <s>]`, `entities in cone(<e>, radius: <r>, angle: <a>)`, `entities within <r> of <e>`, and dynamic check `a within <r> of b` (capped at `64b`).
+- **Entity Armor/Equipment (Entity-scoped):** `player.armor.helmet`, `.chestplate`, `.leggings`, `.boots`, `player.offhand` (`typeId ?? ""`, or `.offhand.id`), and `player.equipment("<slot>")`. Plain JS objects and `table` lookups are never rewritten.
 
 ### Native Scoreboards (Wave 3B)
 

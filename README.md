@@ -7,10 +7,11 @@ A beginner-friendly DSL and toolchain for building **Minecraft Bedrock** add-ons
 > **Read [`llms.txt`](./llms.txt) (compact spec) and [`docs/LANGUAGE_REFERENCE.md`](./docs/LANGUAGE_REFERENCE.md) (full in-repo spec) BEFORE writing `.pstdr` code.** Do not infer language syntax from a single example.
 >
 > **Strict Syntax & Anti-Hallucination Rules:**
-> - **No JS/Lua keywords in safe mode (`PSTDR-E001`):** Use `const`, `mut`, `func`, `null`, `!=`, and `"{expr}"` — never `let`, `var`, `function`, `class`, `new`, `~=`, `..`, or single/backtick quotes outside top-level `unsafe`.
+> - **No JS/Lua keywords in safe mode (`PSTDR-E001`):** Use `const`, `table`, `mut`, `func`, `import { ... } from "..."`, `export`, `null`, `!=`, and `"{expr}"` — never `let`, `var`, `function`, `class`, `new`, `~=`, `..`, or single/backtick quotes outside top-level `unsafe`.
 > - **Exact duration units:** `ms`, `s`, `m` ONLY (there is NO `t` tick suffix; use `50ms` for 1 tick).
 > - **Use per-player `state key[player] = default`:** Never store per-player timers, cooldowns, or scores in a single global `mut` variable.
 > - **No invented Bedrock/DSL APIs:** There is NO `world.get_time()` (use `every`/`after` or `system.current_tick`), NO 2-arg `p.title(a, b)` (call `p.title(a)` then `p.subtitle(b)`), and NO `runCommandAsync` on `2.x` (use `command on player "..."` or `run_fn`).
+> - **Wave 4 RPG Modules & Primitives:** Supports multi-file `import`/`export`, `table` configs, wildcard/generic triggers with `when [not] sneaking`, `player.armor.*`/`offhand`, `heal`, `damage ... cause ... source ...`, `apply effect(...)`, `play custom_sound`, `raycast entities`, `entities in cone(...)`, `launch`, `dash`, dynamic `after (<expr>)`, and `timeline { ... }`.
 > - **Commands, UI & Profiles:** Use **`on cmd`** for Stable `2.x` slash commands (`on chat` is `2.x` Beta-only / `1.x` Stable), `ui action/message/modal` (auto-injects `@minecraft/server-ui` only when used), and `pstdr-c build --workspace` to check, compile, and audit in one command.
 
 ## Quick Install & Build

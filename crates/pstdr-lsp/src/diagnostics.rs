@@ -49,11 +49,7 @@ pub fn check_document(
     let (ast, mut diags) = pstdr_lang::parse_source(text, file);
     if let Some(program) = ast {
         let ws_root = find_workspace_root(Path::new(file));
-        let ctx = ValidationContext {
-            workspace_root: ws_root.as_deref(),
-            spec,
-            strict_vanilla_ids: true,
-        };
+        let ctx = ValidationContext::simple(ws_root.as_deref(), spec, true);
         let (_info, mut val_diags) = validate_program(&program, &ctx);
         diags.append(&mut val_diags);
     }

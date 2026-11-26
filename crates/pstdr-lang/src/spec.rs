@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub const BUNDLED_SPEC_JSON: &str = include_str!("../../../data/spec/bedrock_api_latest.json");
 pub const BUNDLED_LEGACY_SPEC_JSON: &str =
@@ -238,22 +239,36 @@ impl BedrockSpec {
     }
 
     pub fn bundled() -> Self {
-        Self::for_profile(ApiProfile::Modern2x)
+        Self::bundled_ref().clone()
+    }
+
+    pub fn bundled_ref() -> &'static Self {
+        Self::for_profile_ref(ApiProfile::Modern2x)
+    }
+
+    pub fn for_profile_ref(profile: ApiProfile) -> &'static Self {
+        static MODERN_CACHE: OnceLock<BedrockSpec> = OnceLock::new();
+        static LEGACY_CACHE: OnceLock<BedrockSpec> = OnceLock::new();
+        match profile {
+            ApiProfile::Modern2x => MODERN_CACHE.get_or_init(|| {
+                Self::from_json_str(
+                    BUNDLED_SPEC_JSON,
+                    "embedded:data/spec/bedrock_api_latest.json",
+                )
+                .expect("Bundled bedrock_api_latest.json must be valid JSON")
+            }),
+            ApiProfile::Legacy1x => LEGACY_CACHE.get_or_init(|| {
+                Self::from_json_str(
+                    BUNDLED_LEGACY_SPEC_JSON,
+                    "embedded:data/spec/bedrock_api_v1_legacy.json",
+                )
+                .expect("Bundled bedrock_api_v1_legacy.json must be valid JSON")
+            }),
+        }
     }
 
     pub fn for_profile(profile: ApiProfile) -> Self {
-        match profile {
-            ApiProfile::Modern2x => Self::from_json_str(
-                BUNDLED_SPEC_JSON,
-                "embedded:data/spec/bedrock_api_latest.json",
-            )
-            .expect("Bundled bedrock_api_latest.json must be valid JSON"),
-            ApiProfile::Legacy1x => Self::from_json_str(
-                BUNDLED_LEGACY_SPEC_JSON,
-                "embedded:data/spec/bedrock_api_v1_legacy.json",
-            )
-            .expect("Bundled bedrock_api_v1_legacy.json must be valid JSON"),
-        }
+        Self::for_profile_ref(profile).clone()
     }
 
     pub fn load(custom_spec: Option<&Path>, workspace_root: Option<&Path>) -> Result<Self, String> {

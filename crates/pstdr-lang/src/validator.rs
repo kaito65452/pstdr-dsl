@@ -1,6 +1,7 @@
+use crate::assets::WorkspaceAssetIndex;
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Span};
-use crate::partition::TargetRegistry;
+use crate::partition::{extract_bp_target_from_value, TargetRegistry};
 use crate::spec::{
     contains_ident_token, is_beta_api_version, text_uses_beta_api, text_uses_beta_event,
     BedrockSpec,
@@ -115,12 +116,193 @@ pub struct ValidationContext<'a> {
     pub workspace_root: Option<&'a Path>,
     pub spec: &'a BedrockSpec,
     pub strict_vanilla_ids: bool,
+    pub asset_index: Option<&'a WorkspaceAssetIndex>,
+    pub workspace_mcfunctions: Option<&'a HashSet<String>>,
+}
+
+impl<'a> ValidationContext<'a> {
+    pub fn simple(
+        workspace_root: Option<&'a Path>,
+        spec: &'a BedrockSpec,
+        strict_vanilla_ids: bool,
+    ) -> Self {
+        Self {
+            workspace_root,
+            spec,
+            strict_vanilla_ids,
+            asset_index: None,
+            workspace_mcfunctions: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExportedSymbolKind {
+    Const { const_string: Option<String> },
+    Table,
+    State,
+    Func { entity_params: Vec<bool> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleExports {
+    pub symbols: HashMap<String, ExportedSymbolKind>,
+    pub unexported: HashSet<String>,
+}
+
+pub fn collect_module_exports(program: &Program) -> ModuleExports {
+    let mut const_strings: HashMap<String, String> = HashMap::new();
+    let mut symbols = HashMap::new();
+    let mut unexported = HashSet::new();
+
+    for item in &program.items {
+        match item {
+            TopLevelItem::ConstDecl(d) => {
+                let s = eval_static_string(&d.value, &const_strings);
+                if let Some(ref val) = s {
+                    const_strings.insert(d.name.clone(), val.clone());
+                }
+                if d.exported {
+                    symbols.insert(d.name.clone(), ExportedSymbolKind::Const { const_string: s });
+                } else {
+                    unexported.insert(d.name.clone());
+                }
+            }
+            TopLevelItem::TableDecl(t) => {
+                if t.exported {
+                    symbols.insert(t.name.clone(), ExportedSymbolKind::Table);
+                } else {
+                    unexported.insert(t.name.clone());
+                }
+            }
+            TopLevelItem::StateDecl(s) => {
+                if s.exported {
+                    symbols.insert(s.name.clone(), ExportedSymbolKind::State);
+                } else {
+                    unexported.insert(s.name.clone());
+                }
+            }
+            TopLevelItem::FuncDecl(f) => {
+                if f.exported {
+                    symbols.insert(
+                        f.name.clone(),
+                        ExportedSymbolKind::Func {
+                            entity_params: f.entity_params.clone(),
+                        },
+                    );
+                } else {
+                    unexported.insert(f.name.clone());
+                }
+            }
+            TopLevelItem::MutDecl(d) => {
+                unexported.insert(d.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    ModuleExports { symbols, unexported }
+}
+
+pub fn resolve_import_module_path(
+    importer_file: &str,
+    specifier: &str,
+    workspace_root: Option<&Path>,
+    src_dir: Option<&str>,
+) -> Option<PathBuf> {
+    let trimmed = specifier.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let importer_path = if let Some(root) = workspace_root {
+        let p = Path::new(importer_file);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    } else {
+        PathBuf::from(importer_file)
+    };
+    let base_dir = if trimmed.starts_with("./") || trimmed.starts_with("../") {
+        importer_path.parent().map(Path::to_path_buf)?
+    } else if let Some(root) = workspace_root {
+        let sd = src_dir.unwrap_or("src");
+        let candidate_src = root.join(sd);
+        if candidate_src.is_dir() {
+            candidate_src
+        } else {
+            root.to_path_buf()
+        }
+    } else {
+        importer_path.parent().map(Path::to_path_buf)?
+    };
+
+    let joined = base_dir.join(trimmed);
+    if joined.is_file() {
+        return Some(joined);
+    }
+    if !trimmed.ends_with(".pstdr") {
+        let with_ext = base_dir.join(format!("{trimmed}.pstdr"));
+        if with_ext.is_file() {
+            return Some(with_ext);
+        }
+    }
+    Some(if trimmed.ends_with(".pstdr") {
+        joined
+    } else {
+        base_dir.join(format!("{trimmed}.pstdr"))
+    })
+}
+
+pub fn normalize_damage_cause(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "anvil" => Some("anvil"),
+        "blockExplosion" | "block_explosion" => Some("blockExplosion"),
+        "campfire" => Some("campfire"),
+        "charging" => Some("charging"),
+        "contact" => Some("contact"),
+        "drowning" => Some("drowning"),
+        "entityAttack" | "entity_attack" => Some("entityAttack"),
+        "entityExplosion" | "entity_explosion" => Some("entityExplosion"),
+        "fall" => Some("fall"),
+        "fallingBlock" | "falling_block" => Some("fallingBlock"),
+        "fire" => Some("fire"),
+        "fireTick" | "fire_tick" => Some("fireTick"),
+        "fireworks" => Some("fireworks"),
+        "flyIntoWall" | "fly_into_wall" => Some("flyIntoWall"),
+        "freezing" => Some("freezing"),
+        "lava" => Some("lava"),
+        "lightning" => Some("lightning"),
+        "maceSmash" | "mace_smash" => Some("maceSmash"),
+        "magic" => Some("magic"),
+        "magma" => Some("magma"),
+        "none" => Some("none"),
+        "override" => Some("override"),
+        "piston" => Some("piston"),
+        "projectile" => Some("projectile"),
+        "ramAttack" | "ram_attack" => Some("ramAttack"),
+        "selfDestruct" | "self_destruct" => Some("selfDestruct"),
+        "sonicBoom" | "sonic_boom" => Some("sonicBoom"),
+        "soulCampfire" | "soul_campfire" => Some("soulCampfire"),
+        "stalactite" => Some("stalactite"),
+        "stalagmite" => Some("stalagmite"),
+        "starve" => Some("starve"),
+        "suffocation" => Some("suffocation"),
+        "suicide" => Some("suicide"),
+        "temperature" => Some("temperature"),
+        "thorns" => Some("thorns"),
+        "void" => Some("void"),
+        "wither" => Some("wither"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ValidatedProgramInfo {
     pub const_strings: HashMap<String, String>,
     pub state_names: HashSet<String>,
+    pub imported_state_names: HashSet<String>,
     pub bound_item_ids: Vec<(String, String, Span)>,
     pub bound_block_ids: Vec<(String, String, Span)>,
 }
@@ -129,21 +311,38 @@ pub fn validate_program(
     program: &Program,
     ctx: &ValidationContext<'_>,
 ) -> (ValidatedProgramInfo, Vec<Diagnostic>) {
-    let discovered_registry = ctx
-        .workspace_root
-        .and_then(|root| TargetRegistry::discover(root).ok());
-    let workspace_mcfunctions = ctx
-        .workspace_root
-        .map(discover_workspace_mcfunctions)
-        .unwrap_or_default();
+    let owned_registry;
+    let discovered_registry = if let Some(idx) = ctx.asset_index {
+        Some(&idx.target_registry)
+    } else {
+        owned_registry = ctx
+            .workspace_root
+            .and_then(|root| TargetRegistry::discover(root).ok());
+        owned_registry.as_ref()
+    };
+
+    let owned_mcfunctions;
+    let workspace_mcfunctions = if let Some(mc) = ctx.workspace_mcfunctions {
+        mc.clone()
+    } else {
+        owned_mcfunctions = ctx
+            .workspace_root
+            .map(discover_workspace_mcfunctions)
+            .unwrap_or_default();
+        owned_mcfunctions
+    };
 
     let active_api = program
         .header
         .as_ref()
         .map(|h| h.api.clone())
         .or_else(|| {
-            ctx.workspace_root
-                .map(|root| WorkspaceConfig::load_from_root(root).script_api)
+            ctx.asset_index
+                .map(|idx| idx.config.script_api.clone())
+                .or_else(|| {
+                    ctx.workspace_root
+                        .map(|root| WorkspaceConfig::load_from_root(root).script_api)
+                })
         })
         .unwrap_or_else(|| ctx.spec.script_api_version.clone());
 
@@ -173,6 +372,7 @@ pub fn validate_program(
         scopes: vec![HashMap::new()],
         const_strings: HashMap::new(),
         state_names: HashSet::new(),
+        imported_state_names: HashSet::new(),
         event_ctx: EventCtx::TopLevel,
         diagnostics: initial_diags,
         bound_item_ids: Vec::new(),
@@ -180,6 +380,8 @@ pub fn validate_program(
         has_block_bind_target: false,
         static_event_item_ids: Vec::new(),
         static_event_block_ids: Vec::new(),
+        has_generic_item_handler: false,
+        script_string_literals: HashSet::new(),
         discovered_registry,
         inline_mcfunctions: workspace_mcfunctions,
     };
@@ -194,6 +396,7 @@ pub fn validate_program(
         ValidatedProgramInfo {
             const_strings: v.const_strings,
             state_names: v.state_names,
+            imported_state_names: v.imported_state_names,
             bound_item_ids: v.bound_item_ids,
             bound_block_ids: v.bound_block_ids,
         },
@@ -208,6 +411,7 @@ struct Validator<'a> {
     scopes: Vec<HashMap<String, BindingInfo>>,
     const_strings: HashMap<String, String>,
     state_names: HashSet<String>,
+    imported_state_names: HashSet<String>,
     event_ctx: EventCtx,
     diagnostics: Vec<Diagnostic>,
     bound_item_ids: Vec<(String, String, Span)>,
@@ -215,7 +419,9 @@ struct Validator<'a> {
     has_block_bind_target: bool,
     static_event_item_ids: Vec<(String, Span)>,
     static_event_block_ids: Vec<(String, Span)>,
-    discovered_registry: Option<TargetRegistry>,
+    has_generic_item_handler: bool,
+    script_string_literals: HashSet<String>,
+    discovered_registry: Option<&'a TargetRegistry>,
     inline_mcfunctions: HashSet<String>,
 }
 
@@ -262,6 +468,12 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_bind_targets(&mut self, program: &Program) {
+        let canon_root_cached = self
+            .ctx
+            .asset_index
+            .and_then(|idx| idx.canonical_root.clone())
+            .or_else(|| self.ctx.workspace_root.and_then(|r| fs::canonicalize(r).ok()));
+
         for bt in &program.bind_targets {
             if has_path_traversal(&bt.path) {
                 self.diagnostics.push(Diagnostic::error(
@@ -281,6 +493,25 @@ impl<'a> Validator<'a> {
                 continue;
             };
 
+            if let Some(idx) = self.ctx.asset_index {
+                if let Some(val) = idx.lookup_bp_target(&bt.path) {
+                    if let Some((id, kind)) = extract_bp_target_from_value(val) {
+                        match kind {
+                            crate::codegen::ComponentKind::Item => {
+                                self.bound_item_ids
+                                    .push((bt.path.clone(), id, bt.span.clone()));
+                            }
+                            crate::codegen::ComponentKind::Block => {
+                                self.bound_block_ids
+                                    .push((bt.path.clone(), id, bt.span.clone()));
+                                self.has_block_bind_target = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
             let target_path = root.join(&bt.path);
             if !target_path.is_file() {
                 self.diagnostics.push(Diagnostic::error(
@@ -292,10 +523,10 @@ impl<'a> Validator<'a> {
                 continue;
             }
 
-            if let (Ok(canon_root), Ok(canon_target)) =
-                (fs::canonicalize(root), fs::canonicalize(&target_path))
+            if let (Some(canon_root), Ok(canon_target)) =
+                (canon_root_cached.as_ref(), fs::canonicalize(&target_path))
             {
-                if !canon_target.starts_with(&canon_root) {
+                if !canon_target.starts_with(canon_root) {
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::E009,
                         &bt.span,
@@ -308,32 +539,243 @@ impl<'a> Validator<'a> {
 
             if let Ok(raw_json) = fs::read_to_string(&target_path) {
                 if let Ok(val) = serde_json::from_str::<Value>(&raw_json) {
-                    if let Some(id) = val
-                        .get("minecraft:item")
-                        .and_then(|v| v.get("description"))
-                        .and_then(|v| v.get("identifier"))
-                        .and_then(|v| v.as_str())
-                    {
-                        self.bound_item_ids
-                            .push((bt.path.clone(), id.to_string(), bt.span.clone()));
-                    } else if let Some(id) = val
-                        .get("minecraft:block")
-                        .and_then(|v| v.get("description"))
-                        .and_then(|v| v.get("identifier"))
-                        .and_then(|v| v.as_str())
-                    {
-                        self.bound_block_ids
-                            .push((bt.path.clone(), id.to_string(), bt.span.clone()));
-                        self.has_block_bind_target = true;
+                    if let Some((id, kind)) = extract_bp_target_from_value(&val) {
+                        match kind {
+                            crate::codegen::ComponentKind::Item => {
+                                self.bound_item_ids
+                                    .push((bt.path.clone(), id, bt.span.clone()));
+                            }
+                            crate::codegen::ComponentKind::Block => {
+                                self.bound_block_ids
+                                    .push((bt.path.clone(), id, bt.span.clone()));
+                                self.has_block_bind_target = true;
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    fn resolve_and_validate_import(
+        &mut self,
+        imp: &ImportDecl,
+        visiting: &mut Vec<PathBuf>,
+        cache: &mut HashMap<PathBuf, ModuleExports>,
+    ) {
+        let src_dir = self.ctx.asset_index.map(|i| i.config.src_dir.as_str());
+        let Some(target_path) = resolve_import_module_path(
+            &imp.span.file,
+            &imp.path,
+            self.ctx.workspace_root,
+            src_dir,
+        ) else {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E007,
+                &imp.path_span,
+                format!("Invalid import path '{}'.", imp.path),
+                "Provide a valid relative module path such as './lib/combat'.",
+            ));
+            return;
+        };
+
+        if !target_path.is_file() {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E007,
+                &imp.path_span,
+                format!("Imported module '{}' was not found.", imp.path),
+                "Check the relative module path from the current .pstdr file and verify the target file exists.",
+            ));
+            return;
+        }
+
+        if let Some(root) = self.ctx.workspace_root {
+            if let (Ok(canon_root), Ok(canon_target)) =
+                (fs::canonicalize(root), fs::canonicalize(&target_path))
+            {
+                if !canon_target.starts_with(&canon_root) {
+                    self.diagnostics.push(Diagnostic::error(
+                        DiagnosticCode::E009,
+                        &imp.path_span,
+                        format!("Path traversal outside workspace root is not allowed in import '{}'.", imp.path),
+                        "Keep imported modules inside the project workspace directory.",
+                    ));
+                    return;
+                }
+            }
+        }
+
+        let key = fs::canonicalize(&target_path).unwrap_or_else(|_| target_path.clone());
+        let exports = if let Some(cached) = cache.get(&key) {
+            cached.clone()
+        } else {
+            // Check direct self-import or cycle
+            let self_key = if let Some(root) = self.ctx.workspace_root {
+                let p = Path::new(&imp.span.file);
+                let full = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+                fs::canonicalize(full).ok()
+            } else {
+                fs::canonicalize(&imp.span.file).ok()
+            };
+            if self_key.as_ref() == Some(&key) || visiting.contains(&key) {
+                self.diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &imp.path_span,
+                    format!("Circular import detected involving '{}'.", imp.path),
+                    "Break the circular dependency by moving shared tables/helpers into a separate library module.",
+                ));
+                return;
+            }
+            if let Some(sk) = self_key {
+                if visiting.is_empty() {
+                    visiting.push(sk);
+                }
+            }
+            visiting.push(key.clone());
+            let parsed_exports = match fs::read_to_string(&target_path) {
+                Ok(raw) => {
+                    let label = self
+                        .ctx
+                        .workspace_root
+                        .and_then(|r| target_path.strip_prefix(r).ok())
+                        .unwrap_or(&target_path)
+                        .display()
+                        .to_string();
+                    let (prog_opt, _) = crate::parser::parse_source(&raw, &label);
+                    if let Some(mod_prog) = prog_opt {
+                        // Recursively check transitive imports for cycles
+                        for item in &mod_prog.items {
+                            if let TopLevelItem::Import(sub_imp) = item {
+                                self.check_import_cycles_only(sub_imp, visiting, cache);
+                            }
+                        }
+                        collect_module_exports(&mod_prog)
+                    } else {
+                        ModuleExports {
+                            symbols: HashMap::new(),
+                            unexported: HashSet::new(),
+                        }
+                    }
+                }
+                Err(_) => ModuleExports {
+                    symbols: HashMap::new(),
+                    unexported: HashSet::new(),
+                },
+            };
+            visiting.pop();
+            cache.insert(key, parsed_exports.clone());
+            parsed_exports
+        };
+
+        for sym in &imp.symbols {
+            if let Some(kind) = exports.symbols.get(&sym.name) {
+                match kind {
+                    ExportedSymbolKind::Const { const_string } => {
+                        if let Some(s) = const_string {
+                            self.const_strings.insert(sym.name.clone(), s.clone());
+                        }
+                        self.insert_binding(&sym.name, BindingKind::Const, sym.span.line);
+                    }
+                    ExportedSymbolKind::Table => {
+                        self.insert_binding(&sym.name, BindingKind::Const, sym.span.line);
+                    }
+                    ExportedSymbolKind::State => {
+                        self.state_names.insert(sym.name.clone());
+                        self.imported_state_names.insert(sym.name.clone());
+                        self.insert_binding(&sym.name, BindingKind::State, sym.span.line);
+                    }
+                    ExportedSymbolKind::Func { .. } => {
+                        self.insert_binding(&sym.name, BindingKind::Func, sym.span.line);
+                    }
+                }
+            } else if exports.unexported.contains(&sym.name) {
+                self.diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &sym.span,
+                    format!(
+                        "Symbol '{}' exists in '{}' but is not exported.",
+                        sym.name, imp.path
+                    ),
+                    format!("Add the 'export' keyword before '{}' in '{}'.", sym.name, imp.path),
+                ));
+            } else {
+                self.diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::E016,
+                    &sym.span,
+                    format!(
+                        "Symbol '{}' is not exported by module '{}'.",
+                        sym.name, imp.path
+                    ),
+                    format!("Check the spelling or add 'export' for '{}' in '{}'.", sym.name, imp.path),
+                ));
+            }
+        }
+    }
+
+    fn check_import_cycles_only(
+        &mut self,
+        imp: &ImportDecl,
+        visiting: &mut Vec<PathBuf>,
+        cache: &mut HashMap<PathBuf, ModuleExports>,
+    ) {
+        let src_dir = self.ctx.asset_index.map(|i| i.config.src_dir.as_str());
+        let Some(target_path) = resolve_import_module_path(
+            &imp.span.file,
+            &imp.path,
+            self.ctx.workspace_root,
+            src_dir,
+        ) else {
+            return;
+        };
+        if !target_path.is_file() {
+            return;
+        }
+        let key = fs::canonicalize(&target_path).unwrap_or_else(|_| target_path.clone());
+        if visiting.contains(&key) {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E016,
+                &imp.path_span,
+                format!("Circular import detected involving '{}'.", imp.path),
+                "Break the circular dependency by moving shared tables/helpers into a separate library module.",
+            ));
+            return;
+        }
+        if cache.contains_key(&key) {
+            return;
+        }
+        visiting.push(key.clone());
+        if let Ok(raw) = fs::read_to_string(&target_path) {
+            let label = self
+                .ctx
+                .workspace_root
+                .and_then(|r| target_path.strip_prefix(r).ok())
+                .unwrap_or(&target_path)
+                .display()
+                .to_string();
+            let (prog_opt, _) = crate::parser::parse_source(&raw, &label);
+            if let Some(mod_prog) = prog_opt {
+                for item in &mod_prog.items {
+                    if let TopLevelItem::Import(sub_imp) = item {
+                        self.check_import_cycles_only(sub_imp, visiting, cache);
+                    }
+                }
+                cache.insert(key, collect_module_exports(&mod_prog));
+            }
+        }
+        visiting.pop();
+    }
+
     fn register_top_level(&mut self, program: &Program) {
+        let mut visiting = Vec::new();
+        let mut import_cache = HashMap::new();
         for item in &program.items {
             match item {
+                TopLevelItem::Import(imp) => {
+                    self.resolve_and_validate_import(imp, &mut visiting, &mut import_cache);
+                }
+                TopLevelItem::TableDecl(t) => {
+                    self.insert_binding(&t.name, BindingKind::Const, t.span.line);
+                }
                 TopLevelItem::ConstDecl(d) => {
                     if let Some(s) = eval_static_string(&d.value, &self.const_strings) {
                         self.const_strings.insert(d.name.clone(), s);
@@ -370,6 +812,10 @@ impl<'a> Validator<'a> {
     fn validate_items(&mut self, program: &Program) {
         for item in &program.items {
             match item {
+                TopLevelItem::Import(_) => {}
+                TopLevelItem::TableDecl(t) => {
+                    self.validate_expr(&t.value);
+                }
                 TopLevelItem::ConstDecl(d) | TopLevelItem::MutDecl(d) => {
                     self.validate_expr(&d.value);
                 }
@@ -496,10 +942,14 @@ impl<'a> Validator<'a> {
 
         match &ev.kind {
             EventKind::RightClick { item, actor_var } => {
-                self.validate_expr(item);
-                if let Some(s) = eval_static_string(item, &self.const_strings) {
-                    self.static_event_item_ids
-                        .push((s, item.span().clone()));
+                if let Some(it) = item {
+                    self.validate_expr(it);
+                    if let Some(s) = eval_static_string(it, &self.const_strings) {
+                        self.static_event_item_ids
+                            .push((s, it.span().clone()));
+                    }
+                } else {
+                    self.has_generic_item_handler = true;
                 }
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::RightClick;
@@ -509,10 +959,14 @@ impl<'a> Validator<'a> {
                 item,
                 actor_var,
             } => {
-                self.validate_expr(item);
-                if let Some(s) = eval_static_string(item, &self.const_strings) {
-                    self.static_event_item_ids
-                        .push((s, item.span().clone()));
+                if let Some(it) = item {
+                    self.validate_expr(it);
+                    if let Some(s) = eval_static_string(it, &self.const_strings) {
+                        self.static_event_item_ids
+                            .push((s, it.span().clone()));
+                    }
+                } else {
+                    self.has_generic_item_handler = true;
                 }
                 self.insert_binding(target_var, BindingKind::ContextVar, ev.span.line);
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
@@ -579,10 +1033,14 @@ impl<'a> Validator<'a> {
                 self.event_ctx = EventCtx::Die;
             }
             EventKind::Consume { item, actor_var } => {
-                self.validate_expr(item);
-                if let Some(s) = eval_static_string(item, &self.const_strings) {
-                    self.static_event_item_ids
-                        .push((s, item.span().clone()));
+                if let Some(it) = item {
+                    self.validate_expr(it);
+                    if let Some(s) = eval_static_string(it, &self.const_strings) {
+                        self.static_event_item_ids
+                            .push((s, it.span().clone()));
+                    }
+                } else {
+                    self.has_generic_item_handler = true;
                 }
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.event_ctx = EventCtx::Consume;
@@ -843,10 +1301,14 @@ impl<'a> Validator<'a> {
                 self.event_ctx = EventCtx::EntityHitBlock;
             }
             EventKind::ItemRelease { item, actor_var } => {
-                self.validate_expr(item);
-                if let Some(s) = eval_static_string(item, &self.const_strings) {
-                    self.static_event_item_ids
-                        .push((s, item.span().clone()));
+                if let Some(it) = item {
+                    self.validate_expr(it);
+                    if let Some(s) = eval_static_string(it, &self.const_strings) {
+                        self.static_event_item_ids
+                            .push((s, it.span().clone()));
+                    }
+                } else {
+                    self.has_generic_item_handler = true;
                 }
                 self.insert_binding(actor_var, BindingKind::ContextVar, ev.span.line);
                 self.insert_binding("item", BindingKind::ContextVar, ev.span.line);
@@ -868,19 +1330,44 @@ impl<'a> Validator<'a> {
             }
         }
 
+        if ev.sneak_filter.is_some()
+            && matches!(
+                ev.kind,
+                EventKind::BlockTick { .. }
+                    | EventKind::ScriptEvent { .. }
+                    | EventKind::EntityTrigger { .. }
+                    | EventKind::Explosion
+            )
+        {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::E016,
+                &ev.span,
+                "'when sneaking' filter is only valid on events that have a player/entity actor.",
+                "Remove 'when sneaking' from this event handler.",
+            ));
+        }
+
         self.validate_block(&ev.body);
         self.pop_scope();
         self.event_ctx = prev_ctx;
     }
 
     fn check_binding_id_matches(&mut self) {
+        let multi_item_bind = self.bound_item_ids.len() > 1;
         for (path, id_json, span) in &self.bound_item_ids {
-            if !self.static_event_item_ids.is_empty()
-                && !self
-                    .static_event_item_ids
-                    .iter()
-                    .any(|(id_code, _)| id_code == id_json)
-            {
+            if self.static_event_item_ids.is_empty() || self.has_generic_item_handler {
+                continue;
+            }
+            let matches_event = self.static_event_item_ids.iter().any(|(pat, _)| {
+                if let Some(prefix) = pat.strip_suffix('*') {
+                    id_json.starts_with(prefix)
+                } else {
+                    pat == id_json
+                }
+            });
+            let matches_script_ref =
+                multi_item_bind && self.script_string_literals.contains(id_json);
+            if !matches_event && !matches_script_ref {
                 let id_code = &self.static_event_item_ids[0].0;
                 self.diagnostics.push(Diagnostic::error(
                     DiagnosticCode::E008,
@@ -895,13 +1382,21 @@ impl<'a> Validator<'a> {
             }
         }
 
+        let multi_block_bind = self.bound_block_ids.len() > 1;
         for (path, id_json, span) in &self.bound_block_ids {
-            if !self.static_event_block_ids.is_empty()
-                && !self
-                    .static_event_block_ids
-                    .iter()
-                    .any(|(id_code, _)| id_code == id_json)
-            {
+            if self.static_event_block_ids.is_empty() {
+                continue;
+            }
+            let matches_event = self.static_event_block_ids.iter().any(|(pat, _)| {
+                if let Some(prefix) = pat.strip_suffix('*') {
+                    id_json.starts_with(prefix)
+                } else {
+                    pat == id_json
+                }
+            });
+            let matches_script_ref =
+                multi_block_bind && self.script_string_literals.contains(id_json);
+            if !matches_event && !matches_script_ref {
                 let id_code = &self.static_event_block_ids[0].0;
                 self.diagnostics.push(Diagnostic::error(
                     DiagnosticCode::E008,
@@ -939,6 +1434,10 @@ impl<'a> Validator<'a> {
             Stmt::ConstDecl(d) => {
                 self.validate_expr(&d.value);
                 self.insert_binding(&d.name, BindingKind::Const, d.span.line);
+            }
+            Stmt::TableDecl(t) => {
+                self.validate_expr(&t.value);
+                self.insert_binding(&t.name, BindingKind::Const, t.span.line);
             }
             Stmt::MutDecl(d) => {
                 self.validate_expr(&d.value);
@@ -1053,7 +1552,41 @@ impl<'a> Validator<'a> {
                     ));
                 }
             }
-            Stmt::Damage { target, amount, .. } => {
+            Stmt::Damage {
+                target,
+                amount,
+                cause,
+                source,
+                ..
+            } => {
+                self.validate_expr(target);
+                self.validate_expr(amount);
+                if let Some(c) = cause {
+                    let is_bare_enum = matches!(
+                        c,
+                        Expr::Ident(name, _)
+                            if self.lookup_binding(name).is_none()
+                                && normalize_damage_cause(name).is_some()
+                    );
+                    if !is_bare_enum {
+                        self.validate_expr(c);
+                        if let Some(s) = eval_static_string(c, &self.const_strings) {
+                            if normalize_damage_cause(&s).is_none() {
+                                self.diagnostics.push(Diagnostic::error(
+                                    DiagnosticCode::E016,
+                                    c.span(),
+                                    format!("Unknown damage cause '{s}'."),
+                                    "Use a valid Bedrock EntityDamageCause such as 'magic', 'entityAttack' ('entity_attack'), 'fire', 'lightning', 'projectile', 'fall', 'void', or 'explosion'.",
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(s) = source {
+                    self.validate_expr(s);
+                }
+            }
+            Stmt::Heal { target, amount, .. } => {
                 self.validate_expr(target);
                 self.validate_expr(amount);
             }
@@ -1062,13 +1595,21 @@ impl<'a> Validator<'a> {
             }
             Stmt::ApplyEffect {
                 effect,
-                effect_span,
                 level,
                 target,
+                duration,
                 ..
             } => {
                 self.validate_expr(level);
                 self.validate_expr(target);
+                if let DelaySpec::Expr(dur_expr) = duration {
+                    self.validate_expr(dur_expr);
+                }
+
+                let eff_label = match effect {
+                    EffectSpec::Static { name, .. } => name.as_str(),
+                    EffectSpec::Dynamic(_) => "dynamic effect",
+                };
 
                 if let Some(lvl_val) = eval_static_number(level) {
                     if lvl_val <= 0.0 {
@@ -1076,7 +1617,7 @@ impl<'a> Validator<'a> {
                             DiagnosticCode::E011,
                             level.span(),
                             format!(
-                                "Effect '{effect}' level must be >= 1 (found: {}).",
+                                "Effect '{eff_label}' level must be >= 1 (found: {}).",
                                 format_num(lvl_val)
                             ),
                             "Use human-readable 1-based levels starting at 1 (Level I).",
@@ -1084,15 +1625,22 @@ impl<'a> Validator<'a> {
                     }
                 }
 
-                if self.ctx.strict_vanilla_ids && !self.ctx.spec.is_valid_effect(effect) {
-                    self.diagnostics.push(Diagnostic::error(
-                        DiagnosticCode::E013,
-                        effect_span,
-                        format!(
-                            "Vanilla effect/sound ID '{effect}' not found in the latest Bedrock specification."
-                        ),
-                        "Check the spelling of the effect name (refer to data/spec/bedrock_api_latest.json).",
-                    ));
+                match effect {
+                    EffectSpec::Static { name, span } => {
+                        if self.ctx.strict_vanilla_ids && !self.ctx.spec.is_valid_effect(name) {
+                            self.diagnostics.push(Diagnostic::error(
+                                DiagnosticCode::E013,
+                                span,
+                                format!(
+                                    "Vanilla effect/sound ID '{name}' not found in the latest Bedrock specification."
+                                ),
+                                "Check the spelling of the effect name (refer to data/spec/bedrock_api_latest.json).",
+                            ));
+                        }
+                    }
+                    EffectSpec::Dynamic(eff_expr) => {
+                        self.validate_expr(eff_expr);
+                    }
                 }
             }
             Stmt::SendMessage {
@@ -1100,6 +1648,72 @@ impl<'a> Validator<'a> {
             } => {
                 self.validate_expr(message);
                 self.validate_expr(target);
+            }
+            Stmt::PlaySound {
+                sound,
+                target,
+                volume,
+                pitch,
+                custom,
+                ..
+            } => {
+                self.validate_expr(sound);
+                self.validate_expr(target);
+                if let Some(v) = volume {
+                    self.validate_expr(v);
+                }
+                if let Some(p) = pitch {
+                    self.validate_expr(p);
+                }
+                if let Some(s) = eval_static_string(sound, &self.const_strings) {
+                    if *custom {
+                        if let Some(idx) = self.ctx.asset_index {
+                            if idx.is_valid_custom_sound(&s) == Some(false) {
+                                self.diagnostics.push(Diagnostic::warning(
+                                    DiagnosticCode::E017,
+                                    sound.span(),
+                                    format!(
+                                        "Custom sound '{s}' was not found in 'RP/sounds/sound_definitions.json'."
+                                    ),
+                                    format!(
+                                        "Add '{s}' to 'RP/sounds/sound_definitions.json' or verify the sound identifier."
+                                    ),
+                                ));
+                            }
+                        }
+                    } else if self.ctx.strict_vanilla_ids && !self.ctx.spec.is_valid_sound(&s) {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::E013,
+                            sound.span(),
+                            format!(
+                                "Vanilla effect/sound ID '{s}' not found in the latest Bedrock specification."
+                            ),
+                            "Use 'play custom_sound ...' for resource-pack sounds, or check vanilla sound spelling in data/spec/bedrock_api_latest.json.",
+                        ));
+                    }
+                }
+            }
+            Stmt::Launch {
+                projectile,
+                from,
+                speed,
+                ..
+            } => {
+                self.validate_expr(projectile);
+                self.validate_expr(from);
+                self.validate_expr(speed);
+            }
+            Stmt::Dash {
+                target,
+                forward,
+                up,
+                ..
+            } => {
+                self.validate_expr(target);
+                self.validate_expr(forward);
+                if let Some(u) = up {
+                    self.validate_expr(u);
+                }
             }
             Stmt::SpawnParticle {
                 particle,
@@ -1140,11 +1754,15 @@ impl<'a> Validator<'a> {
                         ));
                     } else {
                         let exists_inline = self.inline_mcfunctions.contains(&norm);
-                        let exists_on_disk = self.ctx.workspace_root.is_some_and(|root| {
-                            root.join("BP/functions")
-                                .join(format!("{norm}.mcfunction"))
-                                .is_file()
-                        });
+                        let exists_on_disk = if let Some(idx) = self.ctx.asset_index {
+                            idx.disk_mcfunctions.contains(&norm)
+                        } else {
+                            self.ctx.workspace_root.is_some_and(|root| {
+                                root.join("BP/functions")
+                                    .join(format!("{norm}.mcfunction"))
+                                    .is_file()
+                            })
+                        };
                         if !exists_inline && !exists_on_disk {
                             self.diagnostics.push(Diagnostic::error(
                                 DiagnosticCode::E017,
@@ -1160,13 +1778,29 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Stmt::After { body, .. } => {
+            Stmt::After { delay, body, .. } => {
+                if let DelaySpec::Expr(e) = delay {
+                    self.validate_expr(e);
+                }
                 let prev = self.event_ctx;
                 self.event_ctx = EventCtx::Timer;
                 self.push_scope();
                 self.validate_block(body);
                 self.pop_scope();
                 self.event_ctx = prev;
+            }
+            Stmt::Timeline { entries, .. } => {
+                for (delay, body) in entries {
+                    if let DelaySpec::Expr(e) = delay {
+                        self.validate_expr(e);
+                    }
+                    let prev = self.event_ctx;
+                    self.event_ctx = EventCtx::Timer;
+                    self.push_scope();
+                    self.validate_block(body);
+                    self.pop_scope();
+                    self.event_ctx = prev;
+                }
             }
             Stmt::Every { duration, body, .. } => {
                 self.check_every_interval(duration);
@@ -1330,6 +1964,11 @@ impl<'a> Validator<'a> {
             | Expr::Duration(_)
             | Expr::Distance(_, _) => {}
             Expr::StringParts(parts, _) => {
+                if parts.len() == 1 {
+                    if let StringPart::Literal(s) = &parts[0] {
+                        self.script_string_literals.insert(s.clone());
+                    }
+                }
                 for p in parts {
                     if let StringPart::Expr(e) = p {
                         self.validate_expr(e);
@@ -1510,6 +2149,46 @@ impl<'a> Validator<'a> {
             Expr::Binary { left, right, .. } => {
                 self.validate_expr(left);
                 self.validate_expr(right);
+            }
+            Expr::WithinDistance {
+                left,
+                distance,
+                right,
+                ..
+            } => {
+                self.validate_expr(left);
+                self.validate_expr(distance);
+                self.validate_expr(right);
+            }
+            Expr::RaycastEntities {
+                origin,
+                range,
+                pierce,
+                step,
+                ..
+            } => {
+                self.validate_expr(origin);
+                self.validate_expr(range);
+                if let Some(p) = pierce {
+                    self.validate_expr(p);
+                }
+                if let Some(s) = step {
+                    self.validate_expr(s);
+                }
+            }
+            Expr::ConeEntities {
+                origin,
+                radius,
+                angle,
+                ..
+            } => {
+                self.validate_expr(origin);
+                self.validate_expr(radius);
+                self.validate_expr(angle);
+            }
+            Expr::EntitiesWithin { radius, origin, .. } => {
+                self.validate_expr(radius);
+                self.validate_expr(origin);
             }
             Expr::IsCheck {
                 subject, predicate, ..

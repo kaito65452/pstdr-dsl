@@ -13,8 +13,6 @@ pub const FORBIDDEN_KEYWORDS: &[&str] = &[
     "nil",
     "then",
     "end",
-    "import",
-    "export",
     "require",
     "eval",
 ];
@@ -64,6 +62,7 @@ pub fn is_reserved_keyword(s: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Ident(String),
+    NamespacedId(String),
     Number(f64),
     Duration { raw: String, ms: f64, ticks: f64 },
     Distance(f64),
@@ -141,6 +140,14 @@ pub fn tokenize_with_offset(
     let mut col = start_col;
 
     let peek_char = |idx: usize| -> Option<char> { source[idx..].chars().next() };
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ContainerKind {
+        Brace,
+        Paren,
+        Bracket,
+    }
+    let mut containers: Vec<ContainerKind> = Vec::new();
+    let mut ternary_depth: usize = 0;
 
     while i < len {
         let ch = match peek_char(i) {
@@ -391,7 +398,7 @@ pub fn tokenize_with_offset(
             continue;
         }
 
-        // Identifiers & keywords
+        // Identifiers, keywords, and unquoted namespaced IDs (e.g. bl:1pctgluttony, fw:3d_blade)
         if ch.is_ascii_alphabetic() || ch == '_' {
             while i < len {
                 let c = peek_char(i).unwrap();
@@ -403,6 +410,55 @@ pub fn tokenize_with_offset(
                 }
             }
             let word = source[start_byte..i].to_string();
+
+            let prev_kind = tokens.last().map(|t| &t.kind);
+            let in_brace = containers.last().copied() == Some(ContainerKind::Brace);
+            let is_obj_key_pos = matches!(prev_kind, Some(TokenKind::LBrace))
+                || (in_brace && matches!(prev_kind, Some(TokenKind::Comma)));
+            let after_colon_valid = i + 1 < len
+                && bytes[i] == b':'
+                && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'_');
+
+            if after_colon_valid && !is_obj_key_pos && ternary_depth == 0 {
+                let mut j = i + 1;
+                let mut path_cols = 1usize;
+                while j < len {
+                    let b = bytes[j];
+                    if b.is_ascii_alphanumeric()
+                        || matches!(b, b'_' | b'-' | b'/')
+                        || (b == b'.'
+                            && j + 1 < len
+                            && (bytes[j + 1].is_ascii_alphanumeric() || bytes[j + 1] == b'_'))
+                    {
+                        j += 1;
+                        path_cols += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let path_seg = &source[i + 1..j];
+                let in_cmd_param_pos = containers.last().copied() == Some(ContainerKind::Paren)
+                    && matches!(prev_kind, Some(TokenKind::LParen | TokenKind::Comma))
+                    && matches!(
+                        path_seg,
+                        "string" | "int" | "float" | "bool" | "player"
+                    )
+                    && (j >= len || matches!(bytes[j], b',' | b')' | b' ' | b'\t'));
+
+                if !in_cmd_param_pos && !path_seg.is_empty() {
+                    i = j;
+                    col += path_cols;
+                    let ns_id = source[start_byte..i].to_string();
+                    tokens.push(Token {
+                        kind: TokenKind::NamespacedId(ns_id),
+                        span: Span::new(file, tok_line, tok_col, col.saturating_sub(1)),
+                        start_byte,
+                        end_byte: i,
+                    });
+                    continue;
+                }
+            }
+
             tokens.push(Token {
                 kind: TokenKind::Ident(word),
                 span: Span::new(file, tok_line, tok_col, col.saturating_sub(1)),
@@ -464,6 +520,18 @@ pub fn tokenize_with_offset(
         } else {
             1
         };
+        match &kind {
+            TokenKind::LBrace => containers.push(ContainerKind::Brace),
+            TokenKind::LParen => containers.push(ContainerKind::Paren),
+            TokenKind::LBracket => containers.push(ContainerKind::Bracket),
+            TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                containers.pop();
+            }
+            TokenKind::Question => ternary_depth += 1,
+            TokenKind::Colon if ternary_depth > 0 => ternary_depth -= 1,
+            TokenKind::Semi => ternary_depth = 0,
+            _ => {}
+        }
         i += advance;
         col += tok_cols;
         tokens.push(Token {

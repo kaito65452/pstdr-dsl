@@ -95,23 +95,49 @@ impl Formatter {
 
     fn fmt_top_level(&mut self, item: &TopLevelItem) {
         match item {
+            TopLevelItem::Import(imp) => {
+                let syms: Vec<&str> = imp.symbols.iter().map(|s| s.name.as_str()).collect();
+                self.line(&format!(
+                    "import {{ {} }} from \"{}\"",
+                    syms.join(", "),
+                    escape_str(&imp.path)
+                ));
+            }
+            TopLevelItem::TableDecl(t) => {
+                let prefix = if t.exported { "export " } else { "" };
+                self.line(&format!("{prefix}table {} = {}", t.name, fmt_expr(&t.value)));
+            }
             TopLevelItem::ConstDecl(d) => {
-                self.line(&format!("const {} = {}", d.name, fmt_expr(&d.value)));
+                let prefix = if d.exported { "export " } else { "" };
+                self.line(&format!("{prefix}const {} = {}", d.name, fmt_expr(&d.value)));
             }
             TopLevelItem::MutDecl(d) => {
                 self.line(&format!("mut {} = {}", d.name, fmt_expr(&d.value)));
             }
             TopLevelItem::StateDecl(s) => {
+                let prefix = if s.exported { "export " } else { "" };
                 self.line(&format!(
-                    "state {}[{}] = {}",
+                    "{prefix}state {}[{}] = {}",
                     s.name,
                     s.owner_hint,
                     fmt_expr(&s.default_value)
                 ));
             }
             TopLevelItem::FuncDecl(f) => {
-                let params: Vec<&str> = f.params.iter().map(|(p, _)| p.as_str()).collect();
-                self.line(&format!("func {}({}) {{", f.name, params.join(", ")));
+                let prefix = if f.exported { "export " } else { "" };
+                let params: Vec<String> = f
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (p, _))| {
+                        if f.entity_params.get(idx).copied().unwrap_or(false) {
+                            format!("{p}: Entity")
+                        } else {
+                            p.clone()
+                        }
+                    })
+                    .collect();
+                self.line(&format!("{prefix}func {}({}) {{", f.name, params.join(", ")));
                 self.indent += 1;
                 self.fmt_block_stmts(&f.body.stmts);
                 self.indent -= 1;
@@ -145,20 +171,22 @@ impl Formatter {
                 ));
             }
             TopLevelItem::EventHandler(ev) => {
-                let header = match &ev.kind {
-                    EventKind::RightClick { item, actor_var } => {
-                        format!("on right click with {} by {actor_var} {{", fmt_expr(item))
-                    }
+                let mut header = match &ev.kind {
+                    EventKind::RightClick { item, actor_var } => match item {
+                        Some(it) => format!("on right click with {} by {actor_var} {{", fmt_expr(it)),
+                        None => format!("on right click by {actor_var} {{"),
+                    },
                     EventKind::HitTarget {
                         target_var,
                         item,
                         actor_var,
-                    } => {
-                        format!(
+                    } => match item {
+                        Some(it) => format!(
                             "on hit {target_var} with {} by {actor_var} {{",
-                            fmt_expr(item)
-                        )
-                    }
+                            fmt_expr(it)
+                        ),
+                        None => format!("on hit {target_var} by {actor_var} {{"),
+                    },
                     EventKind::BreakBlock {
                         block_id,
                         actor_var,
@@ -188,9 +216,10 @@ impl Formatter {
                         Some(k) => format!("on die of {target_var} by {k} {{"),
                         None => format!("on die of {target_var} {{"),
                     },
-                    EventKind::Consume { item, actor_var } => {
-                        format!("on consume {} by {actor_var} {{", fmt_expr(item))
-                    }
+                    EventKind::Consume { item, actor_var } => match item {
+                        Some(it) => format!("on consume {} by {actor_var} {{", fmt_expr(it)),
+                        None => format!("on consume by {actor_var} {{"),
+                    },
                     EventKind::BlockInteract {
                         block_id,
                         actor_var,
@@ -296,9 +325,10 @@ impl Formatter {
                         block_var,
                         attacker_var,
                     } => format!("on entity_hit_block of {block_var} by {attacker_var} {{"),
-                    EventKind::ItemRelease { item, actor_var } => {
-                        format!("on item_release with {} by {actor_var} {{", fmt_expr(item))
-                    }
+                    EventKind::ItemRelease { item, actor_var } => match item {
+                        Some(it) => format!("on item_release with {} by {actor_var} {{", fmt_expr(it)),
+                        None => format!("on item_release by {actor_var} {{"),
+                    },
                     EventKind::Explosion => "on explosion {".to_string(),
                     EventKind::EntityLoad { entity_var } => {
                         format!("on entity_load of {entity_var} {{")
@@ -307,6 +337,12 @@ impl Formatter {
                         format!("on entity_remove of {entity_var} {{")
                     }
                 };
+                if let Some(sneak) = ev.sneak_filter {
+                    let suffix = if sneak { " when sneaking {" } else { " when not sneaking {" };
+                    if let Some(prefix) = header.strip_suffix(" {") {
+                        header = format!("{prefix}{suffix}");
+                    }
+                }
                 self.line(&header);
                 self.indent += 1;
                 self.fmt_block_stmts(&ev.body.stmts);
@@ -340,6 +376,9 @@ impl Formatter {
         match stmt {
             Stmt::ConstDecl(d) => {
                 self.line(&format!("const {} = {}", d.name, fmt_expr(&d.value)));
+            }
+            Stmt::TableDecl(t) => {
+                self.line(&format!("table {} = {}", t.name, fmt_expr(&t.value)));
             }
             Stmt::MutDecl(d) => {
                 self.line(&format!("mut {} = {}", d.name, fmt_expr(&d.value)));
@@ -393,12 +432,24 @@ impl Formatter {
                 None => self.line("return"),
             },
             Stmt::CancelEvent { .. } => self.line("cancel event"),
-            Stmt::Damage { target, amount, .. } => {
-                self.line(&format!(
-                    "damage {} by {}",
-                    fmt_expr(target),
-                    fmt_expr(amount)
-                ));
+            Stmt::Damage {
+                target,
+                amount,
+                cause,
+                source,
+                ..
+            } => {
+                let mut line = format!("damage {} by {}", fmt_expr(target), fmt_expr(amount));
+                if let Some(c) = cause {
+                    line.push_str(&format!(" cause {}", fmt_expr(c)));
+                }
+                if let Some(s) = source {
+                    line.push_str(&format!(" source {}", fmt_expr(s)));
+                }
+                self.line(&line);
+            }
+            Stmt::Heal { target, amount, .. } => {
+                self.line(&format!("heal {} by {}", fmt_expr(target), fmt_expr(amount)));
             }
             Stmt::Ignite {
                 target, duration, ..
@@ -412,12 +463,24 @@ impl Formatter {
                 duration,
                 ..
             } => {
-                self.line(&format!(
-                    "apply {effect} {} to {} for {}",
-                    fmt_expr(level),
-                    fmt_expr(target),
-                    duration.raw
-                ));
+                let dur_str = fmt_delay_spec(duration);
+                match effect {
+                    EffectSpec::Static { name, .. } => {
+                        self.line(&format!(
+                            "apply {name} {} to {} for {dur_str}",
+                            fmt_expr(level),
+                            fmt_expr(target),
+                        ));
+                    }
+                    EffectSpec::Dynamic(eff_expr) => {
+                        self.line(&format!(
+                            "apply effect({}, {}) to {} for {dur_str}",
+                            fmt_expr(eff_expr),
+                            fmt_expr(level),
+                            fmt_expr(target),
+                        ));
+                    }
+                }
             }
             Stmt::SendMessage {
                 message, target, ..
@@ -427,6 +490,49 @@ impl Formatter {
                     fmt_expr(message),
                     fmt_expr(target)
                 ));
+            }
+            Stmt::PlaySound {
+                sound,
+                target,
+                volume,
+                pitch,
+                custom,
+                ..
+            } => {
+                let kw = if *custom { "custom_sound" } else { "sound" };
+                let mut line = format!("play {kw} {} at {}", fmt_expr(sound), fmt_expr(target));
+                if let Some(v) = volume {
+                    line.push_str(&format!(" volume {}", fmt_expr(v)));
+                }
+                if let Some(p) = pitch {
+                    line.push_str(&format!(" pitch {}", fmt_expr(p)));
+                }
+                self.line(&line);
+            }
+            Stmt::Launch {
+                projectile,
+                from,
+                speed,
+                ..
+            } => {
+                self.line(&format!(
+                    "launch {} from {} speed {}",
+                    fmt_expr(projectile),
+                    fmt_expr(from),
+                    fmt_expr(speed)
+                ));
+            }
+            Stmt::Dash {
+                target,
+                forward,
+                up,
+                ..
+            } => {
+                let mut line = format!("dash {} forward {}", fmt_expr(target), fmt_expr(forward));
+                if let Some(u) = up {
+                    line.push_str(&format!(" up {}", fmt_expr(u)));
+                }
+                self.line(&line);
             }
             Stmt::SpawnParticle {
                 particle,
@@ -460,10 +566,34 @@ impl Formatter {
                 Some(t) => self.line(&format!("run_fn on {} {}", fmt_expr(t), fmt_expr(path))),
                 None => self.line(&format!("run_fn {}", fmt_expr(path))),
             },
-            Stmt::After { duration, body, .. } => {
-                self.line(&format!("after {} {{", duration.raw));
+            Stmt::After { delay, body, .. } => {
+                let delay_str = match delay {
+                    DelaySpec::Literal(d) => d.raw.clone(),
+                    DelaySpec::Expr(e) => {
+                        let mut cur = e;
+                        while let Expr::Paren(inner, _) = cur {
+                            cur = inner.as_ref();
+                        }
+                        format!("({})", fmt_expr(cur))
+                    }
+                };
+                self.line(&format!("after {delay_str} {{"));
                 self.indent += 1;
                 self.fmt_block_stmts(&body.stmts);
+                self.indent -= 1;
+                self.line("}");
+            }
+            Stmt::Timeline { entries, .. } => {
+                self.line("timeline {");
+                self.indent += 1;
+                for (delay, body) in entries {
+                    let delay_str = fmt_delay_spec(delay);
+                    self.line(&format!("{delay_str}: {{"));
+                    self.indent += 1;
+                    self.fmt_block_stmts(&body.stmts);
+                    self.indent -= 1;
+                    self.line("}");
+                }
                 self.indent -= 1;
                 self.line("}");
             }
@@ -671,6 +801,13 @@ impl Formatter {
     }
 }
 
+fn fmt_delay_spec(delay: &DelaySpec) -> String {
+    match delay {
+        DelaySpec::Literal(d) => d.raw.clone(),
+        DelaySpec::Expr(e) => fmt_expr(e),
+    }
+}
+
 fn fmt_expr(expr: &Expr) -> String {
     match expr {
         Expr::Number(n, _) => fmt_num(*n),
@@ -755,6 +892,51 @@ fn fmt_expr(expr: &Expr) -> String {
                 BinaryOp::Within => "within",
             };
             format!("{} {op_str} {}", fmt_expr(left), fmt_expr(right))
+        }
+        Expr::WithinDistance {
+            left,
+            distance,
+            right,
+            ..
+        } => {
+            format!(
+                "{} within {} of {}",
+                fmt_expr(left),
+                fmt_expr(distance),
+                fmt_expr(right)
+            )
+        }
+        Expr::RaycastEntities {
+            origin,
+            range,
+            pierce,
+            step,
+            ..
+        } => {
+            let mut s = format!("raycast entities from {} range {}", fmt_expr(origin), fmt_expr(range));
+            if let Some(p) = pierce {
+                s.push_str(&format!(" pierce {}", fmt_expr(p)));
+            }
+            if let Some(st) = step {
+                s.push_str(&format!(" step {}", fmt_expr(st)));
+            }
+            s
+        }
+        Expr::ConeEntities {
+            origin,
+            radius,
+            angle,
+            ..
+        } => {
+            format!(
+                "entities in cone({}, radius: {}, angle: {})",
+                fmt_expr(origin),
+                fmt_expr(radius),
+                fmt_expr(angle)
+            )
+        }
+        Expr::EntitiesWithin { radius, origin, .. } => {
+            format!("entities within {} of {}", fmt_expr(radius), fmt_expr(origin))
         }
         Expr::IsCheck {
             subject,

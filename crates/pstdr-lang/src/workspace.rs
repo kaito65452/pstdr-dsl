@@ -1,21 +1,30 @@
-use crate::ast::{AddonDirective, ApiProfile};
+use crate::assets::{
+    validate_bedrock_schema_gates, validate_workspace_assets_with_index, WorkspaceAssetIndex,
+};
+use crate::ast::{AddonDirective, ApiProfile, EventKind, Program, TopLevelItem};
 use crate::codegen::{
-    emit_block_component_module, emit_code, emit_commands_module, emit_item_component_module,
-    emit_shared_module, emit_world_module, program_uses_ui, CodegenOptions, ComponentKind,
-    EmitMode, SharedContext,
+    block_contains_cancel, emit_block_component_module_grouped, emit_code, emit_code_with_context,
+    emit_commands_module, emit_item_component_module_grouped, emit_shared_module_with_externals,
+    emit_world_module, program_uses_ui, CodegenOptions, ComponentKind, EmitMode,
+    ExternalSymbolKind, SharedContext,
 };
 use crate::diagnostics::{has_errors, Diagnostic, DiagnosticCode, Span};
 use crate::formatter::format_source;
 use crate::parser::parse_source;
-use crate::partition::{partition_program, TargetRegistry};
+use crate::partition::{partition_program, TargetEntry};
 use crate::spec::BedrockSpec;
-use crate::validator::{validate_program, ValidationContext};
+use crate::validator::{
+    collect_module_exports, eval_static_string, has_path_traversal, normalize_mcfunction_path,
+    resolve_import_module_path, validate_program, ExportedSymbolKind, ModuleExports,
+    ValidationContext,
+};
 use crate::wiring::{
     emit_registry_module_for_profile, generate_uuid_v4, is_valid_v3_min_engine,
     resolve_min_engine_version, update_main_js, update_manifest_with_ui, wire_bind_targets,
     wire_target_json, RegistryEntry,
 };
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -151,12 +160,14 @@ fn sort_and_dedup_diags(diags: &mut Vec<Diagnostic>) {
             .then_with(|| a.line.cmp(&b.line))
             .then_with(|| a.column.cmp(&b.column))
             .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.message.cmp(&b.message))
     });
     diags.dedup_by(|a, b| {
         a.file == b.file
             && a.line == b.line
             && a.column == b.column
             && a.code == b.code
+            && a.message == b.message
     });
 }
 
@@ -170,11 +181,7 @@ pub fn compile_source(
     custom_components: Vec<(String, ComponentKind)>,
 ) -> CompileResult {
     let (program, mut diags) = parse_source(source, file);
-    let vctx = ValidationContext {
-        workspace_root,
-        spec,
-        strict_vanilla_ids,
-    };
+    let vctx = ValidationContext::simple(workspace_root, spec, strict_vanilla_ids);
     let mut bound_block_ids = Vec::new();
     if let Some(prog) = &program {
         let (info, val_diags) = validate_program(prog, &vctx);
@@ -258,8 +265,179 @@ pub fn convert_single_file(
     Ok(res.diagnostics)
 }
 
+fn collect_inline_mcfunctions_from_programs<'a>(
+    parsed: impl Iterator<Item = &'a Program>,
+) -> HashSet<String> {
+    let mut found = HashSet::new();
+    for prog in parsed {
+        for item in &prog.items {
+            if let TopLevelItem::McFunctionDecl(mc) = item {
+                let norm = normalize_mcfunction_path(&mc.path);
+                if !has_path_traversal(&norm) {
+                    found.insert(norm);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn is_specific_item_expr(expr: &crate::ast::Expr, const_strings: &HashMap<String, String>) -> bool {
+    eval_static_string(expr, const_strings).is_some_and(|s| !s.contains('*'))
+}
+
+fn program_has_custom_component_callbacks(prog: &Program) -> bool {
+    let mut const_strings = HashMap::new();
+    for item in &prog.items {
+        if let TopLevelItem::ConstDecl(d) = item {
+            if let Some(s) = eval_static_string(&d.value, &const_strings) {
+                const_strings.insert(d.name.clone(), s);
+            }
+        }
+    }
+    prog.items.iter().any(|item| {
+        if let TopLevelItem::EventHandler(ev) = item {
+            match &ev.kind {
+                EventKind::RightClick { item, .. } => {
+                    !block_contains_cancel(&ev.body)
+                        && item.as_ref().is_some_and(|e| is_specific_item_expr(e, &const_strings))
+                }
+                EventKind::HitTarget { item, .. } | EventKind::Consume { item, .. } => {
+                    item.as_ref().is_some_and(|e| is_specific_item_expr(e, &const_strings))
+                }
+                EventKind::BlockTick { .. } => true,
+                EventKind::BlockInteract { .. } | EventKind::BreakBlock { .. } => {
+                    !block_contains_cancel(&ev.body)
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    })
+}
+
+fn relative_esm_import(from_file_rel: &str, to_file_rel: &str, mode: EmitMode) -> String {
+    let from_parts: Vec<&str> = from_file_rel.split('/').filter(|s| !s.is_empty()).collect();
+    let from_dir = if from_parts.len() > 1 {
+        &from_parts[..from_parts.len() - 1]
+    } else {
+        &[]
+    };
+    let to_parts: Vec<&str> = to_file_rel.split('/').filter(|s| !s.is_empty()).collect();
+    let mut common = 0usize;
+    while common < from_dir.len()
+        && common + 1 < to_parts.len()
+        && from_dir[common] == to_parts[common]
+    {
+        common += 1;
+    }
+    let ups = from_dir.len() - common;
+    let mut out = String::new();
+    if ups == 0 {
+        out.push_str("./");
+    } else {
+        for _ in 0..ups {
+            out.push_str("../");
+        }
+    }
+    out.push_str(&to_parts[common..].join("/"));
+    if mode == EmitMode::TypeScript {
+        if let Some(stripped) = out.strip_suffix(".js") {
+            return stripped.to_string();
+        }
+    }
+    out
+}
+
+fn build_external_import_ctx(
+    prog: &Program,
+    emitter_rel_js: &str,
+    importer_file: &str,
+    root: &Path,
+    src_dir: &str,
+    export_targets: &HashMap<PathBuf, (String, ModuleExports)>,
+    mode: EmitMode,
+) -> SharedContext {
+    let mut ctx = SharedContext::default();
+    for item in &prog.items {
+        if let TopLevelItem::Import(imp) = item {
+            let Some(target_path) =
+                resolve_import_module_path(importer_file, &imp.path, Some(root), Some(src_dir))
+            else {
+                continue;
+            };
+            let key = fs::canonicalize(&target_path).unwrap_or(target_path);
+            let Some((target_js_rel, exports)) = export_targets.get(&key) else {
+                continue;
+            };
+            let rel_import = relative_esm_import(emitter_rel_js, target_js_rel, mode);
+            for sym in &imp.symbols {
+                if let Some(kind) = exports.symbols.get(&sym.name) {
+                    match kind {
+                        ExportedSymbolKind::State => {
+                            ctx.external_symbols.insert(
+                                sym.name.clone(),
+                                (rel_import.clone(), ExternalSymbolKind::State),
+                            );
+                        }
+                        ExportedSymbolKind::Const { const_string } => {
+                            if let Some(s) = const_string {
+                                ctx.const_strings.insert(sym.name.clone(), s.clone());
+                            }
+                            ctx.external_symbols.insert(
+                                sym.name.clone(),
+                                (rel_import.clone(), ExternalSymbolKind::Value),
+                            );
+                        }
+                        ExportedSymbolKind::Table | ExportedSymbolKind::Func { .. } => {
+                            ctx.external_symbols.insert(
+                                sym.name.clone(),
+                                (rel_import.clone(), ExternalSymbolKind::Value),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ctx
+}
+
+pub fn build_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic>, String> {
+    let index = WorkspaceAssetIndex::build(root);
+
+    let (mut diags, parsed_programs) = convert_workspace_with_index_collect(root, &index, spec)?;
+    if has_errors(&diags) {
+        return Ok(diags);
+    }
+
+    let audit_diags = audit_workspace_with_collected(root, &index, spec, &parsed_programs, false)?;
+    diags.extend(audit_diags);
+    sort_and_dedup_diags(&mut diags);
+    Ok(diags)
+}
+
 pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic>, String> {
-    let cfg = WorkspaceConfig::load_from_root(root);
+    let index = WorkspaceAssetIndex::build(root);
+    convert_workspace_with_index(root, &index, spec)
+}
+
+pub fn convert_workspace_with_index(
+    root: &Path,
+    index: &WorkspaceAssetIndex,
+    spec: &BedrockSpec,
+) -> Result<Vec<Diagnostic>, String> {
+    let (diags, _) = convert_workspace_with_index_collect(root, index, spec)?;
+    Ok(diags)
+}
+
+fn convert_workspace_with_index_collect(
+    root: &Path,
+    index: &WorkspaceAssetIndex,
+    spec: &BedrockSpec,
+) -> Result<(Vec<Diagnostic>, Vec<Program>), String> {
+    let cfg = &index.config;
     let src_dir = root.join(&cfg.src_dir);
     let files = if src_dir.is_dir() {
         collect_pstdr_files(&src_dir)?
@@ -271,24 +449,26 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     let mut has_asset_err = false;
     if cfg.strict_asset_refs {
-        let asset_diags = crate::assets::validate_workspace_assets(root, spec)?;
+        let asset_diags = validate_workspace_assets_with_index(index, spec);
         has_asset_err = has_errors(&asset_diags);
         all_diags.extend(asset_diags);
     }
 
     let mut target_ver = cfg.bedrock_target.clone();
     let mut api_ver = cfg.script_api.clone();
-    let mut registry = TargetRegistry::discover(root)?;
+    let mut registry = index.target_registry.clone();
 
-    struct ValidatedFile {
+    struct ParsedFile {
+        path: PathBuf,
         rel: String,
         stem: String,
-        prog: crate::ast::Program,
-        bound_block_ids: Vec<String>,
+        module_rel_no_ext: String,
+        prog: Option<Program>,
+        diags: Vec<Diagnostic>,
     }
 
-    let mut validated_files = Vec::new();
-
+    let mut parsed_files = Vec::with_capacity(files.len());
+    let src_root_dir = root.join(&cfg.src_dir);
     for file_path in &files {
         let source = fs::read_to_string(file_path)
             .map_err(|e| format!("Failed to read '{}': {e}", file_path.display()))?;
@@ -296,11 +476,52 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             .strip_prefix(root)
             .unwrap_or(file_path)
             .display()
+            .to_string()
+            .replace('\\', "/");
+        let stem = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("script")
             .to_string();
+        let rel_under_src = file_path
+            .strip_prefix(&src_root_dir)
+            .or_else(|_| file_path.strip_prefix(root))
+            .unwrap_or(file_path);
+        let module_rel_no_ext = rel_under_src
+            .with_extension("")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let (prog, diags) = parse_source(&source, &rel);
+        parsed_files.push(ParsedFile {
+            path: file_path.clone(),
+            rel,
+            stem,
+            module_rel_no_ext,
+            prog,
+            diags,
+        });
+    }
 
-        let (prog_opt, mut file_diags) = parse_source(&source, &rel);
+    let inline_mcfunctions = collect_inline_mcfunctions_from_programs(
+        parsed_files.iter().filter_map(|pf| pf.prog.as_ref()),
+    );
+
+    struct ValidatedFile {
+        canon_path: PathBuf,
+        rel: String,
+        stem: String,
+        module_rel_no_ext: String,
+        prog: Program,
+        bound_block_ids: Vec<String>,
+    }
+
+    let mut validated_files = Vec::new();
+
+    for pf in parsed_files {
+        let mut file_diags = pf.diags;
         let mut bound_block_ids = Vec::new();
-        if let Some(prog) = &prog_opt {
+        if let Some(prog) = &pf.prog {
             if let Some(h) = &prog.header {
                 target_ver = h.target.clone();
                 if !crate::spec::is_beta_api_version(&api_ver)
@@ -314,6 +535,8 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
                 workspace_root: Some(root),
                 spec,
                 strict_vanilla_ids: cfg.strict_vanilla_ids,
+                asset_index: Some(index),
+                workspace_mcfunctions: Some(&inline_mcfunctions),
             };
             let (info, val_diags) = validate_program(prog, &vctx);
             bound_block_ids = info.bound_block_ids.into_iter().map(|(_, id, _)| id).collect();
@@ -321,24 +544,21 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         }
         sort_and_dedup_diags(&mut file_diags);
 
-        let file_failed = has_errors(&file_diags) || prog_opt.is_none();
+        let file_failed = has_errors(&file_diags) || pf.prog.is_none();
         all_diags.extend(file_diags);
         if file_failed || has_asset_err {
             continue;
         }
 
-        let prog = prog_opt.unwrap();
-        registry.register_bind_targets(root, &prog.bind_targets);
+        let prog = pf.prog.unwrap();
+        registry.register_bind_targets_cached(root, &prog.bind_targets, &index.bp_items, &index.bp_blocks);
 
-        let stem = file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("script")
-            .to_string();
-
+        let canon_path = fs::canonicalize(&pf.path).unwrap_or(pf.path);
         validated_files.push(ValidatedFile {
-            rel,
-            stem,
+            canon_path,
+            rel: pf.rel,
+            stem: pf.stem,
+            module_rel_no_ext: pf.module_rel_no_ext,
             prog,
             bound_block_ids,
         });
@@ -346,7 +566,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
 
     if has_errors(&all_diags) || has_asset_err {
         sort_and_dedup_diags(&mut all_diags);
-        return Ok(all_diags);
+        return Ok((all_diags, Vec::new()));
     }
 
     let js_dir = root.join(&cfg.js_out_dir);
@@ -360,13 +580,14 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     }
 
     let mut main_modules: Vec<String> = Vec::new();
-    let mut registry_entries: Vec<RegistryEntry> = Vec::new();
     let mut command_modules: Vec<String> = Vec::new();
     let mut workspace_uses_ui = false;
 
     let mut partitioned_files = Vec::with_capacity(validated_files.len());
     let mut total_cmd_files = 0usize;
     let mut any_partitioned_targets = false;
+    let mut target_slug_file_counts: HashMap<(ComponentKind, String), usize> = HashMap::new();
+
     for vf in validated_files {
         if program_uses_ui(&vf.prog) {
             workspace_uses_ui = true;
@@ -378,16 +599,65 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
         if part.should_partition(vf.prog.bind_targets.len()) {
             any_partitioned_targets = true;
         }
+        for slug in part.items.keys() {
+            *target_slug_file_counts
+                .entry((ComponentKind::Item, slug.clone()))
+                .or_insert(0) += 1;
+        }
+        for slug in part.blocks.keys() {
+            *target_slug_file_counts
+                .entry((ComponentKind::Block, slug.clone()))
+                .or_insert(0) += 1;
+        }
         partitioned_files.push((vf, part));
     }
     let merge_commands_into_registry =
         total_cmd_files > 1 || (total_cmd_files >= 1 && any_partitioned_targets);
 
+    // Precompute export destinations so every `import { ... } from "..."` resolves to its exact
+    // generated JS/TS module path regardless of whether exporter or importer is partitioned.
+    let mut export_targets: HashMap<PathBuf, (String, ModuleExports)> = HashMap::new();
+    for (vf, part) in &partitioned_files {
+        let collides_across_files = part
+            .items
+            .keys()
+            .any(|s| target_slug_file_counts.get(&(ComponentKind::Item, s.clone())).copied().unwrap_or(0) > 1)
+            || part
+                .blocks
+                .keys()
+                .any(|s| target_slug_file_counts.get(&(ComponentKind::Block, s.clone())).copied().unwrap_or(0) > 1);
+        let should_partition = part.should_partition(vf.prog.bind_targets.len())
+            || collides_across_files
+            || (merge_commands_into_registry && !part.commands.is_empty());
+        let shared_slug = vf.module_rel_no_ext.replace('/', "_");
+        let export_js_rel = if should_partition {
+            format!("_shared/{shared_slug}.shared.js")
+        } else {
+            format!("{}.js", vf.module_rel_no_ext)
+        };
+        export_targets.insert(
+            vf.canon_path.clone(),
+            (export_js_rel, collect_module_exports(&vf.prog)),
+        );
+    }
+
+    struct MergedComponentGroup {
+        entry: TargetEntry,
+        header: Option<AddonDirective>,
+        primary_source: String,
+        handlers: Vec<(crate::ast::EventHandler, SharedContext, String)>,
+        handlers_ts: Vec<(crate::ast::EventHandler, SharedContext, String)>,
+    }
+
+    let mut collected_programs: Vec<Program> = Vec::with_capacity(partitioned_files.len());
+    let mut merged_items: BTreeMap<String, MergedComponentGroup> = BTreeMap::new();
+    let mut merged_blocks: BTreeMap<String, MergedComponentGroup> = BTreeMap::new();
+
     for (vf, part) in partitioned_files {
         for item in &vf.prog.items {
-            if let crate::ast::TopLevelItem::McFunctionDecl(mc) = item {
-                let norm = crate::validator::normalize_mcfunction_path(&mc.path);
-                if crate::validator::has_path_traversal(&norm) {
+            if let TopLevelItem::McFunctionDecl(mc) = item {
+                let norm = normalize_mcfunction_path(&mc.path);
+                if has_path_traversal(&norm) {
                     return Err(format!(
                         "Refusing to write mcfunction with unsafe path '{}'",
                         mc.path
@@ -406,10 +676,43 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             api: api_ver.clone(),
             span: Span::file_only(&vf.rel),
         };
+        let collides_across_files = part
+            .items
+            .keys()
+            .any(|s| target_slug_file_counts.get(&(ComponentKind::Item, s.clone())).copied().unwrap_or(0) > 1)
+            || part
+                .blocks
+                .keys()
+                .any(|s| target_slug_file_counts.get(&(ComponentKind::Block, s.clone())).copied().unwrap_or(0) > 1);
         let should_partition = part.should_partition(vf.prog.bind_targets.len())
+            || collides_across_files
             || (merge_commands_into_registry && !part.commands.is_empty());
+
         if !should_partition {
-            let registered = wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?;
+            let registered = if program_has_custom_component_callbacks(&vf.prog) {
+                wire_bind_targets(root, &vf.prog.bind_targets, &vf.stem)?
+            } else {
+                Vec::new()
+            };
+            let out_rel_js = format!("{}.js", vf.module_rel_no_ext);
+            let ext_ctx_js = build_external_import_ctx(
+                &vf.prog,
+                &out_rel_js,
+                &vf.rel,
+                root,
+                &cfg.src_dir,
+                &export_targets,
+                EmitMode::JavaScript,
+            );
+            let ext_ctx_ts = build_external_import_ctx(
+                &vf.prog,
+                &out_rel_js,
+                &vf.rel,
+                root,
+                &cfg.src_dir,
+                &export_targets,
+                EmitMode::TypeScript,
+            );
             let mut prog_for_emit = vf.prog;
             if prog_for_emit.header.is_none() {
                 prog_for_emit.header = Some(fallback_header);
@@ -420,131 +723,141 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
                 custom_components: registered,
                 bound_block_ids: vf.bound_block_ids,
             };
-            let js = emit_code(&prog_for_emit, &opts, EmitMode::JavaScript);
-            write_generated_file(&js_dir.join(format!("{}.js", vf.stem)), &js)?;
+            let js = emit_code_with_context(&prog_for_emit, &opts, &ext_ctx_js, EmitMode::JavaScript);
+            write_generated_file(&js_dir.join(&out_rel_js), &js)?;
 
             if cfg.emit_ts {
-                let ts = emit_code(&prog_for_emit, &opts, EmitMode::TypeScript);
-                write_generated_file(&ts_dir.join(format!("{}.ts", vf.stem)), &ts)?;
+                let ts = emit_code_with_context(&prog_for_emit, &opts, &ext_ctx_ts, EmitMode::TypeScript);
+                write_generated_file(&ts_dir.join(format!("{}.ts", vf.module_rel_no_ext)), &ts)?;
             }
 
-            main_modules.push(vf.stem);
+            collected_programs.push(prog_for_emit);
+            main_modules.push(vf.module_rel_no_ext);
             continue;
         }
 
-        let header = Some(vf.prog.header.as_ref().unwrap_or(&fallback_header));
+        let header = vf.prog.header.clone().unwrap_or(fallback_header);
         let has_shared = !part.shared.is_empty();
-        let shared_ctx_js = SharedContext::from_shared_items(
+        let shared_slug = vf.module_rel_no_ext.replace('/', "_");
+        let shared_js_rel = format!("_shared/{shared_slug}.shared.js");
+        let mut shared_ctx_js = SharedContext::from_shared_items(
             &part.shared,
-            has_shared.then(|| format!("../_shared/{}.shared.js", vf.stem)),
+            has_shared.then(|| format!("../_shared/{shared_slug}.shared.js")),
         );
-        let shared_ctx_ts = SharedContext::from_shared_items(
+        let mut shared_ctx_ts = SharedContext::from_shared_items(
             &part.shared,
-            has_shared.then(|| format!("../_shared/{}.shared", vf.stem)),
+            has_shared.then(|| format!("../_shared/{shared_slug}.shared")),
         );
 
+        let ext_for_shared_js = build_external_import_ctx(
+            &vf.prog,
+            &shared_js_rel,
+            &vf.rel,
+            root,
+            &cfg.src_dir,
+            &export_targets,
+            EmitMode::JavaScript,
+        );
+        let ext_for_shared_ts = build_external_import_ctx(
+            &vf.prog,
+            &shared_js_rel,
+            &vf.rel,
+            root,
+            &cfg.src_dir,
+            &export_targets,
+            EmitMode::TypeScript,
+        );
+        // For items/, blocks/, world/, commands/ (all 1-dir deep under generated/)
+        let ext_for_bucket_js = build_external_import_ctx(
+            &vf.prog,
+            &format!("world/{}.js", vf.stem),
+            &vf.rel,
+            root,
+            &cfg.src_dir,
+            &export_targets,
+            EmitMode::JavaScript,
+        );
+        let ext_for_bucket_ts = build_external_import_ctx(
+            &vf.prog,
+            &format!("world/{}.js", vf.stem),
+            &vf.rel,
+            root,
+            &cfg.src_dir,
+            &export_targets,
+            EmitMode::TypeScript,
+        );
+        for (sym, (p, kind)) in ext_for_bucket_js.external_symbols {
+            shared_ctx_js.external_symbols.insert(sym, (p, kind));
+        }
+        shared_ctx_js.const_strings.extend(ext_for_bucket_js.const_strings);
+        for (sym, (p, kind)) in ext_for_bucket_ts.external_symbols {
+            shared_ctx_ts.external_symbols.insert(sym, (p, kind));
+        }
+        shared_ctx_ts.const_strings.extend(ext_for_bucket_ts.const_strings);
+
         if has_shared {
-            let shared_js = emit_shared_module(
+            let shared_js = emit_shared_module_with_externals(
                 &part.shared,
-                header,
+                &ext_for_shared_js,
+                Some(&header),
                 &vf.rel,
                 cfg.source_map_comments,
                 EmitMode::JavaScript,
             );
-            write_generated_file(
-                &js_dir.join(format!("_shared/{}.shared.js", vf.stem)),
-                &shared_js,
-            )?;
+            write_generated_file(&js_dir.join(&shared_js_rel), &shared_js)?;
             if cfg.emit_ts {
-                let shared_ts = emit_shared_module(
+                let shared_ts = emit_shared_module_with_externals(
                     &part.shared,
-                    header,
+                    &ext_for_shared_ts,
+                    Some(&header),
                     &vf.rel,
                     cfg.source_map_comments,
                     EmitMode::TypeScript,
                 );
                 write_generated_file(
-                    &ts_dir.join(format!("_shared/{}.shared.ts", vf.stem)),
+                    &ts_dir.join(format!("_shared/{shared_slug}.shared.ts")),
                     &shared_ts,
                 )?;
             }
         }
 
-        for target in part.items.values() {
-            wire_target_json(&target.entry.json_path, &target.entry.component_id)?;
-            let item_js = emit_item_component_module(
-                &target.handlers,
-                &shared_ctx_js,
-                header,
-                &vf.rel,
-                cfg.source_map_comments,
-                EmitMode::JavaScript,
-            );
-            write_generated_file(
-                &js_dir.join(format!("items/{}.js", target.entry.slug)),
-                &item_js,
-            )?;
-            if cfg.emit_ts {
-                let item_ts = emit_item_component_module(
-                    &target.handlers,
-                    &shared_ctx_ts,
-                    header,
-                    &vf.rel,
-                    cfg.source_map_comments,
-                    EmitMode::TypeScript,
-                );
-                write_generated_file(
-                    &ts_dir.join(format!("items/{}.ts", target.entry.slug)),
-                    &item_ts,
-                )?;
+        for target in part.items.into_values() {
+            let group = merged_items
+                .entry(target.entry.slug.clone())
+                .or_insert_with(|| MergedComponentGroup {
+                    entry: target.entry.clone(),
+                    header: Some(header.clone()),
+                    primary_source: vf.rel.clone(),
+                    handlers: Vec::new(),
+                    handlers_ts: Vec::new(),
+                });
+            for h in target.handlers {
+                group.handlers.push((h.clone(), shared_ctx_js.clone(), vf.rel.clone()));
+                group.handlers_ts.push((h, shared_ctx_ts.clone(), vf.rel.clone()));
             }
-            registry_entries.push(RegistryEntry {
-                component_id: target.entry.component_id.clone(),
-                kind: ComponentKind::Item,
-                slug: target.entry.slug.clone(),
-            });
         }
 
-        for target in part.blocks.values() {
-            wire_target_json(&target.entry.json_path, &target.entry.component_id)?;
-            let block_js = emit_block_component_module(
-                &target.handlers,
-                &shared_ctx_js,
-                header,
-                &vf.rel,
-                cfg.source_map_comments,
-                EmitMode::JavaScript,
-            );
-            write_generated_file(
-                &js_dir.join(format!("blocks/{}.js", target.entry.slug)),
-                &block_js,
-            )?;
-            if cfg.emit_ts {
-                let block_ts = emit_block_component_module(
-                    &target.handlers,
-                    &shared_ctx_ts,
-                    header,
-                    &vf.rel,
-                    cfg.source_map_comments,
-                    EmitMode::TypeScript,
-                );
-                write_generated_file(
-                    &ts_dir.join(format!("blocks/{}.ts", target.entry.slug)),
-                    &block_ts,
-                )?;
+        for target in part.blocks.into_values() {
+            let group = merged_blocks
+                .entry(target.entry.slug.clone())
+                .or_insert_with(|| MergedComponentGroup {
+                    entry: target.entry.clone(),
+                    header: Some(header.clone()),
+                    primary_source: vf.rel.clone(),
+                    handlers: Vec::new(),
+                    handlers_ts: Vec::new(),
+                });
+            for h in target.handlers {
+                group.handlers.push((h.clone(), shared_ctx_js.clone(), vf.rel.clone()));
+                group.handlers_ts.push((h, shared_ctx_ts.clone(), vf.rel.clone()));
             }
-            registry_entries.push(RegistryEntry {
-                component_id: target.entry.component_id.clone(),
-                kind: ComponentKind::Block,
-                slug: target.entry.slug.clone(),
-            });
         }
 
         if !part.commands.is_empty() {
             let cmd_js = emit_commands_module(
                 &part.commands,
                 &shared_ctx_js,
-                header,
+                Some(&header),
                 &vf.rel,
                 cfg.source_map_comments,
                 EmitMode::JavaScript,
@@ -554,7 +867,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
                 let cmd_ts = emit_commands_module(
                     &part.commands,
                     &shared_ctx_ts,
-                    header,
+                    Some(&header),
                     &vf.rel,
                     cfg.source_map_comments,
                     EmitMode::TypeScript,
@@ -568,7 +881,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             let world_js = emit_world_module(
                 &part.world,
                 &shared_ctx_js,
-                header,
+                Some(&header),
                 &vf.rel,
                 cfg.source_map_comments,
                 EmitMode::JavaScript,
@@ -581,7 +894,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
                 let world_ts = emit_world_module(
                     &part.world,
                     &shared_ctx_ts,
-                    header,
+                    Some(&header),
                     &vf.rel,
                     cfg.source_map_comments,
                     EmitMode::TypeScript,
@@ -593,6 +906,75 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
             }
             main_modules.push(format!("world/{}", vf.stem));
         }
+        collected_programs.push(vf.prog);
+    }
+
+    let mut registry_entries: Vec<RegistryEntry> = Vec::new();
+
+    for group in merged_items.into_values() {
+        wire_target_json(&group.entry.json_path, &group.entry.component_id)?;
+        let item_js = emit_item_component_module_grouped(
+            &group.handlers,
+            group.header.as_ref(),
+            &group.primary_source,
+            cfg.source_map_comments,
+            EmitMode::JavaScript,
+        );
+        write_generated_file(
+            &js_dir.join(format!("items/{}.js", group.entry.slug)),
+            &item_js,
+        )?;
+        if cfg.emit_ts {
+            let item_ts = emit_item_component_module_grouped(
+                &group.handlers_ts,
+                group.header.as_ref(),
+                &group.primary_source,
+                cfg.source_map_comments,
+                EmitMode::TypeScript,
+            );
+            write_generated_file(
+                &ts_dir.join(format!("items/{}.ts", group.entry.slug)),
+                &item_ts,
+            )?;
+        }
+        registry_entries.push(RegistryEntry {
+            component_id: group.entry.component_id,
+            kind: ComponentKind::Item,
+            slug: group.entry.slug,
+        });
+    }
+
+    for group in merged_blocks.into_values() {
+        wire_target_json(&group.entry.json_path, &group.entry.component_id)?;
+        let block_js = emit_block_component_module_grouped(
+            &group.handlers,
+            group.header.as_ref(),
+            &group.primary_source,
+            cfg.source_map_comments,
+            EmitMode::JavaScript,
+        );
+        write_generated_file(
+            &js_dir.join(format!("blocks/{}.js", group.entry.slug)),
+            &block_js,
+        )?;
+        if cfg.emit_ts {
+            let block_ts = emit_block_component_module_grouped(
+                &group.handlers_ts,
+                group.header.as_ref(),
+                &group.primary_source,
+                cfg.source_map_comments,
+                EmitMode::TypeScript,
+            );
+            write_generated_file(
+                &ts_dir.join(format!("blocks/{}.ts", group.entry.slug)),
+                &block_ts,
+            )?;
+        }
+        registry_entries.push(RegistryEntry {
+            component_id: group.entry.component_id,
+            kind: ComponentKind::Block,
+            slug: group.entry.slug,
+        });
     }
 
     if !registry_entries.is_empty() || !command_modules.is_empty() {
@@ -630,7 +1012,7 @@ pub fn convert_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnost
     }
 
     sort_and_dedup_diags(&mut all_diags);
-    Ok(all_diags)
+    Ok((all_diags, collected_programs))
 }
 
 fn sanitize_mcfunction_body(raw_body: &str) -> String {
@@ -711,37 +1093,73 @@ pub fn check_path(
     workspace_root: Option<&Path>,
     spec: &BedrockSpec,
 ) -> Result<Vec<Diagnostic>, String> {
-    let files = collect_pstdr_files(path)?;
-    let cfg = workspace_root
-        .map(WorkspaceConfig::load_from_root)
-        .unwrap_or_default();
-    let mut all_diags = Vec::new();
+    let owned_index = workspace_root.map(WorkspaceAssetIndex::build);
+    check_path_with_index(path, owned_index.as_ref(), spec)
+}
 
-    for f in files {
-        let source = fs::read_to_string(&f)
+pub fn check_path_with_index(
+    path: &Path,
+    index: Option<&WorkspaceAssetIndex>,
+    spec: &BedrockSpec,
+) -> Result<Vec<Diagnostic>, String> {
+    let (diags, _) = check_path_and_collect(path, index, spec)?;
+    Ok(diags)
+}
+
+fn check_path_and_collect(
+    path: &Path,
+    index: Option<&WorkspaceAssetIndex>,
+    spec: &BedrockSpec,
+) -> Result<(Vec<Diagnostic>, Vec<Program>), String> {
+    let files = collect_pstdr_files(path)?;
+    let workspace_root = index.map(|i| i.workspace_root.as_path());
+    let owned_cfg;
+    let cfg = if let Some(idx) = index {
+        &idx.config
+    } else {
+        owned_cfg = WorkspaceConfig::default();
+        &owned_cfg
+    };
+
+    let mut parsed = Vec::with_capacity(files.len());
+    for f in &files {
+        let source = fs::read_to_string(f)
             .map_err(|e| format!("Failed to read '{}': {e}", f.display()))?;
         let label = workspace_root
             .and_then(|r| f.strip_prefix(r).ok())
-            .unwrap_or(&f)
+            .unwrap_or(f)
             .display()
             .to_string();
+        let (prog_opt, diags) = parse_source(&source, &label);
+        parsed.push((prog_opt, diags));
+    }
 
-        let (prog_opt, mut diags) = parse_source(&source, &label);
-        if let Some(prog) = &prog_opt {
+    let inline_mcfunctions = collect_inline_mcfunctions_from_programs(
+        parsed.iter().filter_map(|(p, _)| p.as_ref()),
+    );
+
+    let mut all_diags = Vec::new();
+    let mut programs = Vec::with_capacity(parsed.len());
+
+    for (prog_opt, mut diags) in parsed {
+        if let Some(prog) = prog_opt {
             let vctx = ValidationContext {
                 workspace_root,
                 spec,
                 strict_vanilla_ids: cfg.strict_vanilla_ids,
+                asset_index: index,
+                workspace_mcfunctions: Some(&inline_mcfunctions),
             };
-            let (_info, val_diags) = validate_program(prog, &vctx);
+            let (_info, val_diags) = validate_program(&prog, &vctx);
             diags.extend(val_diags);
+            programs.push(prog);
         }
         sort_and_dedup_diags(&mut diags);
         all_diags.extend(diags);
     }
 
     sort_and_dedup_diags(&mut all_diags);
-    Ok(all_diags)
+    Ok((all_diags, programs))
 }
 
 pub fn fmt_path(path: &Path, check_only: bool) -> Result<(usize, Vec<Diagnostic>), String> {
@@ -776,14 +1194,41 @@ pub fn fmt_path(path: &Path, check_only: bool) -> Result<(usize, Vec<Diagnostic>
 }
 
 pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic>, String> {
-    let cfg = WorkspaceConfig::load_from_root(root);
+    let index = WorkspaceAssetIndex::build(root);
+    audit_workspace_with_index(root, &index, spec)
+}
+
+pub fn audit_workspace_with_index(
+    root: &Path,
+    index: &WorkspaceAssetIndex,
+    spec: &BedrockSpec,
+) -> Result<Vec<Diagnostic>, String> {
+    let cfg = &index.config;
     let src_dir = root.join(&cfg.src_dir);
     let scan_target = if src_dir.is_dir() { src_dir } else { root.to_path_buf() };
-    let mut diags = check_path(&scan_target, Some(root), spec)?;
+    let (mut diags, parsed_programs) =
+        check_path_and_collect(&scan_target, Some(index), spec)?;
 
-    if cfg.strict_asset_refs {
-        diags.extend(crate::assets::validate_workspace_assets(root, spec)?);
+    let rest = audit_workspace_with_collected(root, index, spec, &parsed_programs, true)?;
+    diags.extend(rest);
+    sort_and_dedup_diags(&mut diags);
+    Ok(diags)
+}
+
+fn audit_workspace_with_collected(
+    root: &Path,
+    index: &WorkspaceAssetIndex,
+    spec: &BedrockSpec,
+    parsed_programs: &[Program],
+    run_asset_refs: bool,
+) -> Result<Vec<Diagnostic>, String> {
+    let cfg = &index.config;
+    let mut diags = Vec::new();
+
+    if run_asset_refs && cfg.strict_asset_refs {
+        diags.extend(validate_workspace_assets_with_index(index, spec));
     }
+    diags.extend(validate_bedrock_schema_gates(index));
 
     let bp_manifest = root.join("BP/manifest.json");
     let mut bp_uuid: Option<String> = None;
@@ -870,23 +1315,20 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
         }
     }
 
-    let rp_manifest = root.join("RP/manifest.json");
-    if rp_manifest.is_file() {
-        if let Ok(raw) = fs::read_to_string(&rp_manifest) {
-            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
-                let rp_uuid = val
-                    .get("header")
-                    .and_then(|h| h.get("uuid"))
-                    .and_then(|u| u.as_str());
-                if let (Some(bp), Some(rp)) = (bp_uuid.as_deref(), rp_uuid) {
-                    if bp == rp {
-                        diags.push(Diagnostic::error(
-                            DiagnosticCode::E015,
-                            &Span::file_only("RP/manifest.json"),
-                            format!("Audit Gate failed: BP and RP header UUIDs collide ('{bp}')."),
-                            "Generate a unique UUID v4 for each of the BP and RP headers.",
-                        ));
-                    }
+    if let Some(raw) = &index.rp_manifest_raw {
+        if let Ok(val) = serde_json::from_str::<Value>(raw) {
+            let rp_uuid = val
+                .get("header")
+                .and_then(|h| h.get("uuid"))
+                .and_then(|u| u.as_str());
+            if let (Some(bp), Some(rp)) = (bp_uuid.as_deref(), rp_uuid) {
+                if bp == rp {
+                    diags.push(Diagnostic::error(
+                        DiagnosticCode::E015,
+                        &Span::file_only("RP/manifest.json"),
+                        format!("Audit Gate failed: BP and RP header UUIDs collide ('{bp}')."),
+                        "Generate a unique UUID v4 for each of the BP and RP headers.",
+                    ));
                 }
             }
         }
@@ -894,26 +1336,13 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
 
     if let Some(api_ver) = manifest_server_api.as_deref() {
         let mut declared_api: Option<String> = None;
-        if let Ok(pstdr_files) = collect_pstdr_files(&scan_target) {
-            for path in pstdr_files {
-                let Ok(source) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string();
-                let (prog_opt, _) = parse_source(&source, &rel);
-                if let Some(prog) = prog_opt {
-                    if let Some(h) = &prog.header {
-                        let is_cur_beta = declared_api
-                            .as_deref()
-                            .is_some_and(crate::spec::is_beta_api_version);
-                        if !is_cur_beta || crate::spec::is_beta_api_version(&h.api) {
-                            declared_api = Some(h.api.clone());
-                        }
-                    }
+        for prog in parsed_programs {
+            if let Some(h) = &prog.header {
+                let is_cur_beta = declared_api
+                    .as_deref()
+                    .is_some_and(crate::spec::is_beta_api_version);
+                if !is_cur_beta || crate::spec::is_beta_api_version(&h.api) {
+                    declared_api = Some(h.api.clone());
                 }
             }
         }
@@ -933,9 +1362,9 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
             let audit_profile = ApiProfile::resolve_or_default(api_ver);
             if audit_profile == ApiProfile::Legacy1x {
                 let legacy_spec = BedrockSpec::for_profile(ApiProfile::Legacy1x);
-                audit_beta_api_usage(root, &cfg, &scan_target, api_ver, &legacy_spec, &mut diags)?;
+                audit_beta_api_usage(root, cfg, parsed_programs, api_ver, &legacy_spec, &mut diags)?;
             } else {
-                audit_beta_api_usage(root, &cfg, &scan_target, api_ver, spec, &mut diags)?;
+                audit_beta_api_usage(root, cfg, parsed_programs, api_ver, spec, &mut diags)?;
             }
         }
     }
@@ -947,7 +1376,7 @@ pub fn audit_workspace(root: &Path, spec: &BedrockSpec) -> Result<Vec<Diagnostic
 fn audit_beta_api_usage(
     root: &Path,
     cfg: &WorkspaceConfig,
-    scan_target: &Path,
+    parsed_programs: &[Program],
     manifest_api: &str,
     spec: &BedrockSpec,
     diags: &mut Vec<Diagnostic>,
@@ -956,6 +1385,30 @@ fn audit_beta_api_usage(
     beta_events.sort();
     let mut beta_apis: Vec<&String> = spec.beta_apis.iter().collect();
     beta_apis.sort();
+
+    // Precompute exact substring/token needles once so scanning hundreds of generated JS files is O(bytes).
+    let event_needles: Vec<(&str, Vec<String>)> = beta_events
+        .iter()
+        .map(|ev| {
+            let ev_lower = ev.trim().to_ascii_lowercase();
+            let needles = if let Some(name) = ev_lower.strip_prefix("before:") {
+                vec![format!("beforeevents.{name}")]
+            } else if let Some(name) = ev_lower.strip_prefix("after:") {
+                vec![format!("afterevents.{name}")]
+            } else {
+                vec![format!("beforeevents.{ev_lower}"), format!("afterevents.{ev_lower}")]
+            };
+            (ev.as_str(), needles)
+        })
+        .collect();
+
+    let api_needles: Vec<(&str, Option<&str>)> = beta_apis
+        .iter()
+        .map(|sym| {
+            let member = sym.split_once('.').map(|(_, m)| m);
+            (sym.as_str(), member)
+        })
+        .collect();
 
     // 1. Scan runtime JS outputs under BP/scripts/ (skip build/ts/ mirrors to avoid duplicate reports).
     let js_dir = root.join(&cfg.js_out_dir);
@@ -969,34 +1422,52 @@ fn audit_beta_api_usage(
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
+        let content_lower = content.to_ascii_lowercase();
+        let file_might_have_event = (content_lower.contains("beforeevents.")
+            || content_lower.contains("afterevents."))
+            && event_needles
+                .iter()
+                .any(|(_, needles)| needles.iter().any(|n| content_lower.contains(n.as_str())));
+        let file_might_have_api = api_needles.iter().any(|(sym, member)| {
+            content.contains(sym) || member.is_some_and(|m| content.contains(m))
+        });
+        if !file_might_have_event && !file_might_have_api {
+            continue;
+        }
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
             .display()
             .to_string();
         for (idx, line) in content.lines().enumerate() {
-            for beta_ev in &beta_events {
-                if crate::spec::text_uses_beta_event(line, beta_ev) {
-                    diags.push(Diagnostic::error(
-                        DiagnosticCode::E018,
-                        &Span::new(&rel, idx + 1, 1, line.len().max(1)),
-                        format!(
-                            "Audit Gate failed: '{rel}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                        ),
-                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
-                    ));
+            if file_might_have_event {
+                for beta_ev in &beta_events {
+                    if crate::spec::text_uses_beta_event(line, beta_ev) {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E018,
+                            &Span::new(&rel, idx + 1, 1, line.len().max(1)),
+                            format!(
+                                "Audit Gate failed: '{rel}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                            ),
+                            "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                        ));
+                    }
                 }
             }
-            for beta_sym in &beta_apis {
-                if crate::spec::text_uses_beta_api(line, beta_sym) {
-                    diags.push(Diagnostic::error(
-                        DiagnosticCode::E018,
-                        &Span::new(&rel, idx + 1, 1, line.len().max(1)),
-                        format!(
-                            "Audit Gate failed: '{rel}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                        ),
-                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                    ));
+            if file_might_have_api {
+                for (beta_sym, member) in &api_needles {
+                    let quick_hit = line.contains(beta_sym)
+                        || member.is_some_and(|m| line.contains(m));
+                    if quick_hit && crate::spec::text_uses_beta_api(line, beta_sym) {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E018,
+                            &Span::new(&rel, idx + 1, 1, line.len().max(1)),
+                            format!(
+                                "Audit Gate failed: '{rel}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                            ),
+                            "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                        ));
+                    }
                 }
             }
         }
@@ -1005,105 +1476,93 @@ fn audit_beta_api_usage(
     // 2. If no generated JS files exist yet, also inspect .pstdr sources against BP/manifest.json
     // (catches files that declared `-beta` in `@addon` before `convert` updated the manifest).
     if js_files.is_empty() {
-        let pstdr_files = collect_pstdr_files(scan_target)?;
-        for path in pstdr_files {
-            let Ok(source) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
-            let (prog_opt, _) = parse_source(&source, &rel);
-            if let Some(prog) = prog_opt {
-                for item in &prog.items {
-                    match item {
-                        crate::ast::TopLevelItem::EventHandler(ev)
-                            if spec.is_beta_event("chatSend")
-                                && matches!(ev.kind, crate::ast::EventKind::ChatSend { .. }) =>
-                        {
-                            diags.push(Diagnostic::error(
-                                DiagnosticCode::E018,
-                                &ev.span,
-                                format!(
-                                    "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                                ),
-                                "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
-                            ));
-                        }
-                        crate::ast::TopLevelItem::EventHandler(ev)
-                            if spec.is_beta_before_event("playerPlaceBlock")
-                                && matches!(ev.kind, crate::ast::EventKind::PlaceBlock { .. })
-                                && crate::codegen::block_contains_cancel(&ev.body) =>
-                        {
-                            diags.push(Diagnostic::error(
-                                DiagnosticCode::E018,
-                                &ev.span,
-                                format!(
-                                    "Audit Gate failed: 'on place' with 'cancel event' uses Beta-only 'beforeEvents.playerPlaceBlock', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
-                                ),
-                                "Remove 'cancel event' to use stable 'afterEvents.playerPlaceBlock', or re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' and enable Beta APIs.",
-                            ));
-                        }
-                        crate::ast::TopLevelItem::UnsafeFuncDecl(u) => {
-                            for beta_ev in &beta_events {
-                                if crate::spec::text_uses_beta_event(&u.raw_body, beta_ev) {
-                                    diags.push(Diagnostic::error(
-                                        DiagnosticCode::E018,
-                                        &u.span,
-                                        format!(
-                                            "Audit Gate failed: unsafe function '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                            u.name
-                                        ),
-                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
-                                    ));
-                                }
-                            }
-                            for beta_sym in &beta_apis {
-                                if crate::spec::text_uses_beta_api(&u.raw_body, beta_sym) {
-                                    diags.push(Diagnostic::error(
-                                        DiagnosticCode::E018,
-                                        &u.span,
-                                        format!(
-                                            "Audit Gate failed: unsafe function '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                            u.name
-                                        ),
-                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                                    ));
-                                }
-                            }
-                        }
-                        crate::ast::TopLevelItem::UnsafeVarDecl(u) => {
-                            for beta_ev in &beta_events {
-                                if crate::spec::text_uses_beta_event(&u.raw_rest, beta_ev) {
-                                    diags.push(Diagnostic::error(
-                                        DiagnosticCode::E018,
-                                        &u.span,
-                                        format!(
-                                            "Audit Gate failed: unsafe variable '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                            u.name
-                                        ),
-                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
-                                    ));
-                                }
-                            }
-                            for beta_sym in &beta_apis {
-                                if crate::spec::text_uses_beta_api(&u.raw_rest, beta_sym) {
-                                    diags.push(Diagnostic::error(
-                                        DiagnosticCode::E018,
-                                        &u.span,
-                                        format!(
-                                            "Audit Gate failed: unsafe variable '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
-                                            u.name
-                                        ),
-                                        "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {}
+        for prog in parsed_programs {
+            for item in &prog.items {
+                match item {
+                    TopLevelItem::EventHandler(ev)
+                        if spec.is_beta_event("chatSend")
+                            && matches!(ev.kind, EventKind::ChatSend { .. }) =>
+                    {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E018,
+                            &ev.span,
+                            format!(
+                                "Audit Gate failed: 'on chat' uses Beta-only 'chatSend', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                            ),
+                            "Re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' so BP/manifest.json uses a '-beta' version, or replace 'on chat' with stable interactions.",
+                        ));
                     }
+                    TopLevelItem::EventHandler(ev)
+                        if spec.is_beta_before_event("playerPlaceBlock")
+                            && matches!(ev.kind, EventKind::PlaceBlock { .. })
+                            && block_contains_cancel(&ev.body) =>
+                    {
+                        diags.push(Diagnostic::error(
+                            DiagnosticCode::E018,
+                            &ev.span,
+                            format!(
+                                "Audit Gate failed: 'on place' with 'cancel event' uses Beta-only 'beforeEvents.playerPlaceBlock', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'."
+                            ),
+                            "Remove 'cancel event' to use stable 'afterEvents.playerPlaceBlock', or re-run 'pstdr-c convert --workspace' with '@addon(api = \"2.11.0-beta\")' and enable Beta APIs.",
+                        ));
+                    }
+                    TopLevelItem::UnsafeFuncDecl(u) => {
+                        for beta_ev in &beta_events {
+                            if crate::spec::text_uses_beta_event(&u.raw_body, beta_ev) {
+                                diags.push(Diagnostic::error(
+                                    DiagnosticCode::E018,
+                                    &u.span,
+                                    format!(
+                                        "Audit Gate failed: unsafe function '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                        u.name
+                                    ),
+                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                                ));
+                            }
+                        }
+                        for beta_sym in &beta_apis {
+                            if crate::spec::text_uses_beta_api(&u.raw_body, beta_sym) {
+                                diags.push(Diagnostic::error(
+                                    DiagnosticCode::E018,
+                                    &u.span,
+                                    format!(
+                                        "Audit Gate failed: unsafe function '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                        u.name
+                                    ),
+                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                                ));
+                            }
+                        }
+                    }
+                    TopLevelItem::UnsafeVarDecl(u) => {
+                        for beta_ev in &beta_events {
+                            if crate::spec::text_uses_beta_event(&u.raw_rest, beta_ev) {
+                                diags.push(Diagnostic::error(
+                                    DiagnosticCode::E018,
+                                    &u.span,
+                                    format!(
+                                        "Audit Gate failed: unsafe variable '{}' uses Beta-only event '{beta_ev}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                        u.name
+                                    ),
+                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only event.",
+                                ));
+                            }
+                        }
+                        for beta_sym in &beta_apis {
+                            if crate::spec::text_uses_beta_api(&u.raw_rest, beta_sym) {
+                                diags.push(Diagnostic::error(
+                                    DiagnosticCode::E018,
+                                    &u.span,
+                                    format!(
+                                        "Audit Gate failed: unsafe variable '{}' uses Beta-only API '{beta_sym}', but BP/manifest.json declares stable '@minecraft/server' '{manifest_api}'.",
+                                        u.name
+                                    ),
+                                    "Update '@minecraft/server' in BP/manifest.json (and '@addon(api = \"2.11.0-beta\")') to a '-beta' version and enable Beta APIs in world settings, or remove the Beta-only API call.",
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

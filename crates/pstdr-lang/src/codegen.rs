@@ -1,9 +1,20 @@
 use crate::ast::*;
 use crate::spec::{
-    map_item_property, map_method, map_property, map_system_method, map_world_method,
+    contains_ident_token, map_item_property, map_method, map_property, map_system_method,
+    map_world_method,
 };
 use crate::validator::eval_static_string;
 use std::collections::{BTreeSet, HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExprType {
+    Entity,
+    EntityList,
+    Block,
+    Item,
+    System,
+    Plain,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitMode {
@@ -11,7 +22,7 @@ pub enum EmitMode {
     TypeScript,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ComponentKind {
     Item,
     Block,
@@ -25,6 +36,12 @@ pub struct CodegenOptions {
     pub bound_block_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalSymbolKind {
+    Value,
+    State,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SharedContext {
     pub shared_exports: HashSet<String>,
@@ -32,6 +49,7 @@ pub struct SharedContext {
     pub shared_states: HashSet<String>,
     pub const_strings: HashMap<String, String>,
     pub shared_import_path: Option<String>,
+    pub external_symbols: HashMap<String, (String, ExternalSymbolKind)>,
 }
 
 impl SharedContext {
@@ -42,9 +60,13 @@ impl SharedContext {
             shared_states: HashSet::new(),
             const_strings: HashMap::new(),
             shared_import_path: import_path,
+            external_symbols: HashMap::new(),
         };
         for item in shared {
             match item {
+                TopLevelItem::TableDecl(t) => {
+                    ctx.shared_exports.insert(t.name.clone());
+                }
                 TopLevelItem::ConstDecl(d) => {
                     if let Some(s) = eval_static_string(&d.value, &ctx.const_strings) {
                         ctx.const_strings.insert(d.name.clone(), s);
@@ -74,8 +96,22 @@ impl SharedContext {
 }
 
 pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> String {
-    let mut state_names = HashSet::new();
-    let mut const_strings = HashMap::new();
+    emit_code_with_context(program, opts, &SharedContext::default(), mode)
+}
+
+pub fn emit_code_with_context(
+    program: &Program,
+    opts: &CodegenOptions,
+    external_shared: &SharedContext,
+    mode: EmitMode,
+) -> String {
+    let mut state_names = external_shared.shared_states.clone();
+    for (sym, (_, kind)) in &external_shared.external_symbols {
+        if *kind == ExternalSymbolKind::State {
+            state_names.insert(sym.clone());
+        }
+    }
+    let mut const_strings = external_shared.const_strings.clone();
     for item in &program.items {
         match item {
             TopLevelItem::StateDecl(s) => {
@@ -90,7 +126,7 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         }
     }
 
-    let default_spec = crate::spec::BedrockSpec::bundled();
+    let default_spec = crate::spec::BedrockSpec::bundled_ref();
     let api_ver = program
         .header
         .as_ref()
@@ -98,42 +134,19 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
         .unwrap_or(&default_spec.script_api_version);
     let profile = ApiProfile::resolve_or_default(api_ver);
 
-    let mut cg = Codegen {
+    let mut cg = Codegen::new(
         opts,
         mode,
         profile,
         state_names,
         const_strings,
-        shared: SharedContext::default(),
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        SharedContext {
+            external_symbols: external_shared.external_symbols.clone(),
+            ..SharedContext::default()
+        },
+    );
 
+    cg.collect_func_entity_params(program);
     cg.emit_program(program);
 
     let target_ver = program
@@ -155,7 +168,17 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
     let use_v2_startup =
         profile.uses_startup_event() && crate::wiring::uses_custom_components_v2(target_ver);
 
-    let has_components = !opts.custom_components.is_empty();
+    let has_item_callbacks = !cg.item_use_callbacks.is_empty()
+        || !cg.item_hit_callbacks.is_empty()
+        || !cg.item_consume_callbacks.is_empty();
+    let has_block_callbacks = !cg.block_interact_callbacks.is_empty()
+        || !cg.block_tick_callbacks.is_empty()
+        || !cg.block_break_callbacks.is_empty();
+    let has_components = !opts.custom_components.is_empty()
+        && opts.custom_components.iter().any(|(_, k)| match k {
+            ComponentKind::Item => has_item_callbacks,
+            ComponentKind::Block => has_block_callbacks || !opts.bound_block_ids.is_empty(),
+        });
     let has_cmds = !cg.cmd_registrations.is_empty();
     let need_world = cg.needs_world || (has_components && !use_v2_startup);
     let need_system = cg.needs_system || (has_components && use_v2_startup) || has_cmds;
@@ -172,6 +195,9 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
     }
     if cg.needs_item_stack {
         imports.push("ItemStack");
+    }
+    if cg.needs_entity_damage_cause {
+        imports.push("EntityDamageCause");
     }
     if cg.needs_command_permission_level {
         imports.push("CommandPermissionLevel");
@@ -204,7 +230,15 @@ pub fn emit_code(program: &Program, opts: &CodegenOptions, mode: EmitMode) -> St
             ui_imports.join(", ")
         ));
     }
-    if !imports.is_empty() || !ui_imports.is_empty() {
+    let has_extra_imports = cg.extra_shared_imports.values().any(|s| !s.is_empty());
+    for (path, names) in &cg.extra_shared_imports {
+        if names.is_empty() {
+            continue;
+        }
+        let list: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        out.push_str(&format!("import {{ {} }} from \"{path}\";\n", list.join(", ")));
+    }
+    if !imports.is_empty() || !ui_imports.is_empty() || has_extra_imports {
         out.push('\n');
     }
 
@@ -252,17 +286,88 @@ fn emit_custom_component_registrations(
     cg: &Codegen<'_>,
     cb_ev_param: &str,
 ) {
+    let mut emitted_ids = HashSet::new();
     for (comp_id, kind) in &opts.custom_components {
+        if !emitted_ids.insert((comp_id.clone(), *kind)) {
+            continue;
+        }
         match kind {
             ComponentKind::Item => {
+                let mut methods = Vec::new();
+                if !cg.item_use_callbacks.is_empty() {
+                    let wrap = cg.item_use_callbacks.len() > 1;
+                    let mut m = format!("        onUse{cb_ev_param} {{\n");
+                    for snippet in &cg.item_use_callbacks {
+                        if wrap {
+                            m.push_str("            {\n");
+                            for line in snippet.lines() {
+                                m.push_str("    ");
+                                m.push_str(line);
+                                m.push('\n');
+                            }
+                            m.push_str("            }\n");
+                        } else {
+                            m.push_str(snippet);
+                        }
+                    }
+                    m.push_str("        }");
+                    methods.push(m);
+                }
+                if !cg.item_hit_callbacks.is_empty() {
+                    let wrap = cg.item_hit_callbacks.len() > 1;
+                    let mut m = format!("        onHitEntity{cb_ev_param} {{\n");
+                    for snippet in &cg.item_hit_callbacks {
+                        if wrap {
+                            m.push_str("            {\n");
+                            for line in snippet.lines() {
+                                m.push_str("    ");
+                                m.push_str(line);
+                                m.push('\n');
+                            }
+                            m.push_str("            }\n");
+                        } else {
+                            m.push_str(snippet);
+                        }
+                    }
+                    m.push_str("        }");
+                    methods.push(m);
+                }
+                if !cg.item_consume_callbacks.is_empty() {
+                    let wrap = cg.item_consume_callbacks.len() > 1;
+                    let mut m = format!("        onConsume{cb_ev_param} {{\n");
+                    for snippet in &cg.item_consume_callbacks {
+                        if wrap {
+                            m.push_str("            {\n");
+                            for line in snippet.lines() {
+                                m.push_str("    ");
+                                m.push_str(line);
+                                m.push('\n');
+                            }
+                            m.push_str("            }\n");
+                        } else {
+                            m.push_str(snippet);
+                        }
+                    }
+                    m.push_str("        }");
+                    methods.push(m);
+                }
+                if methods.is_empty() {
+                    continue;
+                }
                 out.push_str(&format!(
-                    "    initEv.itemComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
+                    "    initEv.itemComponentRegistry.registerCustomComponent(\"{comp_id}\", {{\n"
                 ));
+                out.push_str(&methods.join(",\n"));
+                out.push_str("\n    });\n");
             }
             ComponentKind::Block => {
                 let has_interact = !cg.block_interact_callbacks.is_empty();
                 let has_tick = !cg.block_tick_callbacks.is_empty();
-                if !has_interact && !has_tick {
+                let has_break = !cg.block_break_callbacks.is_empty();
+                if !has_interact && !has_tick && !has_break {
+                    if opts.bound_block_ids.is_empty() {
+                        continue;
+                    }
                     out.push_str(&format!(
                         "    initEv.blockComponentRegistry.registerCustomComponent(\"{comp_id}\", {{}});\n"
                     ));
@@ -282,6 +387,14 @@ fn emit_custom_component_registrations(
                     if has_tick {
                         let mut m = format!("        onTick{cb_ev_param} {{\n");
                         for snippet in &cg.block_tick_callbacks {
+                            m.push_str(snippet);
+                        }
+                        m.push_str("        }");
+                        methods.push(m);
+                    }
+                    if has_break {
+                        let mut m = format!("        onPlayerBreak{cb_ev_param} {{\n");
+                        for snippet in &cg.block_break_callbacks {
                             m.push_str(snippet);
                         }
                         m.push_str("        }");
@@ -311,14 +424,172 @@ fn emit_runtime_helpers(out: &mut String, cg: &Codegen<'_>, mode: EmitMode) {
 
     if cg.needs_within_helper {
         if mode == EmitMode::TypeScript {
-            out.push_str("function __pstdr_within(a: any, b: any): boolean {\n");
+            out.push_str("function __pstdr_within(a: any, b: any, maxDist: number = 5): boolean {\n");
         } else {
-            out.push_str("function __pstdr_within(a, b) {\n");
+            out.push_str("function __pstdr_within(a, b, maxDist = 5) {\n");
         }
         out.push_str(
             "    if (!a || !b || !a.location || !b.location) return false;\n\
-             \x20   return Math.hypot(a.location.x - b.location.x, a.location.y - b.location.y, a.location.z - b.location.z) <= 5;\n}\n\n",
+             \x20   if (a.dimension && b.dimension && a.dimension.id !== b.dimension.id) return false;\n\
+             \x20   const r = Math.min(64, Math.max(0, Number(maxDist) || 0));\n\
+             \x20   const dx = a.location.x - b.location.x;\n\
+             \x20   const dy = a.location.y - b.location.y;\n\
+             \x20   const dz = a.location.z - b.location.z;\n\
+             \x20   return (dx * dx + dy * dy + dz * dz) <= (r * r);\n}\n\n",
         );
+    }
+
+    if cg.needs_heal_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_heal(target: any, amount: number): void {\n");
+        } else {
+            out.push_str("function __pstdr_heal(target, amount) {\n");
+        }
+        out.push_str(
+            "    const h = target?.getComponent?.(\"minecraft:health\");\n\
+             \x20   if (!h) return;\n\
+             \x20   const maxVal = typeof h.effectiveMax === \"number\" ? h.effectiveMax : 20;\n\
+             \x20   h.setCurrentValue(Math.min(maxVal, Math.max(0, h.currentValue + amount)));\n}\n\n",
+        );
+    }
+
+    if cg.needs_equipment_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_equipment(entity: any, slotName: any): any {\n");
+        } else {
+            out.push_str("function __pstdr_equipment(entity, slotName) {\n");
+        }
+        out.push_str(
+            "    const eq = entity?.getComponent?.(\"minecraft:equippable\");\n\
+             \x20   if (!eq) return undefined;\n\
+             \x20   const norm = String(slotName ?? \"\").toLowerCase();\n\
+             \x20   let slot = EquipmentSlot.Mainhand;\n\
+             \x20   if (norm === \"head\" || norm === \"helmet\") slot = EquipmentSlot.Head;\n\
+             \x20   else if (norm === \"chest\" || norm === \"chestplate\" || norm === \"torso\") slot = EquipmentSlot.Chest;\n\
+             \x20   else if (norm === \"legs\" || norm === \"leggings\") slot = EquipmentSlot.Legs;\n\
+             \x20   else if (norm === \"feet\" || norm === \"boots\") slot = EquipmentSlot.Feet;\n\
+             \x20   else if (norm === \"offhand\") slot = EquipmentSlot.Offhand;\n\
+             \x20   return eq.getEquipment(slot);\n}\n\n",
+        );
+    }
+
+    if cg.needs_damage_cause_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_damage_cause(rawCause: any): any {\n");
+        } else {
+            out.push_str("function __pstdr_damage_cause(rawCause) {\n");
+        }
+        out.push_str(
+            "    const key = String(rawCause ?? \"\").replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());\n\
+             \x20   return EntityDamageCause[key] ?? EntityDamageCause.entityAttack;\n}\n\n",
+        );
+    }
+
+    if cg.needs_play_sound_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_play_sound(target: any, soundId: string, opts?: any): void {\n");
+        } else {
+            out.push_str("function __pstdr_play_sound(target, soundId, opts) {\n");
+        }
+        out.push_str(
+            "    if (!target) return;\n\
+             \x20   const dim = target.dimension ?? world.getDimension(\"overworld\");\n\
+             \x20   const loc = target.location ?? target;\n\
+             \x20   if (opts) dim.playSound(soundId, loc, opts);\n\
+             \x20   else dim.playSound(soundId, loc);\n}\n\n",
+        );
+    }
+
+    if cg.needs_raycast_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_raycast_entities(origin: any, range: number, pierce: number = 1): any[] {\n");
+        } else {
+            out.push_str("function __pstdr_raycast_entities(origin, range, pierce = 1) {\n");
+        }
+        out.push_str(
+            "    if (!origin?.dimension) return [];\n\
+             \x20   const hits = origin.dimension.getEntitiesFromRay(origin.getHeadLocation(), origin.getViewDirection(), { maxDistance: Math.max(0.5, range) });\n\
+             \x20   const limit = Math.max(1, Math.round(pierce));\n\
+             \x20   return hits.map((h) => h.entity).filter((e) => e && e.id !== origin.id).slice(0, limit);\n}\n\n",
+        );
+    }
+
+    if cg.needs_cone_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_cone_entities(origin: any, radius: number, angleDeg: number): any[] {\n");
+        } else {
+            out.push_str("function __pstdr_cone_entities(origin, radius, angleDeg) {\n");
+        }
+        out.push_str(
+            "    if (!origin?.dimension) return [];\n\
+             \x20   const r = Math.max(0.5, radius);\n\
+             \x20   const cosThresh = Math.cos(((Number(angleDeg) || 60) * 0.5) * Math.PI / 180);\n\
+             \x20   const head = origin.getHeadLocation();\n\
+             \x20   const fwd = origin.getViewDirection();\n\
+             \x20   return origin.dimension.getEntities({ location: origin.location, maxDistance: r }).filter((e) => {\n\
+             \x20       if (!e || e.id === origin.id) return false;\n\
+             \x20       const p = e.getHeadLocation ? e.getHeadLocation() : e.location;\n\
+             \x20       const dx = p.x - head.x;\n\
+             \x20       const dy = p.y - head.y;\n\
+             \x20       const dz = p.z - head.z;\n\
+             \x20       const len = Math.hypot(dx, dy, dz) || 1;\n\
+             \x20       return ((dx * fwd.x + dy * fwd.y + dz * fwd.z) / len) >= cosThresh;\n\
+             \x20   });\n}\n\n",
+        );
+    }
+
+    if cg.needs_entities_within_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_entities_within(origin: any, radius: number): any[] {\n");
+        } else {
+            out.push_str("function __pstdr_entities_within(origin, radius) {\n");
+        }
+        out.push_str(
+            "    if (!origin) return [];\n\
+             \x20   const dim = origin.dimension ?? world.getDimension(\"overworld\");\n\
+             \x20   const loc = origin.location ?? origin;\n\
+             \x20   const r = Math.min(64, Math.max(0, Number(radius) || 0));\n\
+             \x20   return dim.getEntities({ location: loc, maxDistance: r }).filter((e) => !origin.id || e.id !== origin.id);\n}\n\n",
+        );
+    }
+
+    if cg.needs_launch_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_launch_projectile(caster: any, typeId: string, speed: number): any {\n");
+        } else {
+            out.push_str("function __pstdr_launch_projectile(caster, typeId, speed) {\n");
+        }
+        out.push_str(
+            "    if (!caster?.dimension) return undefined;\n\
+             \x20   const head = caster.getHeadLocation();\n\
+             \x20   const dir = caster.getViewDirection();\n\
+             \x20   const spawnLoc = { x: head.x + dir.x * 1.2, y: head.y + dir.y * 1.2, z: head.z + dir.z * 1.2 };\n\
+             \x20   const proj = caster.dimension.spawnEntity(typeId, spawnLoc);\n\
+             \x20   const vel = { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed };\n\
+             \x20   const comp = proj.getComponent(\"minecraft:projectile\");\n\
+             \x20   if (comp) { comp.owner = caster; comp.shoot(vel); }\n\
+             \x20   else { proj.applyImpulse(vel); }\n\
+             \x20   return proj;\n}\n\n",
+        );
+    }
+
+    if cg.needs_dash_helper {
+        if mode == EmitMode::TypeScript {
+            out.push_str("function __pstdr_dash(target: any, forward: number, up: number = 0): void {\n");
+        } else {
+            out.push_str("function __pstdr_dash(target, forward, up = 0) {\n");
+        }
+        let knockback_call = match cg.profile {
+            ApiProfile::Modern2x => "    target.applyKnockback({ x: nx * forward, z: nz * forward }, up);",
+            ApiProfile::Legacy1x => "    target.applyKnockback(nx, nz, forward, up);",
+        };
+        out.push_str(&format!(
+            "    if (!target?.getViewDirection) return;\n\
+             \x20   const d = target.getViewDirection();\n\
+             \x20   const len = Math.hypot(d.x, d.z) || 1;\n\
+             \x20   const nx = d.x / len;\n\
+             \x20   const nz = d.z / len;\n{knockback_call}\n}}\n\n"
+        ));
     }
 
     if cg.needs_give_item_helper {
@@ -415,7 +686,7 @@ fn assemble_partitioned_module(
     header: Option<&AddonDirective>,
     mode: EmitMode,
 ) -> String {
-    let default_spec = crate::spec::BedrockSpec::bundled();
+    let default_spec = crate::spec::BedrockSpec::bundled_ref();
     let target_ver = header
         .map(|h| h.target.as_str())
         .unwrap_or(&default_spec.bedrock_version);
@@ -442,6 +713,9 @@ fn assemble_partitioned_module(
     }
     if cg.needs_item_stack {
         mc_imports.push("ItemStack");
+    }
+    if cg.needs_entity_damage_cause {
+        mc_imports.push("EntityDamageCause");
     }
     if cg.needs_command_permission_level {
         mc_imports.push("CommandPermissionLevel");
@@ -487,8 +761,21 @@ fn assemble_partitioned_module(
             names.join(", ")
         ));
     }
+    let has_extra_shared = !cg.extra_shared_imports.is_empty();
+    for (path, names) in &cg.extra_shared_imports {
+        if names.is_empty() {
+            continue;
+        }
+        let list: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        out.push_str(&format!("import {{ {} }} from \"{path}\";\n", list.join(", ")));
+    }
 
-    if has_mc_imports || has_ui_imports || has_shared_imports || cg.opts.source_map_comments {
+    if has_mc_imports
+        || has_ui_imports
+        || has_shared_imports
+        || has_extra_shared
+        || cg.opts.source_map_comments
+    {
         out.push('\n');
     }
 
@@ -507,53 +794,53 @@ pub fn emit_shared_module(
     source_map_comments: bool,
     mode: EmitMode,
 ) -> String {
+    emit_shared_module_with_externals(
+        shared_items,
+        &SharedContext::default(),
+        header,
+        source_file,
+        source_map_comments,
+        mode,
+    )
+}
+
+pub fn emit_shared_module_with_externals(
+    shared_items: &[TopLevelItem],
+    externals: &SharedContext,
+    header: Option<&AddonDirective>,
+    source_file: &str,
+    source_map_comments: bool,
+    mode: EmitMode,
+) -> String {
     let opts = CodegenOptions {
         source_file: source_file.to_string(),
         source_map_comments,
         custom_components: Vec::new(),
         bound_block_ids: Vec::new(),
     };
-    let shared_ctx = SharedContext::from_shared_items(shared_items, None);
-    let state_names = shared_ctx.shared_states.clone();
+    let mut shared_ctx = SharedContext::from_shared_items(shared_items, None);
+    shared_ctx.external_symbols = externals.external_symbols.clone();
+    shared_ctx.const_strings.extend(externals.const_strings.clone());
+    let mut state_names = shared_ctx.shared_states.clone();
+    for (sym, (_, kind)) in &shared_ctx.external_symbols {
+        if *kind == ExternalSymbolKind::State {
+            state_names.insert(sym.clone());
+        }
+    }
     let profile = header
         .map(|h| ApiProfile::resolve_or_default(&h.api))
         .unwrap_or(ApiProfile::Modern2x);
 
-    let mut cg = Codegen {
-        opts: &opts,
+    let mut cg = Codegen::new(
+        &opts,
         mode,
         profile,
         state_names,
-        const_strings: HashMap::new(),
-        shared: shared_ctx,
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        shared_ctx.const_strings.clone(),
+        shared_ctx,
+    );
+
+    cg.collect_func_entity_params_items(shared_items);
 
     let mut consts = Vec::new();
     let mut muts = Vec::new();
@@ -561,6 +848,7 @@ pub fn emit_shared_module(
     for item in shared_items {
         match item {
             TopLevelItem::ConstDecl(d) => consts.push(d),
+            TopLevelItem::TableDecl(_) => others.push(item),
             TopLevelItem::MutDecl(d) => muts.push(d),
             _ => others.push(item),
         }
@@ -604,6 +892,11 @@ pub fn emit_shared_module(
         }
         first_section = false;
         match item {
+            TopLevelItem::TableDecl(t) => {
+                cg.emit_source_comment(t.span.line);
+                let val = cg.emit_expr(&t.value);
+                cg.line(&format!("export const {} = {val};", t.name));
+            }
             TopLevelItem::StateDecl(s) => {
                 cg.emit_source_comment(s.span.line);
                 let default_js = cg.emit_expr(&s.default_value);
@@ -643,8 +936,15 @@ pub fn emit_shared_module(
                     .collect();
                 cg.line(&format!("export function {}({}) {{", f.name, params.join(", ")));
                 cg.push_scope();
-                for (p, _) in &f.params {
-                    cg.bind_local(p);
+                let ent_params = cg.func_entity_params.get(&f.name).cloned().unwrap_or_default();
+                for (idx, (p, _)) in f.params.iter().enumerate() {
+                    let is_hint = f.entity_params.get(idx).copied().unwrap_or(false);
+                    let ty = if is_hint || ent_params.contains(&idx) || is_entity_param_name(p) {
+                        ExprType::Entity
+                    } else {
+                        ExprType::Plain
+                    };
+                    cg.bind_typed(p, ty);
                 }
                 cg.indent += 1;
                 cg.emit_block_stmts(&f.body.stmts);
@@ -653,6 +953,7 @@ pub fn emit_shared_module(
                 cg.line("}");
             }
             TopLevelItem::UnsafeFuncDecl(f) => {
+                cg.scan_unsafe_imports(&f.raw_body);
                 cg.emit_source_comment(f.span.line);
                 cg.line(&format!(
                     "// [unsafe:{} @ {}:{}]",
@@ -677,6 +978,7 @@ pub fn emit_shared_module(
                 ));
             }
             TopLevelItem::UnsafeVarDecl(u) => {
+                cg.scan_unsafe_imports(&u.raw_rest);
                 cg.emit_source_comment(u.span.line);
                 cg.line(&format!(
                     "// [unsafe:{} @ {}:{}]",
@@ -705,6 +1007,22 @@ pub fn emit_item_component_module(
     source_map_comments: bool,
     mode: EmitMode,
 ) -> String {
+    let grouped: Vec<(EventHandler, SharedContext, String)> = handlers
+        .iter()
+        .map(|h| (h.clone(), shared.clone(), source_file.to_string()))
+        .collect();
+    emit_item_component_module_grouped(&grouped, header, source_file, source_map_comments, mode)
+}
+
+/// Emits `items/<slug>.js` (or `.ts`) merging handlers from one or more `.pstdr` files
+/// into a single `export const component = { ... };`.
+pub fn emit_item_component_module_grouped(
+    handlers: &[(EventHandler, SharedContext, String)],
+    header: Option<&AddonDirective>,
+    source_file: &str,
+    source_map_comments: bool,
+    mode: EmitMode,
+) -> String {
     let opts = CodegenOptions {
         source_file: source_file.to_string(),
         source_map_comments,
@@ -714,50 +1032,27 @@ pub fn emit_item_component_module(
     let profile = header
         .map(|h| ApiProfile::resolve_or_default(&h.api))
         .unwrap_or(ApiProfile::Modern2x);
-    let mut cg = Codegen {
-        opts: &opts,
+    let default_shared = handlers
+        .first()
+        .map(|(_, s, _)| s.clone())
+        .unwrap_or_default();
+    let mut cg = Codegen::new(
+        &opts,
         mode,
         profile,
-        state_names: shared.shared_states.clone(),
-        const_strings: shared.const_strings.clone(),
-        shared: shared.clone(),
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        default_shared.shared_states.clone(),
+        default_shared.const_strings.clone(),
+        default_shared,
+    );
 
     let mut on_use = Vec::new();
     let mut on_hit = Vec::new();
     let mut on_consume = Vec::new();
-    for ev in handlers {
-        match &ev.kind {
-            EventKind::RightClick { .. } => on_use.push(ev),
-            EventKind::HitTarget { .. } => on_hit.push(ev),
-            EventKind::Consume { .. } => on_consume.push(ev),
+    for entry in handlers {
+        match &entry.0.kind {
+            EventKind::RightClick { .. } => on_use.push(entry),
+            EventKind::HitTarget { .. } => on_hit.push(entry),
+            EventKind::Consume { .. } => on_consume.push(entry),
             _ => {}
         }
     }
@@ -772,18 +1067,21 @@ pub fn emit_item_component_module(
     if !on_use.is_empty() {
         let wrap = on_use.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_use {
+            for (ev, sh, src) in &on_use {
                 if let EventKind::RightClick { actor_var, .. } = &ev.kind {
                     if wrap {
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local(actor_var);
-                    c.line(&format!("const {actor_var} = ev.source;"));
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed(actor_var, ExprType::Entity);
+                        c.line(&format!("const {actor_var} = ev.source;"));
+                        c.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -797,7 +1095,7 @@ pub fn emit_item_component_module(
     if !on_hit.is_empty() {
         let wrap = on_hit.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_hit {
+            for (ev, sh, src) in &on_hit {
                 if let EventKind::HitTarget {
                     target_var,
                     actor_var,
@@ -808,14 +1106,17 @@ pub fn emit_item_component_module(
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local(actor_var);
-                    c.bind_local(target_var);
-                    c.line(&format!("const {actor_var} = ev.attackingEntity;"));
-                    c.line(&format!("const {target_var} = ev.hitEntity;"));
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed(actor_var, ExprType::Entity);
+                        c.bind_typed(target_var, ExprType::Entity);
+                        c.line(&format!("const {actor_var} = ev.attackingEntity;"));
+                        c.line(&format!("const {target_var} = ev.hitEntity;"));
+                        c.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -829,18 +1130,21 @@ pub fn emit_item_component_module(
     if !on_consume.is_empty() {
         let wrap = on_consume.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_consume {
+            for (ev, sh, src) in &on_consume {
                 if let EventKind::Consume { actor_var, .. } = &ev.kind {
                     if wrap {
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local(actor_var);
-                    c.line(&format!("const {actor_var} = ev.source;"));
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed(actor_var, ExprType::Entity);
+                        c.line(&format!("const {actor_var} = ev.source;"));
+                        c.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -872,6 +1176,20 @@ pub fn emit_block_component_module(
     source_map_comments: bool,
     mode: EmitMode,
 ) -> String {
+    let grouped: Vec<(EventHandler, SharedContext, String)> = handlers
+        .iter()
+        .map(|h| (h.clone(), shared.clone(), source_file.to_string()))
+        .collect();
+    emit_block_component_module_grouped(&grouped, header, source_file, source_map_comments, mode)
+}
+
+pub fn emit_block_component_module_grouped(
+    handlers: &[(EventHandler, SharedContext, String)],
+    header: Option<&AddonDirective>,
+    source_file: &str,
+    source_map_comments: bool,
+    mode: EmitMode,
+) -> String {
     let opts = CodegenOptions {
         source_file: source_file.to_string(),
         source_map_comments,
@@ -881,50 +1199,27 @@ pub fn emit_block_component_module(
     let profile = header
         .map(|h| ApiProfile::resolve_or_default(&h.api))
         .unwrap_or(ApiProfile::Modern2x);
-    let mut cg = Codegen {
-        opts: &opts,
+    let default_shared = handlers
+        .first()
+        .map(|(_, s, _)| s.clone())
+        .unwrap_or_default();
+    let mut cg = Codegen::new(
+        &opts,
         mode,
         profile,
-        state_names: shared.shared_states.clone(),
-        const_strings: shared.const_strings.clone(),
-        shared: shared.clone(),
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        default_shared.shared_states.clone(),
+        default_shared.const_strings.clone(),
+        default_shared,
+    );
 
     let mut on_interact = Vec::new();
     let mut on_tick = Vec::new();
     let mut on_break = Vec::new();
-    for ev in handlers {
-        match &ev.kind {
-            EventKind::BlockInteract { .. } => on_interact.push(ev),
-            EventKind::BlockTick { .. } => on_tick.push(ev),
-            EventKind::BreakBlock { .. } => on_break.push(ev),
+    for entry in handlers {
+        match &entry.0.kind {
+            EventKind::BlockInteract { .. } => on_interact.push(entry),
+            EventKind::BlockTick { .. } => on_tick.push(entry),
+            EventKind::BreakBlock { .. } => on_break.push(entry),
             _ => {}
         }
     }
@@ -939,20 +1234,23 @@ pub fn emit_block_component_module(
     if !on_interact.is_empty() {
         let wrap = on_interact.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_interact {
+            for (ev, sh, src) in &on_interact {
                 if let EventKind::BlockInteract { actor_var, .. } = &ev.kind {
                     if wrap {
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local(actor_var);
-                    c.bind_local("block");
-                    c.line(&format!("const {actor_var} = ev.player;"));
-                    c.line("const block = ev.block;");
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed(actor_var, ExprType::Entity);
+                        c.bind_typed("block", ExprType::Block);
+                        c.line(&format!("const {actor_var} = ev.player;"));
+                        c.line("const block = ev.block;");
+                        c.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -966,20 +1264,22 @@ pub fn emit_block_component_module(
     if !on_tick.is_empty() {
         let wrap = on_tick.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_tick {
+            for (ev, sh, src) in &on_tick {
                 if let EventKind::BlockTick { .. } = &ev.kind {
                     if wrap {
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local("block");
-                    c.bind_local("dimension");
-                    c.line("const block = ev.block;");
-                    c.line("const dimension = ev.dimension;");
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed("block", ExprType::Block);
+                        c.bind_local("dimension");
+                        c.line("const block = ev.block;");
+                        c.line("const dimension = ev.dimension;");
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -993,20 +1293,23 @@ pub fn emit_block_component_module(
     if !on_break.is_empty() {
         let wrap = on_break.len() > 1;
         let snippet = cg.emit_to_buffer(2, |c| {
-            for ev in &on_break {
+            for (ev, sh, src) in &on_break {
                 if let EventKind::BreakBlock { actor_var, .. } = &ev.kind {
                     if wrap {
                         c.line("{");
                         c.indent += 1;
                     }
-                    c.emit_source_comment(ev.span.line);
-                    c.push_scope();
-                    c.bind_local(actor_var);
-                    c.bind_local("block");
-                    c.line(&format!("const {actor_var} = ev.player;"));
-                    c.line("const block = ev.block;");
-                    c.emit_block_stmts(&ev.body.stmts);
-                    c.pop_scope();
+                    c.with_shared_ctx(sh, src, |c| {
+                        c.emit_source_comment(ev.span.line);
+                        c.push_scope();
+                        c.bind_typed(actor_var, ExprType::Entity);
+                        c.bind_typed("block", ExprType::Block);
+                        c.line(&format!("const {actor_var} = ev.player;"));
+                        c.line("const block = ev.block;");
+                        c.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        c.emit_block_stmts(&ev.body.stmts);
+                        c.pop_scope();
+                    });
                     if wrap {
                         c.indent -= 1;
                         c.line("}");
@@ -1047,41 +1350,20 @@ pub fn emit_world_module(
     let profile = header
         .map(|h| ApiProfile::resolve_or_default(&h.api))
         .unwrap_or(ApiProfile::Modern2x);
-    let mut cg = Codegen {
-        opts: &opts,
+    let mut state_names = shared.shared_states.clone();
+    for (sym, (_, kind)) in &shared.external_symbols {
+        if *kind == ExternalSymbolKind::State {
+            state_names.insert(sym.clone());
+        }
+    }
+    let mut cg = Codegen::new(
+        &opts,
         mode,
         profile,
-        state_names: shared.shared_states.clone(),
-        const_strings: shared.const_strings.clone(),
-        shared: shared.clone(),
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        state_names,
+        shared.const_strings.clone(),
+        shared.clone(),
+    );
 
     for (idx, item) in world_items.iter().enumerate() {
         if idx > 0 {
@@ -1112,41 +1394,20 @@ pub fn emit_commands_module(
     let profile = header
         .map(|h| ApiProfile::resolve_or_default(&h.api))
         .unwrap_or(ApiProfile::Modern2x);
-    let mut cg = Codegen {
-        opts: &opts,
+    let mut state_names = shared.shared_states.clone();
+    for (sym, (_, kind)) in &shared.external_symbols {
+        if *kind == ExternalSymbolKind::State {
+            state_names.insert(sym.clone());
+        }
+    }
+    let mut cg = Codegen::new(
+        &opts,
         mode,
         profile,
-        state_names: shared.shared_states.clone(),
-        const_strings: shared.const_strings.clone(),
-        shared: shared.clone(),
-        used_shared_imports: BTreeSet::new(),
-        local_scopes: Vec::new(),
-        emit_source_lines: true,
-        needs_world: false,
-        needs_system: false,
-        needs_equipment_slot: false,
-        needs_item_stack: false,
-        needs_command_permission_level: false,
-        needs_custom_command_param_type: false,
-        needs_display_slot_id: false,
-        needs_action_form: false,
-        needs_message_form: false,
-        needs_modal_form: false,
-        needs_in_helper: false,
-        needs_within_helper: false,
-        needs_give_item_helper: false,
-        needs_spawn_item_helper: false,
-        needs_get_score_helper: false,
-        needs_set_score_helper: false,
-        needs_add_score_helper: false,
-        needs_get_or_create_objective_helper: false,
-        in_before_event: false,
-        block_interact_callbacks: Vec::new(),
-        block_tick_callbacks: Vec::new(),
-        cmd_registrations: Vec::new(),
-        body: String::new(),
-        indent: 0,
-    };
+        state_names,
+        shared.const_strings.clone(),
+        shared.clone(),
+    );
 
     for ev in commands {
         cg.emit_event_handler(ev);
@@ -1174,12 +1435,14 @@ struct Codegen<'a> {
     const_strings: HashMap<String, String>,
     shared: SharedContext,
     used_shared_imports: BTreeSet<String>,
-    local_scopes: Vec<HashSet<String>>,
+    extra_shared_imports: std::collections::BTreeMap<String, BTreeSet<String>>,
+    local_scopes: Vec<HashMap<String, ExprType>>,
     emit_source_lines: bool,
     needs_world: bool,
     needs_system: bool,
     needs_equipment_slot: bool,
     needs_item_stack: bool,
+    needs_entity_damage_cause: bool,
     needs_command_permission_level: bool,
     needs_custom_command_param_type: bool,
     needs_display_slot_id: bool,
@@ -1188,6 +1451,15 @@ struct Codegen<'a> {
     needs_modal_form: bool,
     needs_in_helper: bool,
     needs_within_helper: bool,
+    needs_heal_helper: bool,
+    needs_equipment_helper: bool,
+    needs_damage_cause_helper: bool,
+    needs_play_sound_helper: bool,
+    needs_raycast_helper: bool,
+    needs_cone_helper: bool,
+    needs_entities_within_helper: bool,
+    needs_launch_helper: bool,
+    needs_dash_helper: bool,
     needs_give_item_helper: bool,
     needs_spawn_item_helper: bool,
     needs_get_score_helper: bool,
@@ -1195,16 +1467,119 @@ struct Codegen<'a> {
     needs_add_score_helper: bool,
     needs_get_or_create_objective_helper: bool,
     in_before_event: bool,
+    item_use_callbacks: Vec<String>,
+    item_hit_callbacks: Vec<String>,
+    item_consume_callbacks: Vec<String>,
     block_interact_callbacks: Vec<String>,
     block_tick_callbacks: Vec<String>,
+    block_break_callbacks: Vec<String>,
     cmd_registrations: Vec<String>,
+    func_entity_params: HashMap<String, HashSet<usize>>,
     body: String,
     indent: usize,
 }
 
+fn is_entity_param_name(name: &str) -> bool {
+    matches!(
+        name,
+        "player" | "target" | "killer" | "attacker" | "entity" | "shooter" | "actor" | "victim" | "caster"
+    )
+}
+
 impl<'a> Codegen<'a> {
+    fn new(
+        opts: &'a CodegenOptions,
+        mode: EmitMode,
+        profile: ApiProfile,
+        state_names: HashSet<String>,
+        const_strings: HashMap<String, String>,
+        shared: SharedContext,
+    ) -> Self {
+        Self {
+            opts,
+            mode,
+            profile,
+            state_names,
+            const_strings,
+            shared,
+            used_shared_imports: BTreeSet::new(),
+            extra_shared_imports: std::collections::BTreeMap::new(),
+            local_scopes: Vec::new(),
+            emit_source_lines: true,
+            needs_world: false,
+            needs_system: false,
+            needs_equipment_slot: false,
+            needs_item_stack: false,
+            needs_entity_damage_cause: false,
+            needs_command_permission_level: false,
+            needs_custom_command_param_type: false,
+            needs_display_slot_id: false,
+            needs_action_form: false,
+            needs_message_form: false,
+            needs_modal_form: false,
+            needs_in_helper: false,
+            needs_within_helper: false,
+            needs_heal_helper: false,
+            needs_equipment_helper: false,
+            needs_damage_cause_helper: false,
+            needs_play_sound_helper: false,
+            needs_raycast_helper: false,
+            needs_cone_helper: false,
+            needs_entities_within_helper: false,
+            needs_launch_helper: false,
+            needs_dash_helper: false,
+            needs_give_item_helper: false,
+            needs_spawn_item_helper: false,
+            needs_get_score_helper: false,
+            needs_set_score_helper: false,
+            needs_add_score_helper: false,
+            needs_get_or_create_objective_helper: false,
+            in_before_event: false,
+            item_use_callbacks: Vec::new(),
+            item_hit_callbacks: Vec::new(),
+            item_consume_callbacks: Vec::new(),
+            block_interact_callbacks: Vec::new(),
+            block_tick_callbacks: Vec::new(),
+            block_break_callbacks: Vec::new(),
+            cmd_registrations: Vec::new(),
+            func_entity_params: HashMap::new(),
+            body: String::new(),
+            indent: 0,
+        }
+    }
+
+    fn emit_sneak_guard(&mut self, actor_var: &str, sneak_filter: Option<bool>) {
+        match sneak_filter {
+            Some(true) => self.line(&format!("if (!{actor_var}?.isSneaking) return;")),
+            Some(false) => self.line(&format!("if ({actor_var}?.isSneaking) return;")),
+            None => {}
+        }
+    }
+
+    fn emit_item_match_guard(&mut self, item_opt: Option<&Expr>, item_stack_expr: &str) {
+        let Some(item_expr) = item_opt else {
+            return;
+        };
+        if let Some(id_pat) = eval_static_string(item_expr, &self.const_strings) {
+            if let Some(prefix) = id_pat.strip_suffix('*') {
+                if prefix.is_empty() {
+                    self.line(&format!("if (!{item_stack_expr}) return;"));
+                } else {
+                    let p_js = format!("\"{}\"", escape_double_quoted(prefix));
+                    self.line(&format!(
+                        "if (!{item_stack_expr}?.typeId?.startsWith({p_js})) return;"
+                    ));
+                }
+                return;
+            }
+        }
+        let item_js = self.emit_expr(item_expr);
+        self.line(&format!(
+            "if (!{item_stack_expr} || {item_stack_expr}.typeId !== ({item_js})) return;"
+        ));
+    }
     fn push_scope(&mut self) {
-        self.local_scopes.push(HashSet::new());
+        self.local_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -1212,13 +1587,389 @@ impl<'a> Codegen<'a> {
     }
 
     fn bind_local(&mut self, name: &str) {
+        self.bind_typed(name, ExprType::Plain);
+    }
+
+    fn bind_typed(&mut self, name: &str, ty: ExprType) {
         if let Some(top) = self.local_scopes.last_mut() {
-            top.insert(name.to_string());
+            top.insert(name.to_string(), ty);
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        self.local_scopes.iter().rev().any(|s| s.contains(name))
+        self.local_scopes.iter().rev().any(|s| s.contains_key(name))
+    }
+
+    fn lookup_local_type(&self, name: &str) -> Option<ExprType> {
+        self.local_scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name).copied())
+    }
+
+    fn infer_expr_type(&self, expr: &Expr) -> ExprType {
+        match expr {
+            Expr::Ident(name, _) => {
+                if let Some(ty) = self.lookup_local_type(name) {
+                    return ty;
+                }
+                if name == "system" {
+                    return ExprType::System;
+                }
+                ExprType::Plain
+            }
+            Expr::Member { object, field, .. } => {
+                if self.infer_expr_type(object) == ExprType::Entity
+                    && (field == "mainhand" || field == "holding")
+                {
+                    ExprType::Item
+                } else {
+                    ExprType::Plain
+                }
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Member { object, field, .. } = callee.as_ref() {
+                    if field == "equipment" && self.infer_expr_type(object) == ExprType::Entity {
+                        return ExprType::Item;
+                    }
+                    if matches!(
+                        field.as_str(),
+                        "spawn_entity" | "spawnEntity" | "get_entity" | "getEntity"
+                    ) {
+                        return ExprType::Entity;
+                    }
+                    if matches!(
+                        field.as_str(),
+                        "players"
+                            | "get_all_players"
+                            | "getAllPlayers"
+                            | "get_players"
+                            | "getPlayers"
+                            | "get_entities"
+                            | "getEntities"
+                    ) {
+                        return ExprType::EntityList;
+                    }
+                }
+                ExprType::Plain
+            }
+            Expr::RaycastEntities { .. }
+            | Expr::ConeEntities { .. }
+            | Expr::EntitiesWithin { .. } => ExprType::EntityList,
+            Expr::Paren(inner, _) => self.infer_expr_type(inner),
+            _ => ExprType::Plain,
+        }
+    }
+
+    fn is_entity_collection_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(name, _) => self.lookup_local_type(name) == Some(ExprType::EntityList),
+            Expr::RaycastEntities { .. }
+            | Expr::ConeEntities { .. }
+            | Expr::EntitiesWithin { .. } => true,
+            Expr::Call { callee, .. } => {
+                if let Expr::Member { field, .. } = callee.as_ref() {
+                    matches!(
+                        field.as_str(),
+                        "players"
+                            | "get_all_players"
+                            | "getAllPlayers"
+                            | "get_players"
+                            | "getPlayers"
+                            | "get_entities"
+                            | "getEntities"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Paren(inner, _) => self.is_entity_collection_expr(inner),
+            _ => false,
+        }
+    }
+
+    fn scan_unsafe_imports(&mut self, raw_code: &str) {
+        if contains_ident_token(raw_code, "world") {
+            self.needs_world = true;
+        }
+        if contains_ident_token(raw_code, "system") {
+            self.needs_system = true;
+        }
+        if contains_ident_token(raw_code, "EquipmentSlot") {
+            self.needs_equipment_slot = true;
+        }
+        if contains_ident_token(raw_code, "ItemStack") {
+            self.needs_item_stack = true;
+        }
+        if contains_ident_token(raw_code, "EntityDamageCause") {
+            self.needs_entity_damage_cause = true;
+        }
+        if contains_ident_token(raw_code, "CommandPermissionLevel") {
+            self.needs_command_permission_level = true;
+        }
+        if contains_ident_token(raw_code, "CustomCommandParamType") {
+            self.needs_custom_command_param_type = true;
+        }
+        if contains_ident_token(raw_code, "DisplaySlotId") {
+            self.needs_display_slot_id = true;
+        }
+        if contains_ident_token(raw_code, "ActionFormData") {
+            self.needs_action_form = true;
+        }
+        if contains_ident_token(raw_code, "MessageFormData") {
+            self.needs_message_form = true;
+        }
+        if contains_ident_token(raw_code, "ModalFormData") {
+            self.needs_modal_form = true;
+        }
+    }
+
+    fn collect_func_entity_params(&mut self, program: &Program) {
+        self.collect_func_entity_params_items(&program.items);
+    }
+
+    fn collect_func_entity_params_items(&mut self, items: &[TopLevelItem]) {
+        for item in items {
+            match item {
+                TopLevelItem::FuncDecl(f) => {
+                    let mut env: HashMap<String, ExprType> = HashMap::new();
+                    for (idx, (p, _)) in f.params.iter().enumerate() {
+                        if f.entity_params.get(idx).copied().unwrap_or(false)
+                            || is_entity_param_name(p)
+                        {
+                            env.insert(p.clone(), ExprType::Entity);
+                        }
+                    }
+                    self.scan_block_for_calls(&f.body, &mut env);
+                }
+                TopLevelItem::EventHandler(ev) => {
+                    let mut env: HashMap<String, ExprType> = HashMap::new();
+                    match &ev.kind {
+                        EventKind::RightClick { actor_var, .. }
+                        | EventKind::PlayerJoin { actor_var }
+                        | EventKind::PlayerLeave { actor_var }
+                        | EventKind::Consume { actor_var, .. }
+                        | EventKind::BlockInteract { actor_var, .. }
+                        | EventKind::BreakBlock { actor_var, .. }
+                        | EventKind::PlaceBlock { actor_var, .. }
+                        | EventKind::ChatSend { actor_var, .. }
+                        | EventKind::ItemRelease { actor_var, .. } => {
+                            env.insert(actor_var.clone(), ExprType::Entity);
+                        }
+                        EventKind::HitTarget {
+                            target_var,
+                            actor_var,
+                            ..
+                        }
+                        | EventKind::InteractEntity {
+                            target_var,
+                            actor_var,
+                        } => {
+                            env.insert(target_var.clone(), ExprType::Entity);
+                            env.insert(actor_var.clone(), ExprType::Entity);
+                        }
+                        EventKind::Hurt {
+                            target_var,
+                            attacker_var,
+                        } => {
+                            env.insert(target_var.clone(), ExprType::Entity);
+                            if let Some(a) = attacker_var {
+                                env.insert(a.clone(), ExprType::Entity);
+                            }
+                        }
+                        EventKind::Die {
+                            target_var,
+                            killer_var,
+                        } => {
+                            env.insert(target_var.clone(), ExprType::Entity);
+                            if let Some(k) = killer_var {
+                                env.insert(k.clone(), ExprType::Entity);
+                            }
+                        }
+                        EventKind::ProjectileHit {
+                            target_var,
+                            shooter_var,
+                            ..
+                        } => {
+                            env.insert(target_var.clone(), ExprType::Entity);
+                            env.insert("projectile".to_string(), ExprType::Entity);
+                            if let Some(s) = shooter_var {
+                                env.insert(s.clone(), ExprType::Entity);
+                            }
+                        }
+                        EventKind::EntitySpawn { entity_var, .. }
+                        | EventKind::HealthChange { entity_var }
+                        | EventKind::EntityLoad { entity_var }
+                        | EventKind::EntityRemove { entity_var } => {
+                            env.insert(entity_var.clone(), ExprType::Entity);
+                        }
+                        EventKind::DimensionChange { player_var } => {
+                            env.insert(player_var.clone(), ExprType::Entity);
+                        }
+                        EventKind::EntityTrigger { .. } => {
+                            env.insert("entity".to_string(), ExprType::Entity);
+                        }
+                        EventKind::ScriptEvent { .. } | EventKind::Explosion => {
+                            env.insert("source".to_string(), ExprType::Entity);
+                        }
+                        EventKind::CustomCommand { actor_var, .. } => {
+                            if let Some(a) = actor_var {
+                                env.insert(a.clone(), ExprType::Entity);
+                            }
+                        }
+                        EventKind::ProjectileHitBlock { shooter_var, .. } => {
+                            env.insert("projectile".to_string(), ExprType::Entity);
+                            env.insert(
+                                shooter_var.as_deref().unwrap_or("shooter").to_string(),
+                                ExprType::Entity,
+                            );
+                        }
+                        EventKind::EntityHitBlock { attacker_var, .. } => {
+                            env.insert(attacker_var.clone(), ExprType::Entity);
+                        }
+                        EventKind::BlockTick { .. } => {}
+                    }
+                    self.scan_block_for_calls(&ev.body, &mut env);
+                }
+                TopLevelItem::AfterTimer { body, .. } | TopLevelItem::EveryTimer { body, .. } => {
+                    let mut env = HashMap::new();
+                    self.scan_block_for_calls(body, &mut env);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn scan_block_for_calls(&mut self, block: &Block, env: &mut HashMap<String, ExprType>) {
+        for stmt in &block.stmts {
+            self.scan_stmt_for_calls(stmt, env);
+        }
+    }
+
+    fn scan_stmt_for_calls(&mut self, stmt: &Stmt, env: &mut HashMap<String, ExprType>) {
+        match stmt {
+            Stmt::ConstDecl(d) | Stmt::MutDecl(d) => {
+                self.scan_expr_for_calls(&d.value, env);
+                let ty = self.infer_expr_type_with_env(&d.value, env);
+                env.insert(d.name.clone(), ty);
+            }
+            Stmt::TableDecl(t) => {
+                self.scan_expr_for_calls(&t.value, env);
+                env.insert(t.name.clone(), ExprType::Plain);
+            }
+            Stmt::For {
+                var, iter, body, ..
+            } => {
+                self.scan_expr_for_calls(iter, env);
+                if self.is_entity_collection_expr(iter) {
+                    env.insert(var.clone(), ExprType::Entity);
+                }
+                self.scan_block_for_calls(body, env);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_branch,
+                ..
+            } => {
+                self.scan_expr_for_calls(condition, env);
+                self.scan_block_for_calls(then_block, env);
+                if let Some(eb) = else_branch {
+                    match eb {
+                        ElseBranch::Else(b) => self.scan_block_for_calls(b, env),
+                        ElseBranch::ElseIf(s) => self.scan_stmt_for_calls(s, env),
+                    }
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                self.scan_expr_for_calls(condition, env);
+                self.scan_block_for_calls(body, env);
+            }
+            Stmt::After { body, .. } | Stmt::Every { body, .. } => {
+                self.scan_block_for_calls(body, env);
+            }
+            Stmt::Timeline { entries, .. } => {
+                for (_, body) in entries {
+                    self.scan_block_for_calls(body, env);
+                }
+            }
+            Stmt::ExprStmt { expr, .. } | Stmt::Return { value: Some(expr), .. } => {
+                self.scan_expr_for_calls(expr, env);
+            }
+            Stmt::Assign { value, .. } => {
+                self.scan_expr_for_calls(value, env);
+            }
+            _ => {}
+        }
+    }
+
+    fn infer_expr_type_with_env(&self, expr: &Expr, env: &HashMap<String, ExprType>) -> ExprType {
+        match expr {
+            Expr::Ident(name, _) => env.get(name).copied().unwrap_or(ExprType::Plain),
+            Expr::Call { callee, .. } => {
+                if let Expr::Member { field, .. } = callee.as_ref() {
+                    if matches!(
+                        field.as_str(),
+                        "spawn_entity" | "spawnEntity" | "get_entity" | "getEntity"
+                    ) {
+                        return ExprType::Entity;
+                    }
+                }
+                ExprType::Plain
+            }
+            Expr::Paren(inner, _) => self.infer_expr_type_with_env(inner, env),
+            _ => ExprType::Plain,
+        }
+    }
+
+    fn scan_expr_for_calls(&mut self, expr: &Expr, env: &HashMap<String, ExprType>) {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                    for (idx, arg) in args.iter().enumerate() {
+                        if self.infer_expr_type_with_env(arg, env) == ExprType::Entity {
+                            self.func_entity_params
+                                .entry(fn_name.clone())
+                                .or_default()
+                                .insert(idx);
+                        }
+                    }
+                }
+                self.scan_expr_for_calls(callee, env);
+                for a in args {
+                    self.scan_expr_for_calls(a, env);
+                }
+            }
+            Expr::Member { object, .. } | Expr::Unary { expr: object, .. } | Expr::Paren(object, _) => {
+                self.scan_expr_for_calls(object, env);
+            }
+            Expr::Binary { left, right, .. } | Expr::Index { object: left, index: right, .. } => {
+                self.scan_expr_for_calls(left, env);
+                self.scan_expr_for_calls(right, env);
+            }
+            _ => {}
+        }
+    }
+
+    fn is_bound_item(&self, item: Option<&Expr>) -> bool {
+        let Some(item_expr) = item else {
+            return false;
+        };
+        let has_item_comp = self
+            .opts
+            .custom_components
+            .iter()
+            .any(|(_, k)| *k == ComponentKind::Item);
+        if !has_item_comp {
+            return false;
+        }
+        if let Some(id_str) = eval_static_string(item_expr, &self.const_strings) {
+            !id_str.ends_with('*')
+        } else {
+            false
+        }
     }
 
     fn is_score_shadowed(&self) -> bool {
@@ -1250,6 +2001,41 @@ impl<'a> Codegen<'a> {
         } else {
             false
         }
+    }
+
+    fn with_shared_ctx(&mut self, sh: &SharedContext, src: &str, f: impl FnOnce(&mut Self)) {
+        let prev_shared = std::mem::replace(&mut self.shared, sh.clone());
+        let prev_used = std::mem::take(&mut self.used_shared_imports);
+        let mut next_states = sh.shared_states.clone();
+        for (sym, (_, kind)) in &sh.external_symbols {
+            if *kind == ExternalSymbolKind::State {
+                next_states.insert(sym.clone());
+            }
+        }
+        let prev_state = std::mem::replace(&mut self.state_names, next_states);
+        let prev_consts = std::mem::replace(&mut self.const_strings, sh.const_strings.clone());
+        let prev_emit_src = self.emit_source_lines;
+        let _ = prev_emit_src;
+        let prev_file = self.opts.source_file.clone();
+        let _ = prev_file;
+        let _ = src;
+        f(self);
+        let used = std::mem::replace(&mut self.used_shared_imports, prev_used);
+        if let Some(path) = self.shared.shared_import_path.clone() {
+            if !used.is_empty() {
+                if prev_shared.shared_import_path.as_deref() == Some(path.as_str()) {
+                    self.used_shared_imports.extend(used);
+                } else {
+                    self.extra_shared_imports
+                        .entry(path)
+                        .or_default()
+                        .extend(used);
+                }
+            }
+        }
+        self.shared = prev_shared;
+        self.state_names = prev_state;
+        self.const_strings = prev_consts;
     }
 
     fn emit_to_buffer(&mut self, indent: usize, f: impl FnOnce(&mut Self)) -> String {
@@ -1291,9 +2077,19 @@ impl<'a> Codegen<'a> {
 
     fn emit_top_level(&mut self, item: &TopLevelItem) {
         match item {
+            TopLevelItem::Import(_) => {
+                // Resolved via SharedContext::external_symbols and emitted in the import header.
+            }
+            TopLevelItem::TableDecl(t) => {
+                self.emit_source_comment(t.span.line);
+                let val = self.emit_expr(&t.value);
+                let prefix = if t.exported { "export " } else { "" };
+                self.line(&format!("{prefix}const {} = {val};", t.name));
+            }
             TopLevelItem::ConstDecl(d) => {
                 let val = self.emit_expr(&d.value);
-                self.line(&format!("const {} = {val};", d.name));
+                let prefix = if d.exported { "export " } else { "" };
+                self.line(&format!("{prefix}const {} = {val};", d.name));
             }
             TopLevelItem::MutDecl(d) => {
                 let val = self.emit_expr(&d.value);
@@ -1303,22 +2099,23 @@ impl<'a> Codegen<'a> {
                 self.emit_source_comment(s.span.line);
                 let default_js = self.emit_expr(&s.default_value);
                 let key = format!("pstdr:{}", s.name);
+                let prefix = if s.exported { "export " } else { "" };
                 if self.mode == EmitMode::TypeScript {
                     self.line(&format!(
-                        "function __get_{}(owner: any) {{ const v = owner.getDynamicProperty(\"{key}\"); return v !== undefined ? v : ({default_js}); }}",
+                        "{prefix}function __get_{}(owner: any) {{ const v = owner.getDynamicProperty(\"{key}\"); return v !== undefined ? v : ({default_js}); }}",
                         s.name
                     ));
                     self.line(&format!(
-                        "function __set_{}(owner: any, value: any): void {{ owner.setDynamicProperty(\"{key}\", value); }}",
+                        "{prefix}function __set_{}(owner: any, value: any): void {{ owner.setDynamicProperty(\"{key}\", value); }}",
                         s.name
                     ));
                 } else {
                     self.line(&format!(
-                        "function __get_{}(owner) {{ const v = owner.getDynamicProperty(\"{key}\"); return v !== undefined ? v : ({default_js}); }}",
+                        "{prefix}function __get_{}(owner) {{ const v = owner.getDynamicProperty(\"{key}\"); return v !== undefined ? v : ({default_js}); }}",
                         s.name
                     ));
                     self.line(&format!(
-                        "function __set_{}(owner, value) {{ owner.setDynamicProperty(\"{key}\", value); }}",
+                        "{prefix}function __set_{}(owner, value) {{ owner.setDynamicProperty(\"{key}\", value); }}",
                         s.name
                     ));
                 }
@@ -1336,10 +2133,18 @@ impl<'a> Codegen<'a> {
                         }
                     })
                     .collect();
-                self.line(&format!("function {}({}) {{", f.name, params.join(", ")));
+                let prefix = if f.exported { "export " } else { "" };
+                self.line(&format!("{prefix}function {}({}) {{", f.name, params.join(", ")));
                 self.push_scope();
-                for (p, _) in &f.params {
-                    self.bind_local(p);
+                let ent_params = self.func_entity_params.get(&f.name).cloned().unwrap_or_default();
+                for (idx, (p, _)) in f.params.iter().enumerate() {
+                    let is_hint = f.entity_params.get(idx).copied().unwrap_or(false);
+                    let ty = if is_hint || ent_params.contains(&idx) || is_entity_param_name(p) {
+                        ExprType::Entity
+                    } else {
+                        ExprType::Plain
+                    };
+                    self.bind_typed(p, ty);
                 }
                 self.indent += 1;
                 self.emit_block_stmts(&f.body.stmts);
@@ -1348,6 +2153,7 @@ impl<'a> Codegen<'a> {
                 self.line("}");
             }
             TopLevelItem::UnsafeFuncDecl(f) => {
+                self.scan_unsafe_imports(&f.raw_body);
                 self.line(&format!(
                     "// [unsafe:{} @ {}:{}]",
                     f.name, self.opts.source_file, f.span.line
@@ -1371,6 +2177,7 @@ impl<'a> Codegen<'a> {
                 ));
             }
             TopLevelItem::UnsafeVarDecl(u) => {
+                self.scan_unsafe_imports(&u.raw_rest);
                 self.line(&format!(
                     "// [unsafe:{} @ {}:{}]",
                     u.name, self.opts.source_file, u.span.line
@@ -1431,84 +2238,139 @@ impl<'a> Codegen<'a> {
 
         match &ev.kind {
             EventKind::RightClick { item, actor_var } => {
-                self.needs_world = true;
-                let item_js = self.emit_expr(item);
-                let bus = if has_cancel {
-                    "world.beforeEvents.itemUse"
+                if !has_cancel && self.is_bound_item(item.as_ref()) {
+                    let snippet = self.emit_to_buffer(3, |cg| {
+                        cg.push_scope();
+                        cg.bind_typed(actor_var, ExprType::Entity);
+                        cg.line(&format!("const {actor_var} = ev.source;"));
+                        cg.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        cg.emit_block_stmts(&ev.body.stmts);
+                        cg.pop_scope();
+                    });
+                    self.item_use_callbacks.push(snippet);
                 } else {
-                    "world.afterEvents.itemUse"
-                };
-                self.line(&format!("{bus}.subscribe({ev_param} => {{"));
-                self.indent += 1;
-                self.line(&format!("const {actor_var} = ev.source;"));
-                self.line(&format!(
-                    "if (!ev.itemStack || ev.itemStack.typeId !== ({item_js})) return;"
-                ));
-                let prev = self.in_before_event;
-                self.in_before_event = has_cancel;
-                self.emit_block_stmts(&ev.body.stmts);
-                self.in_before_event = prev;
-                self.indent -= 1;
-                self.line("});");
+                    self.needs_world = true;
+                    let bus = if has_cancel {
+                        "world.beforeEvents.itemUse"
+                    } else {
+                        "world.afterEvents.itemUse"
+                    };
+                    self.line(&format!("{bus}.subscribe({ev_param} => {{"));
+                    self.indent += 1;
+                    self.push_scope();
+                    self.bind_typed(actor_var, ExprType::Entity);
+                    self.line(&format!("const {actor_var} = ev.source;"));
+                    self.emit_item_match_guard(item.as_ref(), "ev.itemStack");
+                    self.emit_sneak_guard(actor_var, ev.sneak_filter);
+                    let prev = self.in_before_event;
+                    self.in_before_event = has_cancel;
+                    self.emit_block_stmts(&ev.body.stmts);
+                    self.in_before_event = prev;
+                    self.pop_scope();
+                    self.indent -= 1;
+                    self.line("});");
+                }
             }
             EventKind::HitTarget {
                 target_var,
                 item,
                 actor_var,
             } => {
-                self.needs_world = true;
-                self.needs_equipment_slot = true;
-                let item_js = self.emit_expr(item);
-                self.line(&format!(
-                    "world.afterEvents.entityHitEntity.subscribe({ev_param} => {{"
-                ));
-                self.indent += 1;
-                self.line("if (ev.damagingEntity.typeId !== \"minecraft:player\") return;");
-                self.line(&format!("const {actor_var} = ev.damagingEntity;"));
-                self.line(&format!("const {target_var} = ev.hitEntity;"));
-                self.line(&format!(
-                    "const __held = {actor_var}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.Mainhand);"
-                ));
-                self.line(&format!(
-                    "if (!__held || __held.typeId !== ({item_js})) return;"
-                ));
-                self.emit_block_stmts(&ev.body.stmts);
-                self.indent -= 1;
-                self.line("});");
+                if self.is_bound_item(item.as_ref()) {
+                    let snippet = self.emit_to_buffer(3, |cg| {
+                        cg.push_scope();
+                        cg.bind_typed(actor_var, ExprType::Entity);
+                        cg.bind_typed(target_var, ExprType::Entity);
+                        cg.line(&format!("const {actor_var} = ev.attackingEntity;"));
+                        cg.line(&format!("const {target_var} = ev.hitEntity;"));
+                        cg.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        cg.emit_block_stmts(&ev.body.stmts);
+                        cg.pop_scope();
+                    });
+                    self.item_hit_callbacks.push(snippet);
+                } else {
+                    self.needs_world = true;
+                    self.line(&format!(
+                        "world.afterEvents.entityHitEntity.subscribe({ev_param} => {{"
+                    ));
+                    self.indent += 1;
+                    self.push_scope();
+                    self.bind_typed(actor_var, ExprType::Entity);
+                    self.bind_typed(target_var, ExprType::Entity);
+                    self.line("if (ev.damagingEntity.typeId !== \"minecraft:player\") return;");
+                    self.line(&format!("const {actor_var} = ev.damagingEntity;"));
+                    self.line(&format!("const {target_var} = ev.hitEntity;"));
+                    if item.is_some() {
+                        self.needs_equipment_slot = true;
+                        self.line(&format!(
+                            "const __held = {actor_var}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.Mainhand);"
+                        ));
+                        self.emit_item_match_guard(item.as_ref(), "__held");
+                    }
+                    self.emit_sneak_guard(actor_var, ev.sneak_filter);
+                    self.emit_block_stmts(&ev.body.stmts);
+                    self.pop_scope();
+                    self.indent -= 1;
+                    self.line("});");
+                }
             }
             EventKind::BreakBlock {
                 block_id,
                 actor_var,
             } => {
-                self.needs_world = true;
-                let block_js = self.emit_expr(block_id);
-                if has_cancel {
-                    self.line(&format!(
-                        "world.beforeEvents.playerBreakBlock.subscribe({ev_param} => {{"
-                    ));
-                    self.indent += 1;
-                    self.line(&format!("const {actor_var} = ev.player;"));
-                    self.line("const block = ev.block;");
-                    self.line(&format!("if (ev.block.typeId !== ({block_js})) return;"));
-                    let prev = self.in_before_event;
-                    self.in_before_event = true;
-                    self.emit_block_stmts(&ev.body.stmts);
-                    self.in_before_event = prev;
-                    self.indent -= 1;
-                    self.line("});");
+                if self.is_bound_block(block_id) && !has_cancel {
+                    let snippet = self.emit_to_buffer(3, |cg| {
+                        cg.push_scope();
+                        cg.bind_typed(actor_var, ExprType::Entity);
+                        cg.bind_typed("block", ExprType::Block);
+                        cg.line(&format!("const {actor_var} = ev.player;"));
+                        cg.line("const block = ev.block;");
+                        cg.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        cg.emit_block_stmts(&ev.body.stmts);
+                        cg.pop_scope();
+                    });
+                    self.block_break_callbacks.push(snippet);
                 } else {
-                    self.line(&format!(
-                        "world.afterEvents.playerBreakBlock.subscribe({ev_param} => {{"
-                    ));
-                    self.indent += 1;
-                    self.line(&format!("const {actor_var} = ev.player;"));
-                    self.line("const block = ev.block;");
-                    self.line(&format!(
-                        "if (ev.brokenBlockPermutation.type.id !== ({block_js})) return;"
-                    ));
-                    self.emit_block_stmts(&ev.body.stmts);
-                    self.indent -= 1;
-                    self.line("});");
+                    self.needs_world = true;
+                    let block_js = self.emit_expr(block_id);
+                    if has_cancel {
+                        self.line(&format!(
+                            "world.beforeEvents.playerBreakBlock.subscribe({ev_param} => {{"
+                        ));
+                        self.indent += 1;
+                        self.push_scope();
+                        self.bind_typed(actor_var, ExprType::Entity);
+                        self.bind_typed("block", ExprType::Block);
+                        self.line(&format!("const {actor_var} = ev.player;"));
+                        self.line("const block = ev.block;");
+                        self.line(&format!("if (ev.block.typeId !== ({block_js})) return;"));
+                        self.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        let prev = self.in_before_event;
+                        self.in_before_event = true;
+                        self.emit_block_stmts(&ev.body.stmts);
+                        self.in_before_event = prev;
+                        self.pop_scope();
+                        self.indent -= 1;
+                        self.line("});");
+                    } else {
+                        self.line(&format!(
+                            "world.afterEvents.playerBreakBlock.subscribe({ev_param} => {{"
+                        ));
+                        self.indent += 1;
+                        self.push_scope();
+                        self.bind_typed(actor_var, ExprType::Entity);
+                        self.bind_typed("block", ExprType::Block);
+                        self.line(&format!("const {actor_var} = ev.player;"));
+                        self.line("const block = ev.block;");
+                        self.line(&format!(
+                            "if (ev.brokenBlockPermutation.type.id !== ({block_js})) return;"
+                        ));
+                        self.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        self.emit_block_stmts(&ev.body.stmts);
+                        self.pop_scope();
+                        self.indent -= 1;
+                        self.line("});");
+                    }
                 }
             }
             EventKind::PlayerJoin { actor_var } => {
@@ -1517,9 +2379,12 @@ impl<'a> Codegen<'a> {
                     "world.afterEvents.playerSpawn.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
+                self.push_scope();
+                self.bind_typed(actor_var, ExprType::Entity);
                 self.line("if (!ev.initialSpawn) return;");
                 self.line(&format!("const {actor_var} = ev.player;"));
                 self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
@@ -1530,7 +2395,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(actor_var);
+                self.bind_typed(actor_var, ExprType::Entity);
                 self.line(&format!("const {actor_var} = ev.player;"));
                 let prev = self.in_before_event;
                 self.in_before_event = true;
@@ -1547,7 +2412,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(actor_var);
+                self.bind_typed(actor_var, ExprType::Entity);
                 self.bind_local(msg_var);
                 self.line(&format!("const {actor_var} = ev.sender;"));
                 self.line(&format!("const {msg_var} = ev.message;"));
@@ -1568,11 +2433,15 @@ impl<'a> Codegen<'a> {
                     "world.afterEvents.entityHurt.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
+                self.push_scope();
+                self.bind_typed(target_var, ExprType::Entity);
                 self.line(&format!("const {target_var} = ev.hurtEntity;"));
                 if let Some(a) = attacker_var {
+                    self.bind_typed(a, ExprType::Entity);
                     self.line(&format!("const {a} = ev.damageSource?.damagingEntity;"));
                 }
                 self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
@@ -1585,28 +2454,45 @@ impl<'a> Codegen<'a> {
                     "world.afterEvents.entityDie.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
+                self.push_scope();
+                self.bind_typed(target_var, ExprType::Entity);
                 self.line(&format!("const {target_var} = ev.deadEntity;"));
                 if let Some(k) = killer_var {
+                    self.bind_typed(k, ExprType::Entity);
                     self.line(&format!("const {k} = ev.damageSource?.damagingEntity;"));
                 }
                 self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
             EventKind::Consume { item, actor_var } => {
-                self.needs_world = true;
-                let item_js = self.emit_expr(item);
-                self.line(&format!(
-                    "world.afterEvents.itemCompleteUse.subscribe({ev_param} => {{"
-                ));
-                self.indent += 1;
-                self.line(&format!("const {actor_var} = ev.source;"));
-                self.line(&format!(
-                    "if (!ev.itemStack || ev.itemStack.typeId !== ({item_js})) return;"
-                ));
-                self.emit_block_stmts(&ev.body.stmts);
-                self.indent -= 1;
-                self.line("});");
+                if self.is_bound_item(item.as_ref()) {
+                    let snippet = self.emit_to_buffer(3, |cg| {
+                        cg.push_scope();
+                        cg.bind_typed(actor_var, ExprType::Entity);
+                        cg.line(&format!("const {actor_var} = ev.source;"));
+                        cg.emit_sneak_guard(actor_var, ev.sneak_filter);
+                        cg.emit_block_stmts(&ev.body.stmts);
+                        cg.pop_scope();
+                    });
+                    self.item_consume_callbacks.push(snippet);
+                } else {
+                    self.needs_world = true;
+                    self.line(&format!(
+                        "world.afterEvents.itemCompleteUse.subscribe({ev_param} => {{"
+                    ));
+                    self.indent += 1;
+                    self.push_scope();
+                    self.bind_typed(actor_var, ExprType::Entity);
+                    self.line(&format!("const {actor_var} = ev.source;"));
+                    self.emit_item_match_guard(item.as_ref(), "ev.itemStack");
+                    self.emit_sneak_guard(actor_var, ev.sneak_filter);
+                    self.emit_block_stmts(&ev.body.stmts);
+                    self.pop_scope();
+                    self.indent -= 1;
+                    self.line("});");
+                }
             }
             EventKind::BlockInteract {
                 block_id,
@@ -1614,9 +2500,14 @@ impl<'a> Codegen<'a> {
             } => {
                 if self.is_bound_block(block_id) && !has_cancel {
                     let snippet = self.emit_to_buffer(3, |cg| {
+                        cg.push_scope();
+                        cg.bind_typed(actor_var, ExprType::Entity);
+                        cg.bind_typed("block", ExprType::Block);
                         cg.line(&format!("const {actor_var} = ev.player;"));
                         cg.line("const block = ev.block;");
+                        cg.emit_sneak_guard(actor_var, ev.sneak_filter);
                         cg.emit_block_stmts(&ev.body.stmts);
+                        cg.pop_scope();
                     });
                     self.block_interact_callbacks.push(snippet);
                 } else {
@@ -1629,22 +2520,31 @@ impl<'a> Codegen<'a> {
                     };
                     self.line(&format!("{bus}.subscribe({ev_param} => {{"));
                     self.indent += 1;
+                    self.push_scope();
+                    self.bind_typed(actor_var, ExprType::Entity);
+                    self.bind_typed("block", ExprType::Block);
                     self.line(&format!("const {actor_var} = ev.player;"));
                     self.line("const block = ev.block;");
                     self.line(&format!("if (ev.block.typeId !== ({block_js})) return;"));
+                    self.emit_sneak_guard(actor_var, ev.sneak_filter);
                     let prev = self.in_before_event;
                     self.in_before_event = has_cancel;
                     self.emit_block_stmts(&ev.body.stmts);
                     self.in_before_event = prev;
+                    self.pop_scope();
                     self.indent -= 1;
                     self.line("});");
                 }
             }
             EventKind::BlockTick { .. } => {
                 let snippet = self.emit_to_buffer(3, |cg| {
+                    cg.push_scope();
+                    cg.bind_typed("block", ExprType::Block);
+                    cg.bind_local("dimension");
                     cg.line("const block = ev.block;");
                     cg.line("const dimension = ev.dimension;");
                     cg.emit_block_stmts(&ev.body.stmts);
+                    cg.pop_scope();
                 });
                 self.block_tick_callbacks.push(snippet);
             }
@@ -1658,6 +2558,9 @@ impl<'a> Codegen<'a> {
                     "world.afterEvents.projectileHitEntity.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
+                self.push_scope();
+                self.bind_typed(target_var, ExprType::Entity);
+                self.bind_typed("projectile", ExprType::Entity);
                 self.line(&format!("const {target_var} = ev.getEntityHit()?.entity;"));
                 self.line(&format!("if (!{target_var}) return;"));
                 if let Some(proj) = projectile_id {
@@ -1667,6 +2570,7 @@ impl<'a> Codegen<'a> {
                     ));
                 }
                 if let Some(shooter) = shooter_var {
+                    self.bind_typed(shooter, ExprType::Entity);
                     self.line(&format!("const {shooter} = ev.source;"));
                 }
                 if target_var != "projectile"
@@ -1676,6 +2580,7 @@ impl<'a> Codegen<'a> {
                     self.line("const projectile = ev.projectile;");
                 }
                 self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
@@ -1688,12 +2593,15 @@ impl<'a> Codegen<'a> {
                     "world.afterEvents.entitySpawn.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
+                self.push_scope();
+                self.bind_typed(entity_var, ExprType::Entity);
                 self.line(&format!("const {entity_var} = ev.entity;"));
                 if let Some(ty) = entity_type {
                     let ty_js = self.emit_expr(ty);
                     self.line(&format!("if ({entity_var}.typeId !== ({ty_js})) return;"));
                 }
                 self.emit_block_stmts(&ev.body.stmts);
+                self.pop_scope();
                 self.indent -= 1;
                 self.line("});");
             }
@@ -1713,8 +2621,8 @@ impl<'a> Codegen<'a> {
                 self.indent += 1;
                 self.push_scope();
                 self.bind_local("event");
-                self.bind_local("source");
-                self.bind_local("source_block");
+                self.bind_typed("source", ExprType::Entity);
+                self.bind_typed("source_block", ExprType::Block);
                 self.line(&format!("if (event.id !== {id_js}) return;"));
                 self.line("const source = event.sourceEntity;");
                 self.line("const source_block = event.sourceBlock;");
@@ -1747,7 +2655,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local("entity");
+                self.bind_typed("entity", ExprType::Entity);
                 self.bind_local("event_id");
                 self.line("const entity = event.entity;");
                 self.line("const event_id = event.eventId;");
@@ -1835,10 +2743,14 @@ impl<'a> Codegen<'a> {
                     c.indent += 1;
                     c.push_scope();
                     for p in params {
-                        c.bind_local(&p.name);
+                        if p.param_type == CmdParamType::PlayerSelector {
+                            c.bind_typed(&p.name, ExprType::EntityList);
+                        } else {
+                            c.bind_local(&p.name);
+                        }
                     }
                     if let Some(actor) = actor_var {
-                        c.bind_local(actor);
+                        c.bind_typed(actor, ExprType::Entity);
                         c.line(&format!("const {actor} = origin.sourceEntity;"));
                         c.line(&format!(
                             "if (!{actor} || {actor}.typeId !== \"minecraft:player\") return;"
@@ -1871,10 +2783,11 @@ impl<'a> Codegen<'a> {
                 self.line(&format!("{bus}.subscribe({ev_param} => {{"));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(block_var);
-                self.bind_local(actor_var);
+                self.bind_typed(block_var, ExprType::Block);
+                self.bind_typed(actor_var, ExprType::Entity);
                 self.line(&format!("const {block_var} = ev.block;"));
                 self.line(&format!("const {actor_var} = ev.player;"));
+                self.emit_sneak_guard(actor_var, ev.sneak_filter);
                 let prev = self.in_before_event;
                 self.in_before_event = has_cancel;
                 self.emit_block_stmts(&ev.body.stmts);
@@ -1890,7 +2803,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(player_var);
+                self.bind_typed(player_var, ExprType::Entity);
                 self.bind_local("from_dimension");
                 self.bind_local("to_dimension");
                 self.bind_local("from_location");
@@ -1920,7 +2833,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(entity_var);
+                self.bind_typed(entity_var, ExprType::Entity);
                 self.bind_local("old_value");
                 self.bind_local("new_value");
                 self.line(&format!("const {entity_var} = ev.entity;"));
@@ -1948,10 +2861,11 @@ impl<'a> Codegen<'a> {
                 self.line(&format!("{bus}.subscribe({ev_param} => {{"));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(target_var);
-                self.bind_local(actor_var);
+                self.bind_typed(target_var, ExprType::Entity);
+                self.bind_typed(actor_var, ExprType::Entity);
                 self.line(&format!("const {target_var} = ev.target;"));
                 self.line(&format!("const {actor_var} = ev.player;"));
+                self.emit_sneak_guard(actor_var, ev.sneak_filter);
                 let prev = self.in_before_event;
                 self.in_before_event = has_cancel;
                 self.emit_block_stmts(&ev.body.stmts);
@@ -1970,15 +2884,15 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(block_var);
-                self.bind_local("projectile");
+                self.bind_typed(block_var, ExprType::Block);
+                self.bind_typed("projectile", ExprType::Entity);
                 self.line(&format!("const {block_var} = ev.getBlockHit()?.block;"));
                 self.line(&format!("if (!{block_var}) return;"));
                 if let Some(shooter) = shooter_var {
-                    self.bind_local(shooter);
+                    self.bind_typed(shooter, ExprType::Entity);
                     self.line(&format!("const {shooter} = ev.source;"));
                 } else if block_var != "shooter" && block_references_ident(&ev.body, "shooter") {
-                    self.bind_local("shooter");
+                    self.bind_typed("shooter", ExprType::Entity);
                     self.line("const shooter = ev.source;");
                 }
                 if block_var != "projectile"
@@ -2002,10 +2916,11 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(block_var);
-                self.bind_local(attacker_var);
+                self.bind_typed(block_var, ExprType::Block);
+                self.bind_typed(attacker_var, ExprType::Entity);
                 self.line(&format!("const {block_var} = ev.hitBlock;"));
                 self.line(&format!("const {attacker_var} = ev.damagingEntity;"));
+                self.emit_sneak_guard(attacker_var, ev.sneak_filter);
                 self.emit_block_stmts(&ev.body.stmts);
                 self.pop_scope();
                 self.indent -= 1;
@@ -2013,19 +2928,17 @@ impl<'a> Codegen<'a> {
             }
             EventKind::ItemRelease { item, actor_var } => {
                 self.needs_world = true;
-                let item_js = self.emit_expr(item);
                 self.line(&format!(
                     "world.afterEvents.itemReleaseUse.subscribe({ev_param} => {{"
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(actor_var);
-                self.bind_local("item");
+                self.bind_typed(actor_var, ExprType::Entity);
+                self.bind_typed("item", ExprType::Item);
                 self.bind_local("use_duration");
                 self.line(&format!("const {actor_var} = ev.source;"));
-                self.line(&format!(
-                    "if (!ev.itemStack || ev.itemStack.typeId !== ({item_js})) return;"
-                ));
+                self.emit_item_match_guard(item.as_ref(), "ev.itemStack");
+                self.emit_sneak_guard(actor_var, ev.sneak_filter);
                 if actor_var != "item" && block_references_ident(&ev.body, "item") {
                     self.line("const item = ev.itemStack;");
                 }
@@ -2047,7 +2960,7 @@ impl<'a> Codegen<'a> {
                 self.line(&format!("{bus}.subscribe({ev_param} => {{"));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local("source");
+                self.bind_typed("source", ExprType::Entity);
                 self.bind_local("impacted_blocks");
                 if block_references_ident(&ev.body, "source") {
                     self.line("const source = ev.source;");
@@ -2070,7 +2983,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(entity_var);
+                self.bind_typed(entity_var, ExprType::Entity);
                 self.line(&format!("const {entity_var} = ev.entity;"));
                 self.emit_block_stmts(&ev.body.stmts);
                 self.pop_scope();
@@ -2084,7 +2997,7 @@ impl<'a> Codegen<'a> {
                 ));
                 self.indent += 1;
                 self.push_scope();
-                self.bind_local(entity_var);
+                self.bind_typed(entity_var, ExprType::Entity);
                 self.line(&format!(
                     "const {entity_var} = ev.removedEntity ?? ev;"
                 ));
@@ -2118,13 +3031,20 @@ impl<'a> Codegen<'a> {
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::ConstDecl(d) => {
+                let val_ty = self.infer_expr_type(&d.value);
                 let val = self.emit_expr(&d.value);
-                self.bind_local(&d.name);
+                self.bind_typed(&d.name, val_ty);
                 self.line(&format!("const {} = {val};", d.name));
             }
+            Stmt::TableDecl(t) => {
+                let val = self.emit_expr(&t.value);
+                self.bind_typed(&t.name, ExprType::Plain);
+                self.line(&format!("const {} = {val};", t.name));
+            }
             Stmt::MutDecl(d) => {
+                let val_ty = self.infer_expr_type(&d.value);
                 let val = self.emit_expr(&d.value);
-                self.bind_local(&d.name);
+                self.bind_typed(&d.name, val_ty);
                 self.line(&format!("let {} = {val};", d.name));
             }
             Stmt::Assign {
@@ -2186,6 +3106,14 @@ impl<'a> Codegen<'a> {
                                     if *op != AssignOp::Assign {
                                         self.used_shared_imports.insert(format!("__get_{name}"));
                                     }
+                                } else if let Some((ext_path, ExternalSymbolKind::State)) =
+                                    self.shared.external_symbols.get(name).cloned()
+                                {
+                                    let entry = self.extra_shared_imports.entry(ext_path).or_default();
+                                    entry.insert(format!("__set_{name}"));
+                                    if *op != AssignOp::Assign {
+                                        entry.insert(format!("__get_{name}"));
+                                    }
                                 }
                                 let line = match op {
                                     AssignOp::Assign => {
@@ -2212,8 +3140,13 @@ impl<'a> Codegen<'a> {
                         self.line(&format!("{obj_js}[{idx_js}] {} {val_js};", op.as_str()));
                     }
                     AssignTarget::Field { object, field, .. } => {
+                        let recv_ty = self.infer_expr_type(object);
                         let obj_js = self.emit_expr(object);
-                        let mapped = map_property(field).unwrap_or(field.as_str());
+                        let mapped = match recv_ty {
+                            ExprType::Entity => map_property(field).unwrap_or(field.as_str()),
+                            ExprType::Item => map_item_property(field).unwrap_or(field.as_str()),
+                            _ => field.as_str(),
+                        };
                         self.line(&format!("{obj_js}.{mapped} {} {val_js};", op.as_str()));
                     }
                 }
@@ -2252,10 +3185,15 @@ impl<'a> Codegen<'a> {
             Stmt::For {
                 var, iter, body, ..
             } => {
+                let elem_ty = if self.is_entity_collection_expr(iter) {
+                    ExprType::Entity
+                } else {
+                    ExprType::Plain
+                };
                 let iter_js = self.emit_expr(iter);
                 self.line(&format!("for (const {var} of {iter_js}) {{"));
                 self.push_scope();
-                self.bind_local(var);
+                self.bind_typed(var, elem_ty);
                 self.indent += 1;
                 self.emit_block_stmts(&body.stmts);
                 self.indent -= 1;
@@ -2284,10 +3222,73 @@ impl<'a> Codegen<'a> {
             Stmt::CancelEvent { .. } => {
                 self.line("ev.cancel = true;");
             }
-            Stmt::Damage { target, amount, .. } => {
+            Stmt::Damage {
+                target,
+                amount,
+                cause,
+                source,
+                ..
+            } => {
                 let t = self.emit_expr(target);
                 let a = self.emit_expr(amount);
-                self.wrap_before_event_mutation(format!("{t}.applyDamage({a});"));
+                if cause.is_none() && source.is_none() {
+                    self.wrap_before_event_mutation(format!("{t}.applyDamage({a});"));
+                } else {
+                    self.needs_entity_damage_cause = true;
+                    let cause_js = match cause {
+                        Some(c) => {
+                            if let Expr::Ident(name, _) = c {
+                                if !self.is_local(name)
+                                    && !self.shared.shared_exports.contains(name)
+                                    && !self.shared.external_symbols.contains_key(name)
+                                {
+                                    if let Some(camel) = crate::validator::normalize_damage_cause(name)
+                                    {
+                                        format!("EntityDamageCause.{camel}")
+                                    } else {
+                                        self.needs_damage_cause_helper = true;
+                                        format!("__pstdr_damage_cause({})", self.emit_expr(c))
+                                    }
+                                } else if let Some(s) = eval_static_string(c, &self.const_strings) {
+                                    if let Some(camel) = crate::validator::normalize_damage_cause(&s)
+                                    {
+                                        format!("EntityDamageCause.{camel}")
+                                    } else {
+                                        self.needs_damage_cause_helper = true;
+                                        format!("__pstdr_damage_cause({})", self.emit_expr(c))
+                                    }
+                                } else {
+                                    self.needs_damage_cause_helper = true;
+                                    format!("__pstdr_damage_cause({})", self.emit_expr(c))
+                                }
+                            } else if let Some(s) = eval_static_string(c, &self.const_strings) {
+                                if let Some(camel) = crate::validator::normalize_damage_cause(&s) {
+                                    format!("EntityDamageCause.{camel}")
+                                } else {
+                                    self.needs_damage_cause_helper = true;
+                                    format!("__pstdr_damage_cause({})", self.emit_expr(c))
+                                }
+                            } else {
+                                self.needs_damage_cause_helper = true;
+                                format!("__pstdr_damage_cause({})", self.emit_expr(c))
+                            }
+                        }
+                        None => "EntityDamageCause.entityAttack".to_string(),
+                    };
+                    let opts_js = if let Some(src) = source {
+                        let s_js = self.emit_expr(src);
+                        format!("{{ cause: {cause_js}, damagingEntity: {s_js} }}")
+                    } else {
+                        format!("{{ cause: {cause_js} }}")
+                    };
+                    self.wrap_before_event_mutation(format!("{t}.applyDamage({a}, {opts_js});"));
+                }
+            }
+            Stmt::Heal { target, amount, .. } => {
+                self.needs_heal_helper = true;
+                let t = self.emit_expr(target);
+                let a = self.emit_expr(amount);
+                self.wrap_before_event_mutation(format!("__pstdr_heal({t}, {a});"));
             }
             Stmt::Ignite {
                 target, duration, ..
@@ -2304,13 +3305,30 @@ impl<'a> Codegen<'a> {
                 ..
             } => {
                 let t = self.emit_expr(target);
-                let ticks = duration.ticks_rounded();
+                let eff_js = match effect {
+                    EffectSpec::Static { name, .. } => {
+                        format!("\"{}\"", escape_double_quoted(name))
+                    }
+                    EffectSpec::Dynamic(expr) => self.emit_expr(expr),
+                };
+                let ticks_js = match duration {
+                    DelaySpec::Literal(d) => format!("{}", d.ticks_rounded()),
+                    DelaySpec::Expr(e) => {
+                        let mut cur = e;
+                        while let Expr::Paren(inner, _) = cur {
+                            cur = inner.as_ref();
+                        }
+                        format!("Math.max(1, Math.round({}))", self.emit_expr(cur))
+                    }
+                };
                 let amp = match level {
-                    Expr::Number(n, _) if n.fract() == 0.0 => format!("{}", (*n as i64) - 1),
-                    _ => format!("({}) - 1", self.emit_expr(level)),
+                    Expr::Number(n, _) if n.fract() == 0.0 => {
+                        format!("{}", ((*n as i64) - 1).max(0))
+                    }
+                    _ => format!("Math.max(0, Math.round({}) - 1)", self.emit_expr(level)),
                 };
                 self.wrap_before_event_mutation(format!(
-                    "{t}.addEffect(\"{effect}\", {ticks}, {{ amplifier: {amp} }});"
+                    "{t}.addEffect({eff_js}, {ticks_js}, {{ amplifier: {amp} }});"
                 ));
             }
             Stmt::SendMessage {
@@ -2319,6 +3337,65 @@ impl<'a> Codegen<'a> {
                 let t = self.emit_expr(target);
                 let m = self.emit_expr(message);
                 self.wrap_before_event_mutation(format!("{t}.sendMessage({m});"));
+            }
+            Stmt::PlaySound {
+                sound,
+                target,
+                volume,
+                pitch,
+                ..
+            } => {
+                self.needs_world = true;
+                self.needs_play_sound_helper = true;
+                let s_js = self.emit_expr(sound);
+                let t_js = self.emit_expr(target);
+                let mut opts_parts = Vec::new();
+                if let Some(v) = volume {
+                    opts_parts.push(format!("volume: {}", self.emit_expr(v)));
+                }
+                if let Some(p) = pitch {
+                    opts_parts.push(format!("pitch: {}", self.emit_expr(p)));
+                }
+                let call = if opts_parts.is_empty() {
+                    format!("__pstdr_play_sound({t_js}, {s_js});")
+                } else {
+                    format!(
+                        "__pstdr_play_sound({t_js}, {s_js}, {{ {} }});",
+                        opts_parts.join(", ")
+                    )
+                };
+                self.wrap_before_event_mutation(call);
+            }
+            Stmt::Launch {
+                projectile,
+                from,
+                speed,
+                ..
+            } => {
+                self.needs_launch_helper = true;
+                let p_js = self.emit_expr(projectile);
+                let f_js = self.emit_expr(from);
+                let s_js = self.emit_expr(speed);
+                self.wrap_before_event_mutation(format!(
+                    "__pstdr_launch_projectile({f_js}, {p_js}, {s_js});"
+                ));
+            }
+            Stmt::Dash {
+                target,
+                forward,
+                up,
+                ..
+            } => {
+                self.needs_dash_helper = true;
+                let t_js = self.emit_expr(target);
+                let f_js = self.emit_expr(forward);
+                let call = if let Some(u) = up {
+                    let u_js = self.emit_expr(u);
+                    format!("__pstdr_dash({t_js}, {f_js}, {u_js});")
+                } else {
+                    format!("__pstdr_dash({t_js}, {f_js});")
+                };
+                self.wrap_before_event_mutation(call);
             }
             Stmt::SpawnParticle {
                 particle,
@@ -2413,16 +3490,48 @@ impl<'a> Codegen<'a> {
                 };
                 self.wrap_before_event_mutation(call);
             }
-            Stmt::After { duration, body, .. } => {
+            Stmt::After { delay, body, .. } => {
                 self.needs_system = true;
-                let ticks = duration.ticks_rounded();
+                let ticks_js = match delay {
+                    DelaySpec::Literal(d) => format!("{}", d.ticks_rounded()),
+                    DelaySpec::Expr(e) => {
+                        let mut cur = e;
+                        while let Expr::Paren(inner, _) = cur {
+                            cur = inner.as_ref();
+                        }
+                        format!("Math.max(0, Math.round({}))", self.emit_expr(cur))
+                    }
+                };
                 let prev = self.in_before_event;
                 self.in_before_event = false;
                 self.line("system.runTimeout(() => {");
                 self.indent += 1;
                 self.emit_block_stmts(&body.stmts);
                 self.indent -= 1;
-                self.line(&format!("}}, {ticks});"));
+                self.line(&format!("}}, {ticks_js});"));
+                self.in_before_event = prev;
+            }
+            Stmt::Timeline { entries, .. } => {
+                self.needs_system = true;
+                let prev = self.in_before_event;
+                self.in_before_event = false;
+                for (delay, body) in entries {
+                    let ticks_js = match delay {
+                        DelaySpec::Literal(d) => format!("{}", d.ticks_rounded()),
+                        DelaySpec::Expr(e) => {
+                            let mut cur = e;
+                            while let Expr::Paren(inner, _) = cur {
+                                cur = inner.as_ref();
+                            }
+                            format!("Math.max(0, Math.round({}))", self.emit_expr(cur))
+                        }
+                    };
+                    self.line("system.runTimeout(() => {");
+                    self.indent += 1;
+                    self.emit_block_stmts(&body.stmts);
+                    self.indent -= 1;
+                    self.line(&format!("}}, {ticks_js});"));
+                }
                 self.in_before_event = prev;
             }
             Stmt::Every { duration, body, .. } => {
@@ -2805,6 +3914,13 @@ impl<'a> Codegen<'a> {
                         && self.shared.shared_import_path.is_some()
                     {
                         self.used_shared_imports.insert(name.clone());
+                    } else if let Some((ext_path, ExternalSymbolKind::Value)) =
+                        self.shared.external_symbols.get(name).cloned()
+                    {
+                        self.extra_shared_imports
+                            .entry(ext_path)
+                            .or_default()
+                            .insert(name.clone());
                     }
                 }
                 name.clone()
@@ -2874,6 +3990,13 @@ impl<'a> Codegen<'a> {
                             && self.shared.shared_import_path.is_some()
                         {
                             self.used_shared_imports.insert(format!("__get_{name}"));
+                        } else if let Some((ext_path, ExternalSymbolKind::State)) =
+                            self.shared.external_symbols.get(name).cloned()
+                        {
+                            self.extra_shared_imports
+                                .entry(ext_path)
+                                .or_default()
+                                .insert(format!("__get_{name}"));
                         }
                         return format!("__get_{name}({idx_js})");
                     }
@@ -2887,19 +4010,70 @@ impl<'a> Codegen<'a> {
                 optional,
                 ..
             } => {
-                let obj_js = self.emit_expr(object);
-                let sep = if *optional { "?." } else { "." };
-                let is_item_like = matches!(
-                    object.as_ref(),
-                    Expr::Member { field: parent_f, .. } if parent_f == "mainhand" || parent_f == "holding"
-                );
-                let mapped = if is_item_like {
-                    map_item_property(field).unwrap_or(field.as_str())
-                } else {
-                    if field == "holding" || field == "mainhand" {
-                        self.needs_equipment_slot = true;
+                // player.armor.helmet / .chestplate / .leggings / .boots
+                if let Expr::Member {
+                    object: inner,
+                    field: outer_field,
+                    ..
+                } = object.as_ref()
+                {
+                    if self.infer_expr_type(inner) == ExprType::Entity {
+                        if outer_field == "armor" {
+                            if let Some(slot) = match field.as_str() {
+                                "helmet" | "head" => Some("Head"),
+                                "chestplate" | "chest" | "torso" => Some("Chest"),
+                                "leggings" | "legs" => Some("Legs"),
+                                "boots" | "feet" => Some("Feet"),
+                                _ => None,
+                            } {
+                                self.needs_equipment_slot = true;
+                                let inner_js = self.emit_expr(inner);
+                                return format!(
+                                    "({inner_js}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.{slot})?.typeId ?? \"\")"
+                                );
+                            }
+                        } else if outer_field == "offhand"
+                            && matches!(field.as_str(), "id" | "type_id")
+                        {
+                            self.needs_equipment_slot = true;
+                            let inner_js = self.emit_expr(inner);
+                            return format!(
+                                "{inner_js}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.Offhand)?.typeId"
+                            );
+                        }
                     }
-                    map_property(field).unwrap_or(field.as_str())
+                }
+                let recv_ty = self.infer_expr_type(object);
+                let obj_js = self.emit_expr(object);
+                if recv_ty == ExprType::Entity && field == "offhand" {
+                    self.needs_equipment_slot = true;
+                    return format!(
+                        "({obj_js}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.Offhand)?.typeId ?? \"\")"
+                    );
+                }
+                let sep = if *optional { "?." } else { "." };
+                let mapped = match recv_ty {
+                    ExprType::Item => map_item_property(field).unwrap_or(field.as_str()),
+                    ExprType::System => {
+                        if field == "current_tick" {
+                            "currentTick"
+                        } else {
+                            field.as_str()
+                        }
+                    }
+                    ExprType::Block => match field.as_str() {
+                        "type_id" => "typeId",
+                        "name_tag" => "nameTag",
+                        "is_valid" => "isValid",
+                        other => other,
+                    },
+                    ExprType::Entity => {
+                        if field == "holding" || field == "mainhand" {
+                            self.needs_equipment_slot = true;
+                        }
+                        map_property(field).unwrap_or(field.as_str())
+                    }
+                    ExprType::Plain | ExprType::EntityList => field.as_str(),
                 };
                 format!("{obj_js}{sep}{mapped}")
             }
@@ -2912,7 +4086,29 @@ impl<'a> Codegen<'a> {
                     ..
                 } = callee.as_ref()
                 {
+                    let recv_ty = self.infer_expr_type(object);
                     let obj_js = self.emit_expr(object);
+                    if field == "equipment" && recv_ty == ExprType::Entity && args_js.len() == 1 {
+                        self.needs_equipment_slot = true;
+                        if let Some(slot_lit) = eval_static_string(&args[0], &self.const_strings) {
+                            let mapped_slot = match slot_lit.trim().to_ascii_lowercase().as_str() {
+                                "head" | "helmet" => Some("Head"),
+                                "chest" | "chestplate" | "torso" => Some("Chest"),
+                                "legs" | "leggings" => Some("Legs"),
+                                "feet" | "boots" => Some("Feet"),
+                                "offhand" => Some("Offhand"),
+                                "mainhand" => Some("Mainhand"),
+                                _ => None,
+                            };
+                            if let Some(slot) = mapped_slot {
+                                return format!(
+                                    "{obj_js}.getComponent(\"minecraft:equippable\")?.getEquipment(EquipmentSlot.{slot})"
+                                );
+                            }
+                        }
+                        self.needs_equipment_helper = true;
+                        return format!("__pstdr_equipment({obj_js}, {})", args_js[0]);
+                    }
                     if field == "holding" && args_js.len() == 1 {
                         self.needs_equipment_slot = true;
                         return format!(
@@ -3020,6 +4216,53 @@ impl<'a> Codegen<'a> {
                     }
                 }
             }
+            Expr::WithinDistance {
+                left,
+                distance,
+                right,
+                ..
+            } => {
+                self.needs_within_helper = true;
+                let l = self.emit_expr(left);
+                let d = self.emit_expr(distance);
+                let r = self.emit_expr(right);
+                format!("__pstdr_within({l}, {r}, {d})")
+            }
+            Expr::RaycastEntities {
+                origin,
+                range,
+                pierce,
+                ..
+            } => {
+                self.needs_raycast_helper = true;
+                let o = self.emit_expr(origin);
+                let r = self.emit_expr(range);
+                if let Some(p) = pierce {
+                    let p_js = self.emit_expr(p);
+                    format!("__pstdr_raycast_entities({o}, {r}, {p_js})")
+                } else {
+                    format!("__pstdr_raycast_entities({o}, {r})")
+                }
+            }
+            Expr::ConeEntities {
+                origin,
+                radius,
+                angle,
+                ..
+            } => {
+                self.needs_cone_helper = true;
+                let o = self.emit_expr(origin);
+                let r = self.emit_expr(radius);
+                let a = self.emit_expr(angle);
+                format!("__pstdr_cone_entities({o}, {r}, {a})")
+            }
+            Expr::EntitiesWithin { radius, origin, .. } => {
+                self.needs_world = true;
+                self.needs_entities_within_helper = true;
+                let r = self.emit_expr(radius);
+                let o = self.emit_expr(origin);
+                format!("__pstdr_entities_within({o}, {r})")
+            }
             Expr::IsCheck {
                 subject,
                 negated,
@@ -3074,6 +4317,7 @@ fn block_references_ident(block: &Block, name: &str) -> bool {
 fn stmt_references_ident(stmt: &Stmt, name: &str) -> bool {
     match stmt {
         Stmt::ConstDecl(d) | Stmt::MutDecl(d) => expr_references_ident(&d.value, name),
+        Stmt::TableDecl(t) => expr_references_ident(&t.value, name),
         Stmt::Assign { target, value, .. } => {
             let t_ref = match target {
                 AssignTarget::Ident(n, _) => n == name,
@@ -3108,16 +4352,83 @@ fn stmt_references_ident(stmt: &Stmt, name: &str) -> bool {
             .as_ref()
             .is_some_and(|v| expr_references_ident(v, name)),
         Stmt::CancelEvent { .. } => false,
-        Stmt::Damage { target, amount, .. } => {
+        Stmt::Damage {
+            target,
+            amount,
+            cause,
+            source,
+            ..
+        } => {
+            expr_references_ident(target, name)
+                || expr_references_ident(amount, name)
+                || cause.as_ref().is_some_and(|c| expr_references_ident(c, name))
+                || source
+                    .as_ref()
+                    .is_some_and(|s| expr_references_ident(s, name))
+        }
+        Stmt::Heal { target, amount, .. } => {
             expr_references_ident(target, name) || expr_references_ident(amount, name)
         }
         Stmt::Ignite { target, .. } => expr_references_ident(target, name),
-        Stmt::ApplyEffect { level, target, .. } => {
-            expr_references_ident(level, name) || expr_references_ident(target, name)
+        Stmt::ApplyEffect {
+            effect,
+            level,
+            target,
+            duration,
+            ..
+        } => {
+            let eff_ref = match effect {
+                EffectSpec::Static { .. } => false,
+                EffectSpec::Dynamic(e) => expr_references_ident(e, name),
+            };
+            let dur_ref = match duration {
+                DelaySpec::Literal(_) => false,
+                DelaySpec::Expr(e) => expr_references_ident(e, name),
+            };
+            eff_ref
+                || dur_ref
+                || expr_references_ident(level, name)
+                || expr_references_ident(target, name)
         }
         Stmt::SendMessage {
             message, target, ..
         } => expr_references_ident(message, name) || expr_references_ident(target, name),
+        Stmt::PlaySound {
+            sound,
+            target,
+            volume,
+            pitch,
+            ..
+        } => {
+            expr_references_ident(sound, name)
+                || expr_references_ident(target, name)
+                || volume
+                    .as_ref()
+                    .is_some_and(|v| expr_references_ident(v, name))
+                || pitch
+                    .as_ref()
+                    .is_some_and(|p| expr_references_ident(p, name))
+        }
+        Stmt::Launch {
+            projectile,
+            from,
+            speed,
+            ..
+        } => {
+            expr_references_ident(projectile, name)
+                || expr_references_ident(from, name)
+                || expr_references_ident(speed, name)
+        }
+        Stmt::Dash {
+            target,
+            forward,
+            up,
+            ..
+        } => {
+            expr_references_ident(target, name)
+                || expr_references_ident(forward, name)
+                || up.as_ref().is_some_and(|u| expr_references_ident(u, name))
+        }
         Stmt::SpawnParticle {
             particle,
             location,
@@ -3144,7 +4455,21 @@ fn stmt_references_ident(stmt: &Stmt, name: &str) -> bool {
                 .is_some_and(|t| expr_references_ident(t, name))
                 || expr_references_ident(path, name)
         }
-        Stmt::After { body, .. } | Stmt::Every { body, .. } => block_references_ident(body, name),
+        Stmt::After { delay, body, .. } => {
+            let dur_ref = match delay {
+                DelaySpec::Literal(_) => false,
+                DelaySpec::Expr(e) => expr_references_ident(e, name),
+            };
+            dur_ref || block_references_ident(body, name)
+        }
+        Stmt::Every { body, .. } => block_references_ident(body, name),
+        Stmt::Timeline { entries, .. } => entries.iter().any(|(d, b)| {
+            let dur_ref = match d {
+                DelaySpec::Literal(_) => false,
+                DelaySpec::Expr(e) => expr_references_ident(e, name),
+            };
+            dur_ref || block_references_ident(b, name)
+        }),
         Stmt::UiAction {
             title,
             body,
@@ -3282,6 +4607,45 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
         Expr::Binary { left, right, .. } => {
             expr_references_ident(left, name) || expr_references_ident(right, name)
         }
+        Expr::WithinDistance {
+            left,
+            distance,
+            right,
+            ..
+        } => {
+            expr_references_ident(left, name)
+                || expr_references_ident(distance, name)
+                || expr_references_ident(right, name)
+        }
+        Expr::RaycastEntities {
+            origin,
+            range,
+            pierce,
+            step,
+            ..
+        } => {
+            expr_references_ident(origin, name)
+                || expr_references_ident(range, name)
+                || pierce
+                    .as_ref()
+                    .is_some_and(|p| expr_references_ident(p, name))
+                || step
+                    .as_ref()
+                    .is_some_and(|s| expr_references_ident(s, name))
+        }
+        Expr::ConeEntities {
+            origin,
+            radius,
+            angle,
+            ..
+        } => {
+            expr_references_ident(origin, name)
+                || expr_references_ident(radius, name)
+                || expr_references_ident(angle, name)
+        }
+        Expr::EntitiesWithin { radius, origin, .. } => {
+            expr_references_ident(radius, name) || expr_references_ident(origin, name)
+        }
         Expr::IsCheck {
             subject, predicate, ..
         } => {
@@ -3342,6 +4706,7 @@ fn stmt_uses_ui(stmt: &Stmt) -> bool {
         | Stmt::While { body, .. }
         | Stmt::After { body, .. }
         | Stmt::Every { body, .. } => block_uses_ui(body),
+        Stmt::Timeline { entries, .. } => entries.iter().any(|(_, b)| block_uses_ui(b)),
         _ => false,
     }
 }

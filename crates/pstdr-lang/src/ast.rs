@@ -143,6 +143,8 @@ pub struct BindTargetStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TopLevelItem {
+    Import(ImportDecl),
+    TableDecl(TableDecl),
     ConstDecl(VarDecl),
     MutDecl(VarDecl),
     StateDecl(StateDecl),
@@ -164,10 +166,34 @@ pub enum TopLevelItem {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ImportSymbol {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    pub symbols: Vec<ImportSymbol>,
+    pub path: String,
+    pub path_span: Span,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub value: Expr,
+    pub exported: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDecl {
     pub name: String,
     pub name_span: Span,
     pub value: Expr,
+    pub exported: bool,
     pub span: Span,
 }
 
@@ -176,6 +202,7 @@ pub struct StateDecl {
     pub name: String,
     pub owner_hint: String,
     pub default_value: Expr,
+    pub exported: bool,
     pub span: Span,
 }
 
@@ -183,7 +210,9 @@ pub struct StateDecl {
 pub struct FuncDecl {
     pub name: String,
     pub params: Vec<(String, Span)>,
+    pub entity_params: Vec<bool>,
     pub body: Block,
+    pub exported: bool,
     pub span: Span,
 }
 
@@ -214,6 +243,7 @@ pub struct McFunctionDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventHandler {
     pub kind: EventKind,
+    pub sneak_filter: Option<bool>,
     pub body: Block,
     pub span: Span,
 }
@@ -221,12 +251,12 @@ pub struct EventHandler {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventKind {
     RightClick {
-        item: Expr,
+        item: Option<Expr>,
         actor_var: String,
     },
     HitTarget {
         target_var: String,
-        item: Expr,
+        item: Option<Expr>,
         actor_var: String,
     },
     BreakBlock {
@@ -252,7 +282,7 @@ pub enum EventKind {
         killer_var: Option<String>,
     },
     Consume {
-        item: Expr,
+        item: Option<Expr>,
         actor_var: String,
     },
     BlockInteract {
@@ -308,7 +338,7 @@ pub enum EventKind {
         attacker_var: String,
     },
     ItemRelease {
-        item: Expr,
+        item: Option<Expr>,
         actor_var: String,
     },
     Explosion,
@@ -467,8 +497,21 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum EffectSpec {
+    Static { name: String, span: Span },
+    Dynamic(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DelaySpec {
+    Literal(DurationLit),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     ConstDecl(VarDecl),
+    TableDecl(TableDecl),
     MutDecl(VarDecl),
     Assign {
         target: AssignTarget,
@@ -504,6 +547,13 @@ pub enum Stmt {
     Damage {
         target: Expr,
         amount: Expr,
+        cause: Option<Expr>,
+        source: Option<Expr>,
+        span: Span,
+    },
+    Heal {
+        target: Expr,
+        amount: Expr,
         span: Span,
     },
     Ignite {
@@ -512,11 +562,10 @@ pub enum Stmt {
         span: Span,
     },
     ApplyEffect {
-        effect: String,
-        effect_span: Span,
+        effect: EffectSpec,
         level: Expr,
         target: Expr,
-        duration: DurationLit,
+        duration: DelaySpec,
         span: Span,
     },
     SendMessage {
@@ -530,6 +579,26 @@ pub enum Stmt {
         dimension: Option<Expr>,
         span: Span,
     },
+    PlaySound {
+        sound: Expr,
+        target: Expr,
+        volume: Option<Expr>,
+        pitch: Option<Expr>,
+        custom: bool,
+        span: Span,
+    },
+    Launch {
+        projectile: Expr,
+        from: Expr,
+        speed: Expr,
+        span: Span,
+    },
+    Dash {
+        target: Expr,
+        forward: Expr,
+        up: Option<Expr>,
+        span: Span,
+    },
     Command {
         target: Option<Expr>,
         command: Expr,
@@ -541,8 +610,12 @@ pub enum Stmt {
         span: Span,
     },
     After {
-        duration: DurationLit,
+        delay: DelaySpec,
         body: Block,
+        span: Span,
+    },
+    Timeline {
+        entries: Vec<(DelaySpec, Block)>,
         span: Span,
     },
     Every {
@@ -737,6 +810,30 @@ pub enum Expr {
         right: Box<Expr>,
         span: Span,
     },
+    WithinDistance {
+        left: Box<Expr>,
+        distance: Box<Expr>,
+        right: Box<Expr>,
+        span: Span,
+    },
+    RaycastEntities {
+        origin: Box<Expr>,
+        range: Box<Expr>,
+        pierce: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+        span: Span,
+    },
+    ConeEntities {
+        origin: Box<Expr>,
+        radius: Box<Expr>,
+        angle: Box<Expr>,
+        span: Span,
+    },
+    EntitiesWithin {
+        radius: Box<Expr>,
+        origin: Box<Expr>,
+        span: Span,
+    },
     IsCheck {
         subject: Box<Expr>,
         negated: bool,
@@ -768,6 +865,10 @@ impl Expr {
             | Self::Call { span: s, .. }
             | Self::Unary { span: s, .. }
             | Self::Binary { span: s, .. }
+            | Self::WithinDistance { span: s, .. }
+            | Self::RaycastEntities { span: s, .. }
+            | Self::ConeEntities { span: s, .. }
+            | Self::EntitiesWithin { span: s, .. }
             | Self::IsCheck { span: s, .. }
             | Self::Ternary { span: s, .. }
             | Self::Paren(_, s) => s,

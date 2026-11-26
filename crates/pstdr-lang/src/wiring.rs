@@ -497,7 +497,9 @@ pub fn emit_registry_module_for_profile(
         };
         ka.cmp(&kb).then_with(|| a.slug.cmp(&b.slug))
     });
-    sorted.dedup_by(|a, b| a.kind == b.kind && a.slug == b.slug);
+    sorted.dedup_by(|a, b| {
+        a.kind == b.kind && (a.slug == b.slug || a.component_id == b.component_id)
+    });
 
     let mut sorted_cmds = command_modules.to_vec();
     sorted_cmds.sort();
