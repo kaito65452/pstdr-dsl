@@ -1,6 +1,8 @@
 # Events and Actions
 
-## Supported Events (Wave 1–3C)
+## Supported Events (Wave 1–4)
+
+> **Wave 4 Triggers & Filters:** `on right click`, `on hit`, `on consume`, and `on item_release` allow omitting `with <item>` (generic item trigger) or matching prefixes via `"ns:*"`. Actor events also accept a trailing `when sneaking` or `when not sneaking` guard before `{ ... }`.
 
 | Event | Syntax | Scope Variables | Bedrock Bus / Component |
 | :--- | :--- | :--- | :--- |
@@ -9,10 +11,10 @@
 | **Player Join** | `on join of <actor> { ... }` | `<actor>` | `world.afterEvents.playerSpawn` (`ev.initialSpawn`) |
 | **Player Leave** | `on leave of <actor> { ... }` | `<actor>` | `world.beforeEvents.playerLeave` (auto `system.run` for mutations) |
 | **Dimension Change** *(Wave 3B)* | `on dimension_change of <player> { ... }` | `<player>`, `from_dimension`, `to_dimension`, `from_location`, `to_location` | `world.afterEvents.playerDimensionChange` |
-| **Right Click** | `on right click with <item> by <actor> { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
-| **Hit Entity** | `on hit <target> with <item> by <actor> { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` (or item component `onHitEntity`) |
-| **Consume Item** | `on consume <item> by <actor> { ... }` | `<actor>` | `world.afterEvents.itemCompleteUse` (or item component `onConsume`) |
-| **Item Release** *(Wave 3B)* | `on item_release with <item> by <actor> { ... }` | `<actor>`, `item`, `use_duration` | `world.afterEvents.itemReleaseUse` |
+| **Right Click** | `on right click [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>` | `afterEvents.itemUse` / `beforeEvents.itemUse` (or item component `onUse`) |
+| **Hit Entity** | `on hit <target> [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<target>`, `<actor>` | `world.afterEvents.entityHitEntity` (or item component `onHitEntity`) |
+| **Consume Item** | `on consume [<item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>` | `world.afterEvents.itemCompleteUse` (or item component `onConsume`) |
+| **Item Release** *(Wave 3B)* | `on item_release [with <item\|"ns:*">] by <actor> [when [not] sneaking] { ... }` | `<actor>`, `item`, `use_duration` | `world.afterEvents.itemReleaseUse` |
 | **Break Block** | `on break of <block_id> by <actor> { ... }` | `<actor>`, `block` | `afterEvents.playerBreakBlock` / `beforeEvents.playerBreakBlock` (or block component `onPlayerBreak`) |
 | **Place Block** *(Wave 3B)* | `on place of <block> by <actor> { ... }` | `<block>`, `<actor>` | `afterEvents.playerPlaceBlock` / `beforeEvents.playerPlaceBlock` (Cancellable) |
 | **Block Interact** | `on interact of <block_id> by <actor> { ... }` | `<actor>`, `block` | Block component `onPlayerInteract` (or `afterEvents`/`beforeEvents.playerInteractWithBlock`) |
@@ -198,9 +200,13 @@ every 5s {
 | Action | Syntax | Notes |
 | :--- | :--- | :--- |
 | **Cancel Event** | `cancel event` | Valid only in `on right click`, `on break`, `on place`, `on interact`, `on interact_entity`, `on explosion`, and `on chat` (`PSTDR-E004` otherwise). |
-| **Damage** | `damage <target> by <amount>` | Emits `<target>.applyDamage(<amount>)`. |
+| **Heal** *(Wave 4)* | `heal <target> by <amount>` | Restores entity health clamped to `effectiveMax`. |
+| **Damage** *(Wave 4 cause/source)* | `damage <target> by <amount> [cause <cause>] [source <entity>]` | Emits `<target>.applyDamage(<amount>[, { cause: EntityDamageCause.<c>, damagingEntity }])`. |
 | **Ignite** | `ignite <target> for <duration>` | Emits `<target>.setOnFire(<seconds>, true)`. |
-| **Apply Effect** | `apply <effect> <level> to <target> for <duration>` | `<level>` is 1-based (`PSTDR-E011`); `<effect>` is checked against vanilla spec (`PSTDR-E013`). |
+| **Apply Effect** | `apply <effect> <level> to <target> for <duration>` / `apply effect(<id>, <lvl>) to <target> for <dur>` | `<level>` is 1-based (`PSTDR-E011`); static `<effect>` checked via `E013`, `effect(...)` accepts dynamic expressions *(Wave 4)*. |
+| **Audio** *(Wave 4)* | `play sound\|custom_sound <id> at <target> [volume <v>] [pitch <p>]` | Spatial `playSound` on target dimension; `custom_sound` skips `E013` and warns (`E017`) if absent from `RP/sounds/sound_definitions.json`. |
+| **Launch & Dash** *(Wave 4)* | `launch <proj_id> from <caster> speed <v>` / `dash <target> forward <h> [up <v>]` | Spawns & shoots projectile / profile-aware horizontal+vertical `applyKnockback` (`2.x` VectorXZ vs `1.x` 4-arg). |
+| **Dynamic Timers** *(Wave 4)* | `after (<expr>) { ... }` / `timeline { <dur_or_expr>: { ... } ... }` | Expression-driven `system.runTimeout` delays and staggered multi-phase skill timelines. |
 | **Send Message** | `send <message> to <target>` | Emits `<target>.sendMessage(<message>)`. |
 | **Spawn Particle** | `spawn particle <id> at <entity_or_loc> [in <dimension>]` | Emits `<dim>.spawnParticle(<id>, <loc>)`. Accepts an entity (`target`), `.location`, or `{ x = 0, y = 64, z = 0 }`. |
 | **Run Command** *(Wave 3A)* | `command [on <target>] <cmd_expr>` | Emits `.runCommand(<cmd>)` (`2.x`) or `.runCommandAsync(<cmd>)` (`1.x` LTS); defaults to overworld. |
@@ -234,6 +240,9 @@ every 5s {
 | `hp` | `getComponent("minecraft:health")?.currentValue` |
 | `max_hp` | `getComponent("minecraft:health")?.effectiveMax` |
 | `holding` / `mainhand` | `getComponent("minecraft:equippable")?.getEquipment(EquipmentSlot.Mainhand)` |
+| `armor.helmet` / `.chestplate` / `.leggings` / `.boots` *(Wave 4)* | `(getComponent("minecraft:equippable")?.getEquipment(EquipmentSlot.Head\|Chest\|Legs\|Feet)?.typeId ?? "")` |
+| `offhand` *(Wave 4)* | `(getComponent("minecraft:equippable")?.getEquipment(EquipmentSlot.Offhand)?.typeId ?? "")` (or `.offhand.id`) |
+| `equipment(slot)` *(Wave 4)* | `getComponent("minecraft:equippable")?.getEquipment(EquipmentSlot.<Slot>)` (returns `ItemStack`) |
 
 ### ItemStack Properties (after `.mainhand` / `.holding`)
 

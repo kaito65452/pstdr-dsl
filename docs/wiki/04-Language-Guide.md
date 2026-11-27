@@ -9,7 +9,8 @@ bind_target("<relative_bp_json_path>")
 ```
 
 - `@addon(...)` sets the target Bedrock version and `@minecraft/server` API version (optional; defaults to `26.60` / `2.11.0`; can also be set workspace-wide in `pstdr.toml`). Only one `@addon` directive is allowed per file.
-- `bind_target(...)` links a `BP/items/*.json` or `BP/blocks/*.json` file so `pstdr-c` wires custom components and validates the JSON `"identifier"`.
+- `bind_target(...)` links one or more `BP/items/*.json` or `BP/blocks/*.json` files so `pstdr-c` wires custom components and validates each JSON `"identifier"` independently (deduplicating merged callbacks per `pstdr:<slug>`).
+- Unquoted namespaced IDs with digit-prefixed slugs (e.g. `bl:1pctgluttony`, `fw:3d_blade`) are supported directly alongside quoted `"..."` strings.
 
 ### Multi-Target `ApiProfile` (`Modern 2.x` vs `Legacy 1.x LTS`)
 
@@ -36,12 +37,14 @@ on join of player {
 
 ---
 
-## 2. Variables and Persistent State
+## 2. Variables, `table` Configs, Modules & Persistent State
 
 ### Syntax
-- `const <name> = <expr>` — Immutable binding.
+- `[export] table <NAME> = { ... }` *(Wave 4)* — Immutable lookup table / object literal (valid at top level and inside blocks; supports string, identifier, numeric, and namespaced keys).
+- `[export] const <name> = <expr>` — Immutable binding.
 - `mut <name> = <expr>` — Mutable binding (supports `=`, `+=`, `-=`, `*=`, `/=`).
-- `state <name>[<owner>] = <default_expr>` — Per-entity Dynamic Property (`pstdr:<name>`).
+- `[export] state <name>[<owner>] = <default_expr>` — Per-entity Dynamic Property (`pstdr:<name>`).
+- `import { sym1, sym2 } from "./path"` *(Wave 4)* — Imports exported `table`, `const`, `func`, or `state` bindings from another `.pstdr` module (circular imports emit `PSTDR-E016`; missing files emit `PSTDR-E007`).
 
 ### Example
 ```pstdr
@@ -142,11 +145,15 @@ world.afterEvents.playerSpawn.subscribe((ev) => {
 
 ---
 
-## 5. Operators and Predicates
+## 5. Operators, Predicates & Spatial Queries
 
 - **Logical:** `and` (`&&`), `or` (`||`), `not` (`!`)
 - **Null-safety & Ternary:** `?.` (optional chaining), `??` (nullish coalescing), `cond ? a : b`
-- **Membership & Proximity:** `x in container`, `a within b` (checks Euclidean distance `<= 5` blocks)
+- **Membership & Proximity:** `x in container`, `a within b` (`<= 5` blocks), dynamic `a within <r_expr> of b` (capped at `64b`, cross-dimension safe) *(Wave 4)*
+- **Spatial Entity Queries *(Wave 4)*:**
+  - `raycast entities from <origin> range <r> [pierce <count>] [step <s>]`
+  - `entities in cone(<origin>, radius: <r>, angle: <deg>)`
+  - `entities within <r> of <origin>`
 - **Entity Predicates (`is` / `is not`):** `sneaking`, `sprinting`, `swimming`, `flying`, `sleeping`, `on_ground` (`on ground`), `in_water` (`in water`), `holding <item_id>`
 
 ### Example
@@ -184,10 +191,10 @@ world.afterEvents.entityHitEntity.subscribe((ev) => {
 
 ---
 
-## 6. Functions (`func`) and Raw JS Escape Hatch (`unsafe`)
+## 6. Functions (`[export] func`) and Raw JS Escape Hatch (`unsafe`)
 
-- `func name(p1, p2) { ... }` declares a validated `.pstdr` function.
-- `unsafe name(p1, p2) { ... }` or `unsafe const/mut/var/let x = ...;` isolates raw JavaScript/TypeScript at the top level. `unsafe` cannot be used inside blocks or as an expression (`PSTDR-E006`).
+- `[export] func name(p1 [: Entity|Player], p2) { ... }` declares a validated `.pstdr` function. Entity component property rewrites (`.hp`, `.armor.*`, `.offhand`, `.is_sneaking`, etc.) are strictly scoped to Entity/Player bindings (`player`, `target`, entity loop vars, `: Entity`/`: Player` params, or call-site entity args) — plain objects and `table` lookups are never rewritten.
+- `unsafe name(p1, p2) { ... }` or `unsafe const/mut/var/let x = ...;` isolates raw JavaScript/TypeScript at the top level (required `@minecraft/server` imports are automatically emitted into `_shared/*.shared.js`). `unsafe` cannot be used inside blocks or as an expression (`PSTDR-E006`).
 
 > **What `unsafe` bypasses:** Code inside an `unsafe` declaration is emitted verbatim as raw JavaScript/TypeScript, intentionally bypassing `.pstdr` static checks such as vanilla effect/sound ID validation (`PSTDR-E013`) and automatic `beforeEvents` `system.run(...)` wrapping. Keep `unsafe` helpers small, single-purpose, and declared at the top level so the rest of your add-on stays protected by safe-mode guarantees.
 
@@ -257,9 +264,9 @@ on join of player {
 
 Using the following keywords or operators outside `unsafe` triggers **`PSTDR-E001`**:
 
-`class`, `extends`, `super`, `new`, `this`, `constructor`, `var`, `let`, `function`, `nil`, `then`, `end`, `import`, `export`, `require`, `eval`, `~=`, `..`
+`class`, `extends`, `super`, `new`, `this`, `constructor`, `var`, `let`, `function`, `nil`, `then`, `end`, `require`, `eval`, `~=`, `..`
 
-Single-quoted (`'...'`) and backtick (`` `...` ``) strings are also restricted to `unsafe` blocks (`PSTDR-E016`).
+Single-quoted (`'...'`) and backtick (`` `...` ``) strings are also restricted to `unsafe` blocks (`PSTDR-E016`). (`import { ... } from "..."`, `export`, and `table` are first-class `.pstdr` module syntax.)
 
 ---
 

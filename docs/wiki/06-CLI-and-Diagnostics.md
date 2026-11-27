@@ -25,12 +25,18 @@
 
 ## Asset Guard (`PSTDR-E017`)
 
-During `check`, `convert --workspace`, and `audit --workspace`, `pstdr-c` validates texture and function assets:
+During `check`, `convert --workspace`, and `audit --workspace`, `pstdr-c` uses a single cached `WorkspaceAssetIndex` to validate textures, functions, sounds, and Bedrock `26.60` JSON schemas:
 - Inspects `minecraft:icon` in `BP/items/*.json` and `minecraft:material_instances` in `BP/blocks/*.json`:
   - Rejects forbidden aliases containing `/`, `\`, `:`, or file extensions (`.png`, `.tga`, `.jpg`).
   - Allows valid vanilla texture aliases (e.g. `"blaze_rod"`, `"snowball"`, `"stone"`) without requiring `RP/`.
   - If a custom alias is used, verifies that it is registered in `RP/textures/item_texture.json` or `terrain_texture.json` and that the physical image file exists under `RP/`.
 - Validates static `run_fn` paths against `BP/functions/<path>.mcfunction` and inline `mcfunction "<path>" { ... }` declarations.
+- Emits a warning (`PSTDR-E017`) when `play custom_sound` references a sound absent from `RP/sounds/sound_definitions.json`.
+- **Bedrock `26.60` Audit Schema Gates (`audit --workspace` / `build --workspace`):**
+  - Rejects numeric-only item ID suffixes (`bl:1`) in `BP/items/*.json`.
+  - Validates `minecraft:enchantable.slot` against Bedrock's exact enum (e.g. `armor_torso`, rejecting `armor_chest` / `chestplate`).
+  - Rejects `BP/recipes/*.json` with `format_version >= 1.20.10` missing the required `unlock` field.
+  - Rejects non-existent slot render controllers (`controller.render.armor.helmet/chestplate/leggings/boots` -> `controller.render.armor`) in `RP/attachables/*.json`.
 
 To disable texture Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` (default: `true`).
 
@@ -54,11 +60,11 @@ To disable texture Asset Guard in `pstdr.toml`, set `strict_asset_refs = false` 
 | **`PSTDR-E010`** | `every` interval `< 50ms` (`1` tick). | Increase interval to at least `50ms` or `1s`. |
 | **`PSTDR-E011`** | Status effect level `< 1`. | Use 1-based levels starting at `1`. |
 | **`PSTDR-E012`** | Unclosed `{` brace in block, object, interpolation, or `unsafe`. | Add the matching closing `}`. |
-| **`PSTDR-E013`** | Vanilla effect or sound ID not found in active spec. | Check spelling against `data/spec/bedrock_api_latest.json`. |
+| **`PSTDR-E013`** | Vanilla effect (`apply`) or `play sound` / `play_sound` ID not found in active spec (use `apply effect(...)` or `play custom_sound` for dynamic/RP IDs). | Check spelling against `data/spec/bedrock_api_latest.json`. |
 | **`PSTDR-E014`** | Workspace not detected (`BP/` and `pstdr.toml` missing). | Run in project root, run `pstdr-c init`, or use `convert --from ... to ...`. |
 | **`PSTDR-E015`** | Audit Gate failed: invalid `min_engine_version`, BP/RP UUID collision, or stale `BP/manifest.json` `@minecraft/server` mismatch. | Run `pstdr-c build --workspace`, use `[1, 26, 60]` / `[1, 21, 50]` (or `"1.26.60"` for v3), and unique BP/RP UUIDs. |
 | **`PSTDR-E016`** | Syntax or API error (unexpected token, helper arity, unknown `world.*`/`system.*`, `< 1.15.0` API, `on cmd` on `1.x`, `runCommandAsync` on `2.x`, non-namespaced `on cmd`/`on script_event` ID). | Check the highlighted line, fix grammar/helper arity, or update `@addon(api = "...")` to a supported profile. |
-| **`PSTDR-E017`** | Invalid texture alias, missing RP registry/image/UI icon file, or missing `.mcfunction` target for `run_fn`. | Use a valid vanilla alias, register the texture in `RP/`, or define the `.mcfunction` file / inline `mcfunction` block. |
+| **`PSTDR-E017`** | Invalid texture alias, missing RP registry/image/UI icon file, missing `.mcfunction`, missing `custom_sound` definition, or Bedrock `26.60` JSON schema gate failure (`BP/items`, `BP/recipes`, `RP/attachables`). | Use a valid vanilla alias, fix the asset/schema field as suggested, register textures/sounds in `RP/`, or define the `.mcfunction`. |
 | **`PSTDR-E018`** | Beta-only `@minecraft/server` API (such as `on chat` / `chatSend` on `2.x`) used while targeting a stable API version. | Use `on cmd` (Stable `2.x`), set `@addon(target = "26.60", api = "2.11.0-beta")` (+ Beta APIs), or target Legacy `1.x` LTS (`api = "1.16.0"`). |
 
 ---
